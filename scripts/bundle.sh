@@ -30,15 +30,29 @@ for bundle in "$BIN"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
 done
 
-IDENTITY="${MMJ_SIGN_IDENTITY:-MailMateJ Signing}"
-if ! security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
-  [ -n "${MMJ_SIGN_IDENTITY:-}" ] && { echo "Signing identity \"$IDENTITY\" not found" >&2; exit 1; }
-  IDENTITY="-"
+# Signing identity, best first:
+#   1. MMJ_SIGN_IDENTITY if set (name or SHA-1 hash).
+#   2. An "Apple Development" certificate (free Apple ID in Xcode): has a Team ID, so keychain access
+#      survives rebuilds with no prompt.
+#   3. The self-signed "MailMateJ Signing" certificate: stable, but the keychain asks once per build.
+#   4. Ad hoc.
+if [ -n "${MMJ_SIGN_IDENTITY:-}" ]; then
+  IDENTITY="$MMJ_SIGN_IDENTITY"
+else
+  IDENTITY="$(security find-identity -v -p codesigning | awk '/"Apple Development:/ { print $2; exit }')"
+  if [ -z "$IDENTITY" ] && security find-identity -p codesigning | grep -q '"MailMateJ Signing"'; then
+    IDENTITY="MailMateJ Signing"
+  fi
+  IDENTITY="${IDENTITY:--}"
 fi
 codesign --force --deep --sign "$IDENTITY" "$APP"
 touch "$APP"  # Make Finder/Dock pick up icon changes.
+TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+AUTHORITY="$(codesign -dv --verbose=2 "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
 if [ "$IDENTITY" = "-" ]; then
   echo "Built $APP ($CONFIG, ad-hoc signed: keychain will ask again after each rebuild; see README)"
+elif [ "$TEAM" != "not set" ] && [ -n "$TEAM" ]; then
+  echo "Built $APP ($CONFIG, signed by \"$AUTHORITY\", Team ID $TEAM)"
 else
-  echo "Built $APP ($CONFIG, signed with \"$IDENTITY\")"
+  echo "Built $APP ($CONFIG, signed with \"${AUTHORITY:-$IDENTITY}\", no Team ID: keychain asks once per build)"
 fi

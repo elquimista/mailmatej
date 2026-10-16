@@ -32,12 +32,17 @@ The two builds are separate apps: different bundle IDs, icons (a tilted postage 
 
 ### Keychain prompts after rebuilding
 
-Ad-hoc signed apps are identified by a hash of their exact binary, so after every rebuild macOS asks again for keychain access. To fix this, create a signing certificate once. It's free and needs no Apple account:
+macOS ties keychain access to an app's Team ID. Without one, every new build counts as a new app, and the keychain asks for your password once per build. `scripts/bundle.sh` signs with the best identity it finds:
 
-1. Open **Keychain Access** and choose **Keychain Access → Certificate Assistant → Create a Certificate…**
-2. Set Name to `MailMateJ Signing`, Identity Type to **Self Signed Root**, and Certificate Type to **Code Signing**. Click **Create**.
-3. Rebuild with `scripts/bundle.sh`. It picks up the certificate automatically.
-4. On the next launch, click **Always Allow** once. Later rebuilds keep that permission.
+1. **Apple Development certificate (recommended, free).** It needs a free Apple ID in Xcode and no paid membership. It gives the app a Team ID, so after one last "Always Allow", rebuilds no longer prompt.
+   1. Install Xcode from the Mac App Store and open it once.
+   2. In Xcode, go to **Settings → Accounts**, click **+**, choose **Apple ID** and sign in. This creates a "Personal Team".
+   3. Select the team and click **Manage Certificates…**. Then click **+** and choose **Apple Development**.
+   4. Run `scripts/bundle.sh`. It should report `Team ID …`.
+2. **Self-signed "MailMateJ Signing" certificate.** It's stable, but the keychain still asks once per build.
+3. **Ad hoc**, used when no certificate is found.
+
+`MMJ_SIGN_IDENTITY` overrides the choice. Signing with an Apple Development certificate doesn't change how friends open the app: they still need "Open Anyway".
 
 ### Giving it to friends
 
