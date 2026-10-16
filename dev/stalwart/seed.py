@@ -248,6 +248,65 @@ def rich(name):
     print(f"  {name}: imported {import_batch(auth, account, items)} rich messages")
 
 
+def attachments(name):
+    """A message with file attachments next to an embedded image, for the attachment row."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    me = f"{name.capitalize()} <{name}@{DOMAIN}>"
+    now = datetime.now(timezone.utc)
+    logo = base64.encodebytes(png(120, 36, (200, 60, 40))).decode()
+    chart = base64.encodebytes(png(400, 240, (40, 160, 90))).decode()
+    csv = base64.encodebytes(b"month,revenue\nJuly,1200\nAugust,1350\nSeptember,1610\n").decode()
+    notes = base64.encodebytes(("Meeting notes\n\n" + "Discussed the Q3 numbers.\n" * 40).encode()).decode()
+    raw = "\r\n".join([
+        "From: Ada Lovelace <ada@analytical.example>", f"To: {me}", "Subject: Q3 numbers with attachments",
+        f"Date: {format_datetime(now)}", f"Message-ID: {make_msgid(domain='seed.mmj.test')}",
+        "MIME-Version: 1.0", 'Content-Type: multipart/mixed; boundary="mix"', "",
+        "--mix", 'Content-Type: multipart/related; boundary="rel"', "",
+        "--rel", "Content-Type: text/html; charset=utf-8", "",
+        '<p>Hi,</p><p>The Q3 numbers are attached, plus the chart and my notes.</p>'
+        '<img src="cid:sig-logo@analytical.example" alt="Analytical logo"><p>Ada</p>',
+        "--rel", "Content-Type: image/png; name=logo.png", "Content-Transfer-Encoding: base64",
+        "Content-ID: <sig-logo@analytical.example>", "Content-Disposition: inline; filename=logo.png", "", logo,
+        "--rel--",
+        "--mix", 'Content-Type: text/csv; name="Q3 revenue.csv"', "Content-Transfer-Encoding: base64",
+        'Content-Disposition: attachment; filename="Q3 revenue.csv"', "", csv,
+        "--mix", 'Content-Type: image/png; name="Revenue chart.png"', "Content-Transfer-Encoding: base64",
+        'Content-Disposition: attachment; filename="Revenue chart.png"', "", chart,
+        "--mix", 'Content-Type: text/plain; name="Meeting notes.txt"', "Content-Transfer-Encoding: base64",
+        'Content-Disposition: attachment; filename="Meeting notes.txt"', "", notes,
+        "--mix--", ""])
+    print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} attachment message")
+
+
+def invite(name):
+    """An interview invite as recruiters send them: text, HTML and an unnamed text/calendar part side by
+    side, plus a named .docx attachment."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    me = f"{name}@{DOMAIN}"
+    now = datetime.now(timezone.utc)
+    ics = "\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//MailMateJ seed//EN", "METHOD:REQUEST", "BEGIN:VEVENT",
+        f"UID:{make_msgid(domain='seed.mmj.test')[1:-1]}", "DTSTAMP:20261014T160000Z",
+        "DTSTART:20261020T150000Z", "DTEND:20261020T153000Z", "SUMMARY:Interview", "END:VEVENT", "END:VCALENDAR"])
+    docx = base64.encodebytes(b"PK\x03\x04 not really a docx, just bytes for the seed").decode()
+    raw = "\r\n".join([
+        "From: Kim Recruiter <kim.recruiter@staffing.example>", f"To: {me} <{me}>",
+        "Subject: Interview invite with calendar", f"Date: {format_datetime(now)}",
+        f"Message-ID: {make_msgid(domain='seed.mmj.test')}", "MIME-Version: 1.0",
+        'Content-Type: multipart/mixed; boundary="mix"', "",
+        "--mix", 'Content-Type: multipart/alternative; boundary="alt"', "",
+        "--alt", "Content-Type: text/plain; charset=utf-8", "", "Please find the interview details attached.",
+        "--alt", "Content-Type: text/html; charset=utf-8", "", "<p>Please find the interview details attached.</p>",
+        "--alt", 'Content-Type: text/calendar; charset=utf-8; method=REQUEST', "", ics,
+        "--alt--",
+        "--mix", 'Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document; name="Resume.docx"',
+        "Content-Transfer-Encoding: base64", 'Content-Disposition: attachment; filename="Resume.docx"', "", docx,
+        "--mix--", ""])
+    print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} invite message")
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -266,12 +325,18 @@ def main():
     p.add_argument("--messages", type=int, default=300)
     p.add_argument("--live", metavar="USER")
     p.add_argument("--rich", metavar="USER")
+    p.add_argument("--attachments", metavar="USER")
+    p.add_argument("--invite", metavar="USER")
     args = p.parse_args()
     random.seed(42)
     if args.live:
         return live(args.live)
     if args.rich:
         return rich(args.rich)
+    if args.attachments:
+        return attachments(args.attachments)
+    if args.invite:
+        return invite(args.invite)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)

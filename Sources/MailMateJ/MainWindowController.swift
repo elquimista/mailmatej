@@ -306,6 +306,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         }
 
         /// Deletes the displayed message's .eml, then fetches it through the Show in Finder path.
+        func debugCheckAttachments() async { await messageView.debugCheckAttachments() }
+
         func debugCheckRawMessage() async {
             guard let id = messageView.displayedMessageID, let detail = try? model.store.detail(id: id) else {
                 return NSLog("MMJ raw: no message displayed")

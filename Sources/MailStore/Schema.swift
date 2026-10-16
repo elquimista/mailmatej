@@ -180,6 +180,21 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v4-part-position") { db in
+            // The part's place in the message, so attachments list in the sender's order.
+            try db.execute(sql: "ALTER TABLE message_part ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        }
+
+        m.registerMigration("v5-unnamed-attachments") { db in
+            // Unnamed attachments (e.g. calendar invites) weren't kept before. Refetch the bodies and part
+            // lists of messages with attachments; the downloader skips .eml files already on disk.
+            try db.execute(sql: """
+                DELETE FROM message_body WHERE messageId IN (SELECT id FROM message WHERE hasAttachment);
+                DELETE FROM message_part WHERE messageId IN (SELECT id FROM message WHERE hasAttachment);
+                UPDATE message SET downloadState = 0 WHERE hasAttachment;
+                """)
+        }
+
         return m
     }
 }

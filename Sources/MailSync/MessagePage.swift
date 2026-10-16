@@ -25,6 +25,40 @@ public enum MessagePage {
         }
     }
 
+    /// A file attached to the message, shown in the attachment row.
+    public struct Attachment: Sendable {
+        public var name: String
+        public var size: String
+        /// A `data:` URL of the file type's icon.
+        public var icon: String
+
+        public init(name: String, size: String, icon: String) {
+            self.name = name
+            self.size = size
+            self.icon = icon
+        }
+    }
+
+    /// A round button at the end of each attachment row (Quick Look, Save).
+    public struct AttachmentButton: Sendable {
+        /// Reported by the hit test as `<token>:<index>:<action>`.
+        public var action: String
+        public var title: String
+        /// A `data:` URL of the 20 px button image.
+        public var icon: String
+        /// What the button shows while ⌥ is held (the app switches it), if it does something else then.
+        public var optionTitle: String?
+        public var optionIcon: String?
+
+        public init(action: String, title: String, icon: String, optionTitle: String? = nil, optionIcon: String? = nil) {
+            self.action = action
+            self.title = title
+            self.icon = icon
+            self.optionTitle = optionTitle
+            self.optionIcon = optionIcon
+        }
+    }
+
     public struct Bar: Sendable {
         public var remote: Int
         public var strict: Int
@@ -46,7 +80,8 @@ public enum MessagePage {
     ///   - remote: whether https resources may load (only after the user allowed it).
     ///   - token: a random string identifying this page's action links.
     public static func html(
-        headers: [HeaderField], bar: Bar?, content: String, plain: Bool, remote: Bool, token: String
+        headers: [HeaderField], attachments: [Attachment] = [], attachmentButtons: [AttachmentButton] = [], bar: Bar?,
+        content: String, plain: Bool, remote: Bool, token: String
     ) -> String {
         let https = remote ? " https:" : ""
         let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
@@ -56,10 +91,21 @@ public enum MessagePage {
             <!doctype html><html><head><meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="\(csp)">\(colorScheme)
             <style>\(helveticaFaces)\(chromeCSS)\(plain ? plainCSS : htmlCSS)</style>
-            </head><body><mmj-chrome>\(headersHTML(headers))\(bar.map { barHTML($0, token: token) } ?? "")</mmj-chrome>\
+            </head><body><mmj-chrome>\(headersHTML(headers))\(attachmentsHTML(attachments, buttons: attachmentButtons, token: token))\(bar.map { barHTML($0, token: token) } ?? "")</mmj-chrome>\
             <mmj-content>\(content)</mmj-content></body></html>
             """
     }
+
+    /// Script (run in the app's own script world) that shows the buttons' ⌥ variants while `option` is true.
+    public static let optionKeyScript = """
+        const chrome = document.querySelector('mmj-chrome');
+        if (chrome) {
+          if (option) { chrome.setAttribute('data-mmj-option', ''); } else { chrome.removeAttribute('data-mmj-option'); }
+          for (const b of chrome.querySelectorAll('mmj-btn[data-mmj-option-title]')) {
+            b.title = b.getAttribute(option ? 'data-mmj-option-title' : 'data-mmj-title');
+          }
+        }
+        """
 
     /// Parses a clicked `mmj-action:<token>/<action>` link; nil if it isn't one of this page's.
     public static func action(from url: URL, token: String) -> Action? {
@@ -81,6 +127,26 @@ public enum MessagePage {
             "<mmj-label>\(escape(f.label))</mmj-label><mmj-value\(f.emphasized ? " class=\"em\"" : "")>\(escape(f.value))</mmj-value>"
         }
         return rows.isEmpty ? "" : "<mmj-headers>" + rows.joined() + "</mmj-headers>"
+    }
+
+    /// Each item carries `data-mmj-att="<token>:<index>"`; the app finds the item under the pointer by
+    /// that attribute (in its own script world), so an email can't fake one without the page's token.
+    static func attachmentsHTML(_ attachments: [Attachment], buttons: [AttachmentButton], token: String) -> String {
+        guard !attachments.isEmpty else { return "" }
+        let buttonsHTML = buttons.map { b in
+            guard let optionTitle = b.optionTitle, let optionIcon = b.optionIcon else {
+                return "<mmj-btn data-mmj-btn=\"\(escape(b.action))\" title=\"\(escape(b.title))\"><img src=\"\(b.icon)\" alt=\"\"></mmj-btn>"
+            }
+            return "<mmj-btn data-mmj-btn=\"\(escape(b.action))\" title=\"\(escape(b.title))\" data-mmj-title=\"\(escape(b.title))\" "
+                + "data-mmj-option-title=\"\(escape(optionTitle))\"><img src=\"\(b.icon)\" alt=\"\">"
+                + "<img class=\"option\" src=\"\(optionIcon)\" alt=\"\"></mmj-btn>"
+        }.joined()
+        let items = attachments.enumerated().map { index, a in
+            "<mmj-att data-mmj-att=\"\(token):\(index)\"><img src=\"\(a.icon)\" alt=\"\">"
+                + "<mmj-name title=\"\(escape(a.name))\">\(escape(a.name))</mmj-name><mmj-size>\(escape(a.size))</mmj-size>"
+                + buttonsHTML + "</mmj-att>"
+        }
+        return "<mmj-attachments>" + items.joined() + "</mmj-attachments>"
     }
 
     static func barHTML(_ bar: Bar, token: String) -> String {
@@ -119,6 +185,27 @@ public enum MessagePage {
         mmj-value { display: block !important; color: #1D1D1F !important; overflow-wrap: anywhere !important;
           -webkit-user-select: text !important; user-select: text !important; }
         mmj-value.em { font-weight: normal !important; }  /* MailMate shows the subject in regular weight. */
+        /* As MailMate draws them (measured at 1x): a block darker than the headers with 5 px above and
+           below, 23 px rows, every second row in a lighter box with 4 px corners inset 4 px (alternating
+           rows, as in the lists); 20 px icon 15 px in, name, size, then 20 px round buttons 6 px apart,
+           18 px from the right. */
+        mmj-attachments { display: block !important; padding: 5px 4px !important; background: rgba(0,0,0,.05) !important; }
+        mmj-att { display: flex !important; align-items: center !important; height: 23px !important;
+          padding: 0 14px 0 11px !important; border-radius: 4px !important; cursor: default !important;
+          -webkit-user-select: none !important; user-select: none !important; }
+        mmj-att:nth-child(even) { background: rgba(0,0,0,.04) !important; }
+        mmj-att > img { width: 20px !important; height: 20px !important; flex: none !important; margin-right: 5px !important; }
+        mmj-name { display: block !important; flex: 1 !important; min-width: 0 !important; white-space: nowrap !important;
+          overflow: hidden !important; text-overflow: ellipsis !important; color: #1D1D1F !important; }
+        mmj-size { display: block !important; flex: none !important; margin: 0 8px 0 12px !important; color: #1D1D1F !important; }
+        mmj-btn { display: block !important; flex: none !important; width: 20px !important; height: 20px !important;
+          margin-left: 6px !important; }
+        mmj-btn:first-of-type { margin-left: 0 !important; }
+        mmj-btn img { display: block !important; width: 20px !important; height: 20px !important; }
+        mmj-btn img.option, mmj-chrome[data-mmj-option] mmj-btn[data-mmj-option-title] img:not(.option) { display: none !important; }
+        mmj-chrome[data-mmj-option] mmj-btn img.option { display: block !important; }
+        mmj-btn:hover img { filter: brightness(1.25) !important; }
+        mmj-btn:active img { filter: brightness(0.8) !important; }
         mmj-bar { display: flex !important; align-items: center !important; gap: 8px !important;
           padding: 5px 10px 5px 14px !important; background: #FF9F0A !important; color: #000 !important; }
         mmj-bar.loaded { background: #E8E8ED !important; color: #6E6E73 !important; }
@@ -134,6 +221,9 @@ public enum MessagePage {
           mmj-chrome { background: #2B2B2D !important; color: #E5E5E7 !important; border-bottom-color: #3D3D40 !important; }
           mmj-label { color: #98989D !important; }
           mmj-value { color: #F2F2F7 !important; }
+          mmj-attachments { background: rgba(0,0,0,.33) !important; }
+          mmj-att:nth-child(even) { background: rgba(255,255,255,.045) !important; }
+          mmj-name, mmj-size { color: #E3E3E3 !important; }
           mmj-bar.loaded { background: #3A3A3C !important; color: #AEAEB2 !important; }
         }
         """

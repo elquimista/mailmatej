@@ -84,6 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugFocusSidebar()
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENTS"] != nil {
+                    await windowController?.debugCheckAttachments()
+                    try? await Task.sleep(for: .seconds(2))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_RAW"] != nil {
                     await windowController?.debugCheckRawMessage()
                 }

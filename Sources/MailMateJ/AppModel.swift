@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import JMAPKit
 import MailStore
 import MailSync
@@ -163,6 +164,41 @@ final class AppModel {
             accountId: accountId, blobId: part.blobId, type: part.type, name: part.name ?? "part")
         try? store.blobs.writePart(data, accountId: accountId, blobId: part.blobId)
         return data
+    }
+
+    /// An attachment as a file named as the sender named it, in a per-message temporary folder, marked
+    /// as downloaded (quarantined) so Gatekeeper checks it before anything runs.
+    func attachmentFile(messageId: Int64, index: Int, accountId: String, part: MessagePart) async throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Attachments", isDirectory: true)
+            .appendingPathComponent("\(messageId)-\(index)", isDirectory: true)
+        let url = folder.appendingPathComponent(Self.fileName(for: part))
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        let data = try await partData(accountId: accountId, part: part)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        try Self.quarantine(url)
+        return url
+    }
+
+    /// A safe file name for a part: the sender's name without path separators, or "Attachment".
+    static func fileName(for part: MessagePart) -> String {
+        let name = (part.name ?? "").replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        if !name.isEmpty { return name }
+        let ext = UTType(mimeType: part.type)?.preferredFilenameExtension
+        return ext.map { "Attachment.\($0)" } ?? "Attachment"
+    }
+
+    /// Marks a file as downloaded from the internet by MailMateJ.
+    static func quarantine(_ url: URL) throws {
+        var values = URLResourceValues()
+        values.quarantineProperties = [
+            kLSQuarantineAgentNameKey as String: "MailMateJ",
+            kLSQuarantineTypeKey as String: kLSQuarantineTypeEmailAttachment as String,
+        ]
+        var url = url
+        try url.setResourceValues(values)
     }
 
     func fetchBody(messageId: Int64, accountId: String) async throws -> MessageBody {

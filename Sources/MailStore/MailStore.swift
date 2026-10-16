@@ -304,15 +304,28 @@ public final class MailStore: Sendable {
                 sql: "INSERT OR REPLACE INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, ?, ?)",
                 arguments: [messageId, body.html, body.text, Date().timeIntervalSince1970])
             try db.execute(sql: "DELETE FROM message_part WHERE messageId = ?", arguments: [messageId])
-            for p in parts {
+            for (position, p) in parts.enumerated() {
                 try db.execute(
-                    sql: "INSERT OR REPLACE INTO message_part (messageId, blobId, cid, type, name, size) VALUES (?, ?, ?, ?, ?, ?)",
-                    arguments: [messageId, p.blobId, p.cid.map(MessagePart.normalizeCID), p.type, p.name, p.size])
+                    sql: """
+                        INSERT OR REPLACE INTO message_part (messageId, blobId, cid, type, name, size, position)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [messageId, p.blobId, p.cid.map(MessagePart.normalizeCID), p.type, p.name, p.size, position])
             }
             if let text = body.text {
                 try db.execute(
                     sql: "UPDATE message_fts SET body = ? WHERE rowid = ?", arguments: [String(text.prefix(100_000)), messageId])
             }
+        }
+    }
+
+    /// A message's saved parts (embedded images and attachments), in the message's order.
+    public func parts(messageId: Int64) throws -> [MessagePart] {
+        try dbPool.read { db in
+            try Row.fetchAll(
+                db, sql: "SELECT blobId, cid, type, name, size FROM message_part WHERE messageId = ? ORDER BY position",
+                arguments: [messageId]
+            ).map { MessagePart(blobId: $0["blobId"], cid: $0["cid"], type: $0["type"], name: $0["name"], size: $0["size"]) }
         }
     }
 

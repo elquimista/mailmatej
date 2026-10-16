@@ -384,7 +384,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     /// The part of an image that has ink, in points, found at 4× so it survives Retina drawing.
-    private static func inkBounds(of image: NSImage, integral: Bool = true) -> NSRect {
+    static func inkBounds(of image: NSImage, integral: Bool = true) -> NSRect {
         let scale: CGFloat = 4
         let width = Int(image.size.width * scale), height = Int(image.size.height * scale)
         guard let rep = NSBitmapImageRep(
@@ -507,9 +507,10 @@ enum Formatters {
         return f
     }()
 
+    /// "October 14, 2026 at 4:16 PM", as MailMate shows it (no weekday).
     private static let full: DateFormatter = {
         let f = DateFormatter()
-        f.dateStyle = .full
+        f.dateStyle = .long
         f.timeStyle = .short
         return f
     }()
