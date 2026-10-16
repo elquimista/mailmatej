@@ -14,6 +14,8 @@ guard args.count >= 2 else {
 }
 let outDir = URL(fileURLWithPath: args[1], isDirectory: true)
 let isDev = args.contains("--dev")
+/// What sits on the stamp: "at" (default: a white @), "envelope", "j-navy", "j-white" or "mj".
+let glyph = args.first { $0.hasPrefix("--glyph=") }.map { String($0.dropFirst("--glyph=".count)) } ?? "at"
 
 func color(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
     NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: a)
@@ -56,7 +58,7 @@ func roundedFont(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
 
 /// Draws the icon on a 1024×1024 canvas.
 func drawIcon(in cg: CGContext) {
-    let stamp = NSRect(x: 181, y: 113, width: 662, height: 798)  // Rotated, ~83% of the tile tall
+    let stamp = NSRect(x: 164, y: 93, width: 695, height: 838)  // Rotated, ~88% of the tile tall
 
     // Rotate around the center (opposite tilt to MailMate's).
     cg.saveGState()
@@ -70,13 +72,13 @@ func drawIcon(in cg: CGContext) {
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
     NSGradient(starting: .white, ending: color(232, 236, 242))!.draw(in: stamp, angle: -90)
     cg.setBlendMode(.clear)
-    perforations(stamp, radius: 26, spacing: 69).fill()
+    perforations(stamp, radius: 27, spacing: 72).fill()
     cg.setBlendMode(.normal)
     cg.endTransparencyLayer()
     cg.restoreGState()
 
     // Picture panel.
-    let panel = stamp.insetBy(dx: 77, dy: 79)
+    let panel = stamp.insetBy(dx: 118, dy: 120)  // White border: ~90 px inside the perforations
     cg.saveGState()
     NSBezierPath(rect: panel).addClip()
     NSGradient(colors: panelColors, atLocations: [0, 0.5, 1], colorSpace: .sRGB)!.draw(in: panel, angle: -90)
@@ -109,22 +111,12 @@ func drawIcon(in cg: CGContext) {
     frame.lineWidth = 3
     frame.stroke()
 
-    // The "J", embossed: a light offset copy under the ink.
-    let j = "J"
-    let font = roundedFont(500, .heavy)
-    let style = NSMutableParagraphStyle()
-    style.alignment = .center
-    let size = NSAttributedString(string: j, attributes: [.font: font]).size()
-    let jRect = NSRect(x: panel.minX, y: panel.midY - size.height / 2 + (isDev ? 40 : 6), width: panel.width, height: size.height)
-    NSAttributedString(string: j, attributes: [.font: font, .foregroundColor: NSColor.white.withAlphaComponent(0.45), .paragraphStyle: style])
-        .draw(in: jRect.offsetBy(dx: 0, dy: -7))
-    NSAttributedString(string: j, attributes: [.font: font, .foregroundColor: ink, .paragraphStyle: style])
-        .draw(in: jRect)
+    drawGlyph(in: panel, raise: isDev ? 40 : 6)
     cg.restoreGState()
 
     // Dev label: upright, high contrast, large enough to read in the Dock.
     if isDev {
-        let label = NSRect(x: 207, y: 104, width: 610, height: 231)
+        let label = NSRect(x: 192, y: 86, width: 640, height: 242)
         let pill = NSBezierPath(roundedRect: label, xRadius: 52, yRadius: 52)
         cg.saveGState()
         cg.setShadow(offset: CGSize(width: 0, height: -8), blur: 18, color: NSColor.black.withAlphaComponent(0.4).cgColor)
@@ -134,14 +126,79 @@ func drawIcon(in cg: CGContext) {
         NSColor.white.setStroke()
         pill.lineWidth = 14
         pill.stroke()
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
         let text = NSAttributedString(string: "DEV", attributes: [
-            .font: NSFont.systemFont(ofSize: 191, weight: .black),
+            .font: NSFont.systemFont(ofSize: 200, weight: .black),
             .foregroundColor: NSColor.white,
             .kern: 12,
             .paragraphStyle: style,
         ])
         let t = text.size()
         text.draw(in: NSRect(x: label.minX + 6, y: label.midY - t.height / 2, width: label.width, height: t.height))
+    }
+}
+
+/// Text centered in `rect`, optionally with a soft drop shadow.
+func drawText(_ text: String, font: NSFont, color: NSColor, in rect: NSRect, raise: CGFloat, shadow: Bool) {
+    let style = NSMutableParagraphStyle()
+    style.alignment = .center
+    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: style]
+    let size = NSAttributedString(string: text, attributes: attributes).size()
+    let box = NSRect(x: rect.minX, y: rect.midY - size.height / 2 + raise, width: rect.width, height: size.height)
+    NSGraphicsContext.saveGraphicsState()
+    if shadow {
+        let s = NSShadow()
+        s.shadowColor = NSColor(srgbRed: 0.03, green: 0.1, blue: 0.3, alpha: 0.45)
+        s.shadowOffset = NSSize(width: 0, height: -10)
+        s.shadowBlurRadius = 18
+        s.set()
+    }
+    NSAttributedString(string: text, attributes: attributes).draw(in: box)
+    NSGraphicsContext.restoreGraphicsState()
+}
+
+/// The symbol printed on the stamp.
+func drawGlyph(in panel: NSRect, raise: CGFloat) {
+    switch glyph {
+    case "j-white":
+        drawText("J", font: roundedFont(470, .heavy), color: .white, in: panel, raise: raise, shadow: true)
+    case "at":
+        drawText("@", font: roundedFont(400, .bold), color: .white, in: panel, raise: raise + 10, shadow: true)
+    case "mj":
+        drawText("MJ", font: roundedFont(250, .heavy), color: .white, in: panel, raise: raise, shadow: true)
+    case "j-navy":  // The embossed navy J.
+        drawText("J", font: roundedFont(470, .heavy), color: NSColor.white.withAlphaComponent(0.45),
+                 in: panel.offsetBy(dx: 0, dy: -7), raise: raise, shadow: false)
+        drawText("J", font: roundedFont(470, .heavy), color: ink, in: panel, raise: raise, shadow: false)
+    default:  // "envelope": an envelope sealed with a J.
+        let w = panel.width * 0.8, h = w * 0.66
+        let env = NSRect(x: panel.midX - w / 2, y: panel.midY - h / 2 + raise + 20, width: w, height: h)
+        let body = NSBezierPath(roundedRect: env, xRadius: 26, yRadius: 26)
+        NSGraphicsContext.saveGraphicsState()
+        let s = NSShadow()
+        s.shadowColor = NSColor(srgbRed: 0.03, green: 0.1, blue: 0.3, alpha: 0.45)
+        s.shadowOffset = NSSize(width: 0, height: -10)
+        s.shadowBlurRadius = 18
+        s.set()
+        NSColor.white.setFill()
+        body.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let flap = NSBezierPath()
+        flap.lineWidth = 16
+        flap.lineCapStyle = .round
+        flap.lineJoinStyle = .round
+        flap.move(to: NSPoint(x: env.minX + 18, y: env.maxY - 18))
+        flap.line(to: NSPoint(x: env.midX, y: env.midY - 10))
+        flap.line(to: NSPoint(x: env.maxX - 18, y: env.maxY - 18))
+        panelColors[0].withAlphaComponent(0.55).setStroke()
+        flap.stroke()
+        let r: CGFloat = 62
+        let seal = NSBezierPath(ovalIn: NSRect(x: env.midX - r, y: env.midY - 10 - r, width: r * 2, height: r * 2))
+        ink.setFill()
+        seal.fill()
+        drawText("J", font: roundedFont(92, .heavy), color: .white,
+                 in: NSRect(x: env.midX - r, y: env.midY - 10 - r, width: r * 2, height: r * 2), raise: 2, shadow: false)
     }
 }
 
