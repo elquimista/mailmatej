@@ -60,6 +60,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
+        // "Today" and "Yesterday" move on at midnight, even in a list left open for days.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(dayChanged), name: .NSCalendarDayChanged, object: nil)
         let table = tableView
         table.style = .fullWidth
         table.usesAlternatingRowBackgroundColors = true
@@ -251,7 +254,15 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .date:
             return dateCell(tableView, row.receivedAt, bold: !row.isSeen)
         case .source:
-            return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: false, secondary: true)
+            return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: !row.isSeen)
+        }
+    }
+
+    @objc private func dayChanged() {
+        DispatchQueue.main.async { [self] in
+            let column = tableView.column(withIdentifier: NSUserInterfaceItemIdentifier(Column.date.rawValue))
+            guard column >= 0, tableView.numberOfRows > 0 else { return }
+            tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: [column])
         }
     }
 
@@ -296,8 +307,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     // MARK: Cells
 
     private func textCell(
-        _ tableView: NSTableView, _ column: Column, _ text: String, bold: Bool, secondary: Bool = false,
-        monospacedDigits: Bool = false
+        _ tableView: NSTableView, _ column: Column, _ text: String, bold: Bool
     ) -> NSView {
         let id = NSUserInterfaceItemIdentifier("text")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
@@ -316,24 +326,22 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             ])
             return cell
         }()
-        cell.textField?.font = Self.font(bold: bold, monospacedDigits: monospacedDigits)
+        cell.textField?.font = Self.font(bold: bold)
         cell.textField?.stringValue = text
-        cell.textField?.textColor = secondary ? .secondaryLabelColor : .labelColor
         return cell
     }
 
-    private static func font(bold: Bool, monospacedDigits: Bool = false) -> NSFont {
-        let size = NSFont.systemFontSize
-        let weight: NSFont.Weight = bold ? .semibold : .regular
-        return monospacedDigits
-            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight) : NSFont.systemFont(ofSize: size, weight: weight)
+    /// Unread in Bold, read in Regular, with proportional digits, as MailMate draws its lists
+    /// (fitted by ink width at 1x: "Today" 36 vs 39 px, "12:33 PM" 54 px).
+    private static func font(bold: Bool) -> NSFont {
+        NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: bold ? .bold : .regular)
     }
 
     /// Date on the left, time right-aligned, as MailMate shows "12/31/89    6:59 PM".
     private func dateCell(_ tableView: NSTableView, _ date: Date, bold: Bool) -> NSView {
         let id = NSUserInterfaceItemIdentifier("date")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? DateCell ?? DateCell(identifier: id)
-        let font = Self.font(bold: bold, monospacedDigits: true)
+        let font = Self.font(bold: bold)
         cell.dateField.font = font
         cell.timeField.font = font
         cell.dateField.stringValue = Formatters.listDay(date)
@@ -409,10 +417,12 @@ enum Formatters {
         return f
     }()
 
+    /// "Today", "Yesterday", otherwise the short date.
     private static let day: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .short
         f.timeStyle = .none
+        f.doesRelativeDateFormatting = true
         return f
     }()
 
