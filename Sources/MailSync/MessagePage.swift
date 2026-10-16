@@ -111,14 +111,14 @@ public enum MessagePage {
     static let chromeCSS = """
 
         mmj-chrome { display: block !important; margin: 0 !important; padding: 0 !important; text-align: left !important;
-          font: 12px/1.35 -apple-system, "Helvetica Neue", sans-serif !important; letter-spacing: normal !important;
+          font: 13px/1.32 -apple-system, "Helvetica Neue", sans-serif !important; letter-spacing: normal !important;
           background: #F2F2F2 !important; color: #1D1D1F !important; border-bottom: 1px solid #D5D5D5 !important; }
         mmj-headers { display: grid !important; grid-template-columns: max-content 1fr !important;
-          column-gap: 8px !important; row-gap: 3px !important; padding: 10px 14px !important; }
+          column-gap: 8px !important; row-gap: 1px !important; padding: 8px 14px !important; }
         mmj-label { display: block !important; text-align: right !important; color: #86868B !important; }
         mmj-value { display: block !important; color: #1D1D1F !important; overflow-wrap: anywhere !important;
           -webkit-user-select: text !important; user-select: text !important; }
-        mmj-value.em { font-weight: 600 !important; font-size: 13px !important; }
+        mmj-value.em { font-weight: normal !important; }  /* MailMate shows the subject in regular weight. */
         mmj-bar { display: flex !important; align-items: center !important; gap: 8px !important;
           padding: 5px 10px 5px 14px !important; background: #FF9F0A !important; color: #000 !important; }
         mmj-bar.loaded { background: #E8E8ED !important; color: #6E6E73 !important; }

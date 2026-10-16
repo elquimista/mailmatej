@@ -34,7 +34,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             autosaveName: "MainMessageList")
         correspondence = MessageListViewController(
             store: model.store, columns: [.unread, .subject, .date, .source, .attachment],
-            autosaveName: "CorrespondenceList", widths: [.subject: 200, .date: 120, .source: 120])
+            autosaveName: "CorrespondenceList", widths: [.subject: 200, .date: 135, .source: 120])
         messageView = MessageViewController(model: model)
 
         let window = NSWindow(
@@ -42,7 +42,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "MailMateJ"
-        window.toolbarStyle = .unified
+        window.toolbarStyle = .expanded  // Title row above the toolbar, centered, as in MailMate.
         super.init(window: window)
         window.delegate = self
 
@@ -149,6 +149,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             guard let self else { return }
             messageView.show(messageID: id, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: id)
+            updateTitle()
         }
         list.onSortChange = { [weak self] _ in
             self?.reloadList(.sortChanged)
@@ -236,15 +237,24 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         updateTitle()
     }
 
+    /// "Subject — Mailbox (N messages)", as MailMate titles its window.
     private func updateTitle() {
         let count = list.ids.count
-        window?.title = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
+        let mailbox = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
+        let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
+        window?.title = subject.map { ($0.isEmpty ? "(no subject)" : $0) + " — " + mailbox } ?? mailbox
         let syncing = model.syncingCount
         window?.subtitle = syncing > 0 ? "Syncing \(syncing) account\(syncing == 1 ? "" : "s")…" : ""
     }
 
     #if DEBUG
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+
+        func debugFocusSidebar() {
+            NSApp.activate()
+            window?.makeKeyAndOrderFront(nil)
+            sidebar.debugFocus()
+        }
 
         func debugLoadRemote() { messageView.debugLoadRemote() }
 

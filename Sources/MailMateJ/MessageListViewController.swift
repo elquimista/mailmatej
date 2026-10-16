@@ -63,7 +63,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = true
-        table.rowHeight = 20
+        table.rowHeight = 17  // MailMate density: 13 pt text in 17 pt rows.
         table.intercellSpacing = NSSize(width: 6, height: 0)
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.gridStyleMask = []
@@ -230,7 +230,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .subject:
             return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: !row.isSeen)
         case .date:
-            return textCell(tableView, column, Formatters.listDate(row.receivedAt), bold: !row.isSeen, monospacedDigits: true)
+            return dateCell(tableView, row.receivedAt, bold: !row.isSeen)
         case .source:
             return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: false, secondary: true)
         }
@@ -281,13 +281,28 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             ])
             return cell
         }()
-        let size = NSFont.systemFontSize(for: .small) + 1
-        var font = NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
-        if monospacedDigits { font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: bold ? .semibold : .regular) }
-        cell.textField?.font = font
+        cell.textField?.font = Self.font(bold: bold, monospacedDigits: monospacedDigits)
         cell.textField?.stringValue = text
         cell.textField?.textColor = secondary ? .secondaryLabelColor : .labelColor
-        cell.textField?.alignment = column == .date ? .right : .natural
+        return cell
+    }
+
+    private static func font(bold: Bool, monospacedDigits: Bool = false) -> NSFont {
+        let size = NSFont.systemFontSize
+        let weight: NSFont.Weight = bold ? .semibold : .regular
+        return monospacedDigits
+            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight) : NSFont.systemFont(ofSize: size, weight: weight)
+    }
+
+    /// Date on the left, time right-aligned, as MailMate shows "12/31/89    6:59 PM".
+    private func dateCell(_ tableView: NSTableView, _ date: Date, bold: Bool) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("date")
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? DateCell ?? DateCell(identifier: id)
+        let font = Self.font(bold: bold, monospacedDigits: true)
+        cell.dateField.font = font
+        cell.timeField.font = font
+        cell.dateField.stringValue = Formatters.listDay(date)
+        cell.timeField.stringValue = Formatters.listTime(date)
         return cell
     }
 
@@ -324,13 +339,6 @@ enum Formatters {
         return f
     }()
 
-    private static let dateTime: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .short
-        f.timeStyle = .short
-        return f
-    }()
-
     private static let full: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .full
@@ -338,9 +346,51 @@ enum Formatters {
         return f
     }()
 
-    static func listDate(_ date: Date) -> String {
-        Calendar.current.isDateInToday(date) ? "Today " + time.string(from: date) : dateTime.string(from: date)
-    }
+    private static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .none
+        return f
+    }()
+
+    static func listDay(_ date: Date) -> String { day.string(from: date) }
+
+    static func listTime(_ date: Date) -> String { time.string(from: date) }
 
     static func fullDate(_ date: Date) -> String { full.string(from: date) }
+}
+
+/// Two labels in one cell: the date at the leading edge, the time at the trailing edge.
+final class DateCell: NSTableCellView {
+    let dateField = NSTextField(labelWithString: "")
+    let timeField = NSTextField(labelWithString: "")
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        timeField.alignment = .right
+        for field in [dateField, timeField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.lineBreakMode = .byClipping
+            addSubview(field)
+        }
+        textField = dateField  // Lets the table adjust colors for selected rows.
+        NSLayoutConstraint.activate([
+            dateField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            dateField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            timeField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            timeField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            timeField.leadingAnchor.constraint(greaterThanOrEqualTo: dateField.trailingAnchor, constant: 6),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            let color: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
+            dateField.textColor = color
+            timeField.textColor = color
+        }
+    }
 }

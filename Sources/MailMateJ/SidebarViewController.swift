@@ -53,7 +53,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.headerView = nil
         outline.style = .sourceList
         outline.floatsGroupRows = false
-        outline.rowSizeStyle = .default
+        outline.rowSizeStyle = .custom
+        outline.rowHeight = 23  // MailMate density (the source-list default is 28).
         outline.dataSource = self
         outline.delegate = self
         outline.autoresizesOutlineColumn = false
@@ -90,6 +91,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     #if DEBUG
+        func debugFocus() { view.window?.makeFirstResponder(outline) }
+
         /// Selects the item with `key` as a click would (fires `onSelect`).
         func debugSelect(key: String) {
             guard let node = find(key, in: roots) else { return }
@@ -240,6 +243,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return cell
     }
 
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        (item as? SidebarNode)?.kind == .header ? nil : SidebarRowView()
+    }
+
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelection, let node = selectedNode else { return }
         onSelect?(node)
@@ -348,6 +355,9 @@ final class SidebarCell: NSTableCellView {
     }
 }
 
+/// An unread-count capsule matching MailMate's pixel for pixel (fitted against a MailMate screenshot):
+/// SF 11 pt Bold digits, an 18 pt capsule 12 pt wider than the digits, translucent white fill and
+/// translucent black digits, so it looks right on both the sidebar and the selection color.
 final class BadgeView: NSView {
     var count = 0 {
         didSet {
@@ -357,24 +367,47 @@ final class BadgeView: NSView {
         }
     }
 
+    private static let font = NSFont.systemFont(ofSize: 11, weight: .bold)
+    private static let fill = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.33) : NSColor(white: 0, alpha: 0.18)
+    }
+    private static let digits = NSColor(white: 0, alpha: 0.75)
+
     private var attributed: NSAttributedString {
-        NSAttributedString(string: count.formatted(), attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ])
+        NSAttributedString(string: String(count), attributes: [.font: Self.font, .foregroundColor: Self.digits])
     }
 
     override var intrinsicContentSize: NSSize {
-        let size = attributed.size()
-        return NSSize(width: max(20, ceil(size.width) + 12), height: 15)
+        NSSize(width: max(18, ceil(attributed.size().width) + 12), height: 18)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2)
-        NSColor.quaternaryLabelColor.setFill()
-        path.fill()
+        Self.fill.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2).fill()
         let text = attributed
         let size = text.size()
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+    }
+}
+
+/// MailMate's sidebar selection: indigo while the sidebar has focus, grey otherwise.
+final class SidebarRowView: NSTableRowView {
+    /// Sampled from MailMate: rgb(52, 43, 135).
+    private static let focused = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 52 / 255, green: 43 / 255, blue: 135 / 255, alpha: 1)
+            : NSColor(srgbRed: 88 / 255, green: 76 / 255, blue: 190 / 255, alpha: 1)
+    }
+    private static let unfocused = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.14) : NSColor(white: 0, alpha: 0.12)
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let rect = bounds.insetBy(dx: 10, dy: 0)
+        (isEmphasized ? Self.focused : Self.unfocused).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
     }
 }

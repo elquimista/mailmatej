@@ -71,6 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectSidebar(key: "unified.inbox")
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_FOCUS_SIDEBAR"] != nil {
+                    windowController?.debugFocusSidebar()
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SHEET"] != nil {
                     windowController?.addAccount(nil)
