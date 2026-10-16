@@ -1,0 +1,46 @@
+import Foundation
+import Testing
+
+@testable import MailSync
+
+@Suite struct MessagePageTests {
+    let headers = [
+        MessagePage.HeaderField(label: "From:", value: "Eve <eve@x.com>"),
+        MessagePage.HeaderField(label: "Subject:", value: "<b>Hi</b> & bye", emphasized: true),
+        MessagePage.HeaderField(label: "Cc:", value: ""),
+    ]
+
+    @Test func headersAreEscapedAndEmptyOnesSkipped() {
+        let page = MessagePage.html(headers: headers, bar: nil, content: "<p>x</p>", plain: false, remote: false, token: "T")
+        #expect(page.contains("<mmj-value>Eve &lt;eve@x.com&gt;</mmj-value>"))
+        #expect(page.contains(#"<mmj-value class="em">&lt;b&gt;Hi&lt;/b&gt; &amp; bye</mmj-value>"#))
+        #expect(!page.contains("Cc:"))
+        #expect(page.contains("<mmj-content><p>x</p></mmj-content>"))
+        #expect(page.contains("script-src 'none'"))
+        #expect(!page.contains("https:;"))  // no remote sources unless allowed
+    }
+
+    @Test func barOffersActionsOnlyWhenUseful() {
+        let blocked = MessagePage.barHTML(
+            MessagePage.Bar(remote: 5, strict: 2, loaded: false, canAlwaysLoad: true, allowedBy: []), token: "T")
+        #expect(blocked.contains("Blocked 5 remote resources · 2 tracker or insecure resources always blocked"))
+        #expect(blocked.contains(#"href="mmj-action:T/load""#))
+        #expect(blocked.contains(#"href="mmj-action:T/alwaysLoadMenu""#))
+
+        let onlyStrict = MessagePage.barHTML(
+            MessagePage.Bar(remote: 1, strict: 1, loaded: false, canAlwaysLoad: true, allowedBy: []), token: "T")
+        #expect(!onlyStrict.contains("<a "))
+
+        let loaded = MessagePage.barHTML(
+            MessagePage.Bar(remote: 3, strict: 0, loaded: true, canAlwaysLoad: true, allowedBy: ["@x.com"]), token: "T")
+        #expect(loaded.contains("Loaded 3 remote resources"))
+        #expect(loaded.contains("stopAlwaysLoading"))
+    }
+
+    @Test func actionLinksNeedThePageToken() {
+        #expect(MessagePage.action(from: URL(string: "mmj-action:T/load")!, token: "T") == .load)
+        #expect(MessagePage.action(from: URL(string: "mmj-action:OTHER/load")!, token: "T") == nil)
+        #expect(MessagePage.action(from: URL(string: "mmj-action:T/bogus")!, token: "T") == nil)
+        #expect(MessagePage.action(from: URL(string: "https://x.com/load")!, token: "T") == nil)
+    }
+}

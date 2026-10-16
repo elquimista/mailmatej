@@ -250,6 +250,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
         func debugRender(html: String) { messageView.debugRender(html: html) }
 
+        func debugScrollMessage(by points: CGFloat) { messageView.debugScrollContent(by: points) }
+
         func debugSnapshotWeb(to path: String) async { await messageView.debugSnapshotWeb(to: path) }
 
         func debugScrollList(by points: CGFloat) {

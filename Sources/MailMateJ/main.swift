@@ -56,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugLoadRemote()
                     try? await Task.sleep(for: .seconds(3))
                 }
+                if let points = Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL_MESSAGE"] ?? "") {
+                    windowController?.debugScrollMessage(by: points)
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 if let points = Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL"] ?? "") {
                     windowController?.debugScrollList(by: points)
                     try? await Task.sleep(for: .milliseconds(400))
