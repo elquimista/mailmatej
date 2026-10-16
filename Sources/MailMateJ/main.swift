@@ -45,6 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
+                if let row = Int(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_CORR_ROW"] ?? "") {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    windowController?.debugSelectCorrespondence(row: row)
+                    try? await Task.sleep(for: .milliseconds(600))
+                }
                 if let file = ProcessInfo.processInfo.environment["MMJ_RENDER_HTML_FILE"],
                     let html = try? String(contentsOfFile: file, encoding: .utf8)
                 {

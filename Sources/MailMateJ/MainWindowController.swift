@@ -23,7 +23,19 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private var correspondenceTask: Task<Void, Never>?
     /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
     /// mailbox restores it; a mailbox not visited yet this run opens scrolled to its newest message.
-    private var remembered: [MessageScope: (selection: [Int64], anchor: MessageListViewController.ScrollAnchor?)] = [:]
+    private var remembered: [MessageScope: SavedView] = [:]
+    /// A Correspondence selection waiting to be restored once that pane reloads for `mainID`.
+    private var pendingCorrespondence: (mainID: Int64, saved: SavedView)?
+
+    /// How a mailbox looked when the user left it: both lists' selections and scroll positions,
+    /// and the message open in the reader (which may come from the Correspondence pane).
+    private struct SavedView {
+        var selection: [Int64]
+        var anchor: MessageListViewController.ScrollAnchor?
+        var correspondenceSelection: [Int64]
+        var correspondenceAnchor: MessageListViewController.ScrollAnchor?
+        var displayed: Int64?
+    }
 
     private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged }
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
@@ -142,13 +154,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private func wireUp() {
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
-            remembered[self.scope] = (list.selectedIDs, list.scrollAnchor)
+            remembered[self.scope] = SavedView(
+                selection: list.selectedIDs, anchor: list.scrollAnchor,
+                correspondenceSelection: correspondence.selectedIDs, correspondenceAnchor: correspondence.scrollAnchor,
+                displayed: messageView.displayedMessageID)
             self.scope = scope
             self.scopeTitle = node.title
             self.reloadList(.scopeChanged)
         }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
+            pendingCorrespondence = nil  // A new main selection starts the Correspondence pane fresh.
             messageView.show(messageID: id, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: id)
             updateTitle()
@@ -158,7 +174,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         }
         correspondence.onSortChange = { [weak self] _ in
             guard let self else { return }
-            reloadCorrespondence(selecting: list.selectedID ?? correspondence.selectedID)
+            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
         }
         for messageList in [list, correspondence] {
             messageList.onShowInFinder = { [weak self] id in self?.model.showInFinder(messageId: id, window: self?.window) }
@@ -183,11 +199,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             }.value
             guard generation == loadGeneration else { return }
             let before = list.selectedIDs
+            var restoredDisplay: Int64?
 
             switch reason {
             case .scopeChanged:
                 if let saved = remembered[scope], saved.selection.contains(where: ids.contains) {
                     list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
+                    if let main = list.selectedID, !saved.correspondenceSelection.isEmpty {
+                        pendingCorrespondence = (main, saved)
+                        restoredDisplay = saved.displayed
+                    }
                 } else {
                     list.setIDs(ids, selecting: [], scroll: .toMessage(newest))
                 }
@@ -206,7 +227,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             lastNewestID = newest
 
             if list.selectedIDs != before || reason == .scopeChanged {
-                messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
+                messageView.show(messageID: restoredDisplay ?? list.selectedID, selectionCount: list.selectedIDs.count)
                 scheduleCorrespondenceUpdate(for: list.selectedID)
             }
             updateTitle()
@@ -218,11 +239,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         correspondenceTask = Task {
             try? await Task.sleep(for: .milliseconds(60))  // Keep arrow-key scrolling smooth.
             guard !Task.isCancelled else { return }
-            reloadCorrespondence(selecting: id)
+            reloadCorrespondence(for: id)
         }
     }
 
-    private func reloadCorrespondence(selecting id: Int64?) {
+    /// Reloads the Correspondence pane for the main list's message `id`. Normally that message is
+    /// selected there; a selection saved for the mailbox is restored instead, and with `keepSelection`
+    /// (new mail, re-sorting) whatever the user selected in the pane stays selected.
+    private func reloadCorrespondence(for id: Int64?, keepSelection: Bool = false) {
         guard let id, let email = try? model.store.correspondent(messageId: id, myAddresses: model.myAddresses) else {
             correspondent = nil
             correspondence.setIDs([])
@@ -230,14 +254,27 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         }
         correspondent = email
         let ids = (try? model.store.correspondenceIDs(email: email, sort: correspondence.sort)) ?? []
-        correspondence.setIDs(ids, selecting: [id], scroll: .toSelection)
+        if let pending = pendingCorrespondence, pending.mainID == id {
+            pendingCorrespondence = nil
+            let kept = pending.saved.correspondenceSelection.filter(ids.contains)
+            if !kept.isEmpty {
+                correspondence.setIDs(ids, selecting: kept, scroll: .restore(pending.saved.correspondenceAnchor))
+                return
+            }
+        }
+        if keepSelection {
+            let kept = correspondence.selectedIDs.filter(ids.contains)
+            correspondence.setIDs(ids, selecting: kept.isEmpty ? [id] : kept, scroll: .keepPosition)
+        } else {
+            correspondence.setIDs(ids, selecting: [id], scroll: .toSelection)
+        }
     }
 
     private func storeDidChange() {
         sidebar.reload()
         reloadList(.dataChanged)
         if list.selectedID != nil || correspondent != nil {
-            reloadCorrespondence(selecting: list.selectedID ?? correspondence.selectedID)
+            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
         }
     }
 
@@ -261,6 +298,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     #if DEBUG
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+
+        /// Selects a row of the Correspondence pane, as a click would.
+        func debugSelectCorrespondence(row: Int) {
+            guard row < correspondence.ids.count else { return }
+            correspondence.tableView.selectRowIndexes([row], byExtendingSelection: false)
+        }
 
         /// Deletes the displayed message's .eml, then fetches it through the Show in Finder path.
         func debugCheckRawMessage() async {
