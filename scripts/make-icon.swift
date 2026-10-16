@@ -56,7 +56,7 @@ func roundedFont(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
 
 /// Draws the icon on a 1024×1024 canvas.
 func drawIcon(in cg: CGContext) {
-    let stamp = NSRect(x: 197, y: 132, width: 630, height: 760)  // Rotated, ~824 tall: Apple's icon grid, like MailMate
+    let stamp = NSRect(x: 181, y: 113, width: 662, height: 798)  // Rotated, ~83% of the tile tall
 
     // Rotate around the center (opposite tilt to MailMate's).
     cg.saveGState()
@@ -70,13 +70,13 @@ func drawIcon(in cg: CGContext) {
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
     NSGradient(starting: .white, ending: color(232, 236, 242))!.draw(in: stamp, angle: -90)
     cg.setBlendMode(.clear)
-    perforations(stamp, radius: 25, spacing: 66).fill()
+    perforations(stamp, radius: 26, spacing: 69).fill()
     cg.setBlendMode(.normal)
     cg.endTransparencyLayer()
     cg.restoreGState()
 
     // Picture panel.
-    let panel = stamp.insetBy(dx: 73, dy: 75)
+    let panel = stamp.insetBy(dx: 77, dy: 79)
     cg.saveGState()
     NSBezierPath(rect: panel).addClip()
     NSGradient(colors: panelColors, atLocations: [0, 0.5, 1], colorSpace: .sRGB)!.draw(in: panel, angle: -90)
@@ -111,7 +111,7 @@ func drawIcon(in cg: CGContext) {
 
     // The "J", embossed: a light offset copy under the ink.
     let j = "J"
-    let font = roundedFont(476, .heavy)
+    let font = roundedFont(500, .heavy)
     let style = NSMutableParagraphStyle()
     style.alignment = .center
     let size = NSAttributedString(string: j, attributes: [.font: font]).size()
@@ -124,7 +124,7 @@ func drawIcon(in cg: CGContext) {
 
     // Dev label: upright, high contrast, large enough to read in the Dock.
     if isDev {
-        let label = NSRect(x: 222, y: 120, width: 580, height: 220)
+        let label = NSRect(x: 207, y: 104, width: 610, height: 231)
         let pill = NSBezierPath(roundedRect: label, xRadius: 52, yRadius: 52)
         cg.saveGState()
         cg.setShadow(offset: CGSize(width: 0, height: -8), blur: 18, color: NSColor.black.withAlphaComponent(0.4).cgColor)
@@ -135,7 +135,7 @@ func drawIcon(in cg: CGContext) {
         pill.lineWidth = 14
         pill.stroke()
         let text = NSAttributedString(string: "DEV", attributes: [
-            .font: NSFont.systemFont(ofSize: 182, weight: .black),
+            .font: NSFont.systemFont(ofSize: 191, weight: .black),
             .foregroundColor: NSColor.white,
             .kern: 12,
             .paragraphStyle: style,
