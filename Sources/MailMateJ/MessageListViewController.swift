@@ -239,11 +239,11 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
         switch column {
         case .unread:
-            return iconCell(tableView, column, symbol: row.isSeen ? nil : "circle.fill", tint: .controlAccentColor, size: 7)
+            return iconCell(tableView, column, image: row.isSeen ? nil : Self.unreadDot, tint: .controlAccentColor)
         case .flag:
-            return iconCell(tableView, column, symbol: row.isFlagged ? "flag.fill" : nil, tint: .systemRed, size: 10)
+            return iconCell(tableView, column, image: row.isFlagged ? Self.symbol("flag.fill") : nil, tint: .systemRed)
         case .attachment:
-            return iconCell(tableView, column, symbol: row.hasAttachment ? "paperclip" : nil, tint: .secondaryLabelColor, size: 10)
+            return iconCell(tableView, column, image: row.hasAttachment ? Self.symbol("paperclip") : nil, tint: .secondaryLabelColor)
         case .from:
             return textCell(tableView, column, row.fromDisplay, bold: !row.isSeen)
         case .subject:
@@ -341,10 +341,26 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return cell
     }
 
-    private func iconCell(_ tableView: NSTableView, _ column: Column, symbol: String?, tint: NSColor, size: CGFloat) -> NSView {
+    /// The unread dot: a 10 px circle, as MailMate draws it (measured at 1x).
+    private static let unreadDot: NSImage = {
+        let image = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    private static func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
+    }
+
+    private func iconCell(_ tableView: NSTableView, _ column: Column, image: NSImage?, tint: NSColor) -> NSView {
         let id = NSUserInterfaceItemIdentifier("icon")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let cell = NSTableCellView()
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? IconCellView ?? {
+            let cell = IconCellView()
             cell.identifier = id
             let image = NSImageView()
             image.translatesAutoresizingMaskIntoConstraints = false
@@ -356,12 +372,24 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             ])
             return cell
         }()
-        cell.imageView?.image = symbol.flatMap {
-            NSImage(systemSymbolName: $0, accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: size, weight: .regular))
-        }
-        cell.imageView?.contentTintColor = tint
+        cell.imageView?.image = image
+        cell.tint = tint
         return cell
+    }
+}
+
+/// An icon that turns white on a selected row while the list is focused, as MailMate's unread dot does.
+final class IconCellView: NSTableCellView {
+    var tint: NSColor = .controlAccentColor {
+        didSet { updateTint() }
+    }
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { updateTint() }
+    }
+
+    private func updateTint() {
+        imageView?.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : tint
     }
 }
 
