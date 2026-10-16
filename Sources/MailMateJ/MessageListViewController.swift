@@ -83,8 +83,25 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
                 c.maxWidth = 16
                 c.resizingMask = []
                 let symbol = column == .flag ? "flag.fill" : column == .attachment ? "paperclip" : "circle.fill"
-                c.headerCell.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 9, weight: .regular))
+                // As title text, not the cell's image, which the header draws at reduced opacity.
+                // Paperclip in Medium: Regular's thin diagonals blur to grey at 1x (MailMate's are crisp).
+                if let image = Self.headerSymbol(
+                    symbol, pointSize: column == .unread ? 9 : 11, weight: column == .attachment ? .medium : .regular)
+                {
+                    let attachment = NSTextAttachment()
+                    attachment.image = image
+                    // Placed against the title text as MailMate places them (measured at 1x).
+                    attachment.bounds = NSRect(
+                        x: 0, y: column == .unread ? 0 : column == .flag ? -1 : -2,
+                        width: image.size.width, height: image.size.height)
+                    let title = NSMutableAttributedString(attachment: attachment)
+                    let style = NSMutableParagraphStyle()
+                    style.alignment = .center
+                    title.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: title.length))
+                    let cell = IconHeaderCell()
+                    cell.attributedStringValue = title
+                    c.headerCell = cell
+                }
             case .from:
                 c.width = 220
                 c.minWidth = 80
@@ -246,7 +263,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .flag:
             return iconCell(tableView, column, image: row.isFlagged ? Self.symbol("flag.fill") : nil, tint: .systemRed)
         case .attachment:
-            return iconCell(tableView, column, image: row.hasAttachment ? Self.symbol("paperclip") : nil, tint: .secondaryLabelColor)
+            return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
         case .from:
             return textCell(tableView, column, row.fromDisplay, bold: !row.isSeen)
         case .subject:
@@ -349,11 +366,75 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return cell
     }
 
+    /// A header symbol in the header text's color, as MailMate draws them. Measured at 1x: dot 9 px,
+    /// flag 10 × 11 px, paperclip 11 × 12 px.
+    private static func headerSymbol(_ name: String, pointSize: CGFloat, weight: NSFont.Weight) -> NSImage? {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
+        else { return nil }
+        // Cropped to the glyph's ink: the symbol's own padding would get it clipped in a 16 pt column.
+        let ink = inkBounds(of: symbol)
+        // Drawn on demand, so the color follows the current appearance.
+        return NSImage(size: ink.size, flipped: false) { rect in
+            symbol.draw(at: NSPoint(x: -ink.minX, y: -ink.minY), from: .zero, operation: .sourceOver, fraction: 1)
+            NSColor.headerTextColor.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+
+    /// The part of an image that has ink, in points, found at 4× so it survives Retina drawing.
+    private static func inkBounds(of image: NSImage, integral: Bool = true) -> NSRect {
+        let scale: CGFloat = 4
+        let width = Int(image.size.width * scale), height = Int(image.size.height * scale)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return NSRect(origin: .zero, size: image.size) }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(x: 0, y: 0, width: width, height: height))
+        NSGraphicsContext.restoreGraphicsState()
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return NSRect(origin: .zero, size: image.size) }
+        // Bitmap rows run top-down; image coordinates bottom-up. Whole points (by default), so the glyph
+        // keeps its own pixel alignment.
+        let rect = NSRect(
+            x: CGFloat(minX) / scale, y: CGFloat(height - 1 - maxY) / scale,
+            width: CGFloat(maxX - minX + 1) / scale, height: CGFloat(maxY - minY + 1) / scale)
+        return integral ? rect.integral : rect
+    }
+
     /// The unread dot: a 10 px circle, as MailMate draws it (measured at 1x).
     private static let unreadDot: NSImage = {
         let image = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
             NSColor.black.setFill()
             NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    /// The paperclip as MailMate draws it in rows (measured at 1x): 14 px, 2 px below the row's top,
+    /// on whole pixels in a cell-sized image so centering can't blur it.
+    private static let rowPaperclip: NSImage? = {
+        guard let symbol = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        else { return nil }
+        let ink = inkBounds(of: symbol, integral: false)
+        let size = NSSize(width: 16, height: 17)  // The attachment column's cell.
+        // Whole-pixel shift, centered across. Down from the top by 1 by the 4× ink box, which comes out
+        // as MailMate's 2 px on screen (symbols snap to the pixel grid at 1x).
+        let shift = NSPoint(
+            x: ((size.width - ink.width) / 2 - ink.minX).rounded(), y: (size.height - 1 - ink.maxY).rounded())
+        let image = NSImage(size: size, flipped: false) { _ in
+            symbol.draw(at: shift, from: .zero, operation: .sourceOver, fraction: 1)
             return true
         }
         image.isTemplate = true
@@ -383,6 +464,22 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         cell.imageView?.image = image
         cell.tint = tint
         return cell
+    }
+}
+
+/// Header cell for the narrow icon columns: the symbol gets the whole cell, not the inset title area
+/// (which would clip a 10 px flag in a 16 pt column).
+final class IconHeaderCell: NSTableHeaderCell {
+    override func titleRect(forBounds rect: NSRect) -> NSRect { rect }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let size = attributedStringValue.size()
+        // On whole pixels: half-pixel centering would blur the thin strokes.
+        let origin = controlView.backingAlignedRect(
+            NSRect(x: cellFrame.midX - size.width / 2, y: cellFrame.midY - size.height / 2, width: size.width, height: size.height),
+            options: .alignAllEdgesNearest
+        ).origin
+        attributedStringValue.draw(at: origin)
     }
 }
 
