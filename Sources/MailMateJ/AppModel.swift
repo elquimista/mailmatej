@@ -130,6 +130,92 @@ final class AppModel {
         #endif
     }
 
+    // MARK: Message actions
+
+    enum MessageAction {
+        case archive, junk, delete, markRead, markUnread, flag, unflag
+    }
+
+    /// Archives, marks as junk, deletes, marks or flags messages: here at once, then on the server.
+    /// Messages of several accounts are handled per account. Delete moves to Deleted Messages; messages
+    /// already there are deleted for good (after `confirmPermanentDelete` agrees).
+    func perform(_ action: MessageAction, on ids: [Int64], confirmPermanentDelete: @escaping (Int) async -> Bool) {
+        guard let refs = try? store.refs(ids: ids), !refs.isEmpty else { return }
+        Task {
+            for (accountId, refs) in Dictionary(grouping: refs, by: \.accountId) {
+                do {
+                    try await perform(action, accountId: accountId, refs: refs, confirm: confirmPermanentDelete)
+                } catch {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn’t change \(refs.count == 1 ? "the message" : "\(refs.count) messages") on the server."
+                    alert.informativeText = Self.describe(error)
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    private func perform(
+        _ action: MessageAction, accountId: String, refs: [MailStore.MessageRef],
+        confirm: (Int) async -> Bool
+    ) async throws {
+        let ids = refs.map(\.id), remoteIds = refs.map(\.remoteId)
+        func setKeyword(_ keyword: String, _ on: Bool) async throws {
+            try store.setKeyword(keyword, on, messageIds: ids)
+            try await coordinator.update(
+                accountId: accountId, remoteIds: remoteIds, patch: ["keywords/\(keyword)": on ? .bool(true) : .null])
+        }
+        func move(toRole role: String, extra: [String: JSONValue] = [:]) async throws {
+            guard let target = try store.mailbox(accountId: accountId, role: role) else {
+                throw MessageActionError.noMailbox(role: role)
+            }
+            try store.moveMessages(ids, toMailboxId: target.id)
+            var patch = extra
+            patch["mailboxIds"] = .object([target.remoteId: .bool(true)])
+            try await coordinator.update(accountId: accountId, remoteIds: remoteIds, patch: patch)
+        }
+        switch action {
+        case .markRead: try await setKeyword("$seen", true)
+        case .markUnread: try await setKeyword("$seen", false)
+        case .flag: try await setKeyword("$flagged", true)
+        case .unflag: try await setKeyword("$flagged", false)
+        case .archive: try await move(toRole: "archive")
+        case .junk: try await move(toRole: "junk", extra: ["keywords/$junk": .bool(true), "keywords/$notjunk": .null])
+        case .delete:
+            let inTrash = try store.messageIDs(ids, inRole: "trash")
+            let toTrash = refs.filter { !inTrash.contains($0.id) }
+            if !toTrash.isEmpty {
+                try await moveToTrash(accountId: accountId, refs: toTrash)
+            }
+            let forGood = refs.filter { inTrash.contains($0.id) }
+            if !forGood.isEmpty, await confirm(forGood.count) {
+                try await coordinator.destroy(accountId: accountId, remoteIds: forGood.map(\.remoteId))
+            }
+        }
+    }
+
+    private func moveToTrash(accountId: String, refs: [MailStore.MessageRef]) async throws {
+        guard let trash = try store.mailbox(accountId: accountId, role: "trash") else {
+            throw MessageActionError.noMailbox(role: "trash")
+        }
+        try store.moveMessages(refs.map(\.id), toMailboxId: trash.id)
+        try await coordinator.update(
+            accountId: accountId, remoteIds: refs.map(\.remoteId),
+            patch: ["mailboxIds": .object([trash.remoteId: .bool(true)])])
+    }
+
+    enum MessageActionError: LocalizedError {
+        case noMailbox(role: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noMailbox(let role):
+                let name = ["archive": "an Archive", "junk": "a Junk", "trash": "a Deleted Messages"][role] ?? "a matching"
+                return "This account has no \(name) mailbox."
+            }
+        }
+    }
+
     /// The message's raw .eml file on disk, downloading it from the server first if needed.
     func rawMessageURL(messageId: Int64) async throws -> URL {
         guard let detail = try store.detail(id: messageId) else { throw CocoaError(.fileNoSuchFile) }

@@ -84,6 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugFocusSidebar()
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if let actions = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS"] {
+                    // Comma-separated toolbar actions, 3 s apart.
+                    for name in actions.split(separator: ",") {
+                        windowController?.debugPerform(String(name))
+                        try? await Task.sleep(for: .seconds(3))
+                        NSLog("MMJ after \(name): selection \(windowController?.debugSelection ?? [])")
+                    }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENTS"] != nil {
                     await windowController?.debugCheckAttachments()
                     try? await Task.sleep(for: .seconds(2))

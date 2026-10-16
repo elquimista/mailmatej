@@ -142,6 +142,19 @@ public actor SyncCoordinator {
         return try await engine.fetchBody(messageId: messageId)
     }
 
+    /// Changes emails on the server (see `JMAPAccountSync.update`), then syncs so mailbox counts follow.
+    public func update(accountId: String, remoteIds: [String], patch: [String: JSONValue]) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        defer { requestSync(accountId) }
+        try await engine.update(remoteIds: remoteIds, patch: patch)
+    }
+
+    public func destroy(accountId: String, remoteIds: [String]) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        defer { requestSync(accountId) }
+        try await engine.destroy(remoteIds: remoteIds)
+    }
+
     // MARK: Private
 
     private func register(_ account: AccountRecord, push: Bool) {

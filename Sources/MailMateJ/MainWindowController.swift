@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The Correspondence layout: sidebar | (message list over (correspondence | message)).
 @MainActor
-final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
+final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolbarItemValidation, NSWindowDelegate {
     private let model: AppModel
     private let sidebar: SidebarViewController
     private let list: MessageListViewController
@@ -19,6 +19,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private var loadGeneration = 0
     /// The newest message as of the last load, to tell whether the user is "following" new mail.
     private var lastNewestID: Int64?
+    /// The message to select once moved messages have left the list (Archive, Junk, Delete).
+    private var selectAfterMove: Int64?
     private var correspondent: String?
     private var correspondenceTask: Task<Void, Never>?
     /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
@@ -74,6 +76,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         let toolbar = NSToolbar(identifier: "MainToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
+        toolbar.centeredItemIdentifiers = Set(Self.actionGroups.map(\.id))
         window.toolbar = toolbar
 
         wireUp()
@@ -244,6 +247,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
                 // Keep the selection if it is still in the list; otherwise show the newest message.
                 let kept = before.filter(ids.contains)
                 list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newest) : .toSelection)
+            case .dataChanged where selectAfterMove != nil:
+                // Right after Archive/Junk/Delete: if the messages left the list, select the next one.
+                let next = selectAfterMove!
+                selectAfterMove = nil
+                let left = !before.isEmpty && !before.contains(where: ids.contains)
+                list.setIDs(ids, selecting: left && ids.contains(next) ? [next] : nil, scroll: .keepPosition)
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
                 // When sorted by date and the newest message was in view, follow new mail to the
@@ -325,6 +334,25 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     }
 
     #if DEBUG
+        /// Runs a toolbar action on the selection, as its button would.
+        func debugPerform(_ name: String) {
+            window?.toolbar?.validateVisibleItems()
+            let states = window?.toolbar?.items.compactMap { $0.view as? NSStackView }.flatMap(\.arrangedSubviews)
+                .compactMap { $0 as? NSButton }.map { "\($0.toolTip ?? "")=\($0.isEnabled)" } ?? []
+            NSLog("MMJ action \(name) on \(targetIDs), buttons: \(states)")
+            switch name {
+            case "archive": archiveMessages(nil)
+            case "junk": junkMessages(nil)
+            case "delete": deleteMessages(nil)
+            case "read": markRead(nil)
+            case "unread": markUnread(nil)
+            case "flag": toggleFlag(nil)
+            default: break
+            }
+        }
+
+        var debugSelection: [Int64] { list.selectedIDs }
+
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
 
         /// Selects a row of the Correspondence pane, as a click would.
@@ -422,8 +450,31 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private static let addAccountItem = NSToolbarItem.Identifier("addAccount")
     private static let searchItem = NSToolbarItem.Identifier("search")
 
+    private typealias ActionButton = (label: String, symbol: String, action: Selector)
+
+    /// MailMate's message buttons, in its order and groups, centered in the toolbar.
+    private static let actionGroups: [(id: NSToolbarItem.Identifier, buttons: [ActionButton])] = [
+        (.init("mailboxActions"), [
+            ("Archive", "archivebox", #selector(archiveMessages(_:))),
+            ("Mark as Junk", "xmark.bin", #selector(junkMessages(_:))),
+            ("Delete", "trash", #selector(deleteMessages(_:))),
+        ]),
+        (.init("compose"), [("New Message", "square.and.pencil", #selector(composeMessage(_:)))]),
+        (.init("replyActions"), [
+            ("Reply", "arrowshape.turn.up.left", #selector(composeMessage(_:))),
+            ("Reply All", "arrowshape.turn.up.left.2", #selector(composeMessage(_:))),
+            ("Forward", "arrowshape.turn.up.right", #selector(composeMessage(_:))),
+        ]),
+        (.init("readActions"), [
+            ("Mark as Unread", "envelope.badge", #selector(markUnread(_:))),
+            ("Mark as Read", "envelope.open", #selector(markRead(_:))),
+        ]),
+        (.init("flag"), [("Flag", "flag", #selector(toggleFlag(_:)))]),
+    ]
+
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, Self.getMailItem, .flexibleSpace, Self.addAccountItem, Self.searchItem]
+        [.toggleSidebar, .sidebarTrackingSeparator, Self.getMailItem, .flexibleSpace]
+            + Self.actionGroups.map(\.id) + [.flexibleSpace, Self.addAccountItem, Self.searchItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -433,6 +484,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     func toolbar(
         _ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
+        if let group = Self.actionGroups.first(where: { $0.id == id }) {
+            return actionGroupItem(id, group.buttons)
+        }
         switch id {
         case Self.getMailItem:
             return button(id, "Get Mail", "arrow.clockwise", #selector(getAllMail(_:)))
@@ -449,6 +503,118 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             return item
         default:
             return nil
+        }
+    }
+
+    // MARK: Message actions
+
+    /// The messages a button acts on: the selection in the list that has focus, else the main list's,
+    /// else the message on screen.
+    private var targetIDs: [Int64] {
+        if window?.firstResponder === correspondence.tableView, !correspondence.selectedIDs.isEmpty {
+            return correspondence.selectedIDs
+        }
+        if !list.selectedIDs.isEmpty { return list.selectedIDs }
+        return messageView.displayedMessageID.map { [$0] } ?? []
+    }
+
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool { true }
+
+    /// One toolbar item per group of MailMate's buttons, so the spacing can match: 40 pt from button
+    /// to button within a group, 46 pt between groups, symbols 15 px tall (measured at 1x).
+    private func actionGroupItem(_ id: NSToolbarItem.Identifier, _ buttons: [ActionButton]) -> NSToolbarItem {
+        let views = buttons.map { b -> NSButton in
+            let button = NSButton()
+            button.bezelStyle = .toolbar
+            button.showsBorderOnlyWhileMouseInside = true
+            button.image = NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)?
+                .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+            button.imagePosition = .imageOnly
+            button.toolTip = b.label
+            button.target = self
+            button.action = b.action
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            return button
+        }
+        let stack = NSStackView(views: views)
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 3, bottom: 0, right: 3)
+        let item = ValidatingToolbarItem(itemIdentifier: id)
+        item.view = stack
+        item.label = buttons.map(\.label).joined(separator: ", ")
+        item.onValidate = { [weak self] in
+            guard let self else { return }
+            let ids = targetIDs
+            let hasTarget = !ids.isEmpty
+            let rows = hasTarget ? (try? model.store.rows(ids: ids)) ?? [] : []
+            for button in views {
+                switch button.action {
+                // As in MailMate, a mark button is off when it would change nothing.
+                case #selector(markRead(_:)): button.isEnabled = rows.contains { !$0.isSeen }
+                case #selector(markUnread(_:)): button.isEnabled = rows.contains(where: \.isSeen)
+                case #selector(composeMessage(_:)): button.isEnabled = false  // Composing isn't built yet.
+                case #selector(toggleFlag(_:)):
+                    let flagged = allFlagged(targetIDs)
+                    button.toolTip = flagged ? "Unflag" : "Flag"
+                    button.image = NSImage(systemSymbolName: flagged ? "flag.slash" : "flag", accessibilityDescription: button.toolTip)?
+                        .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+                    button.isEnabled = hasTarget
+                default: button.isEnabled = hasTarget
+                }
+            }
+        }
+        return item
+    }
+
+    private func allFlagged(_ ids: [Int64]) -> Bool {
+        guard !ids.isEmpty, let rows = try? model.store.rows(ids: ids) else { return false }
+        return rows.allSatisfy(\.isFlagged)
+    }
+
+    @objc private func composeMessage(_ sender: Any?) {}
+
+    @objc private func archiveMessages(_ sender: Any?) { moveAway(.archive) }
+    @objc private func junkMessages(_ sender: Any?) { moveAway(.junk) }
+    @objc private func deleteMessages(_ sender: Any?) { moveAway(.delete) }
+    @objc private func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
+    @objc private func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
+    @objc private func toggleFlag(_ sender: Any?) {
+        let ids = targetIDs
+        perform(allFlagged(ids) ? .unflag : .flag, on: ids)
+    }
+
+    /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
+    private func moveAway(_ action: AppModel.MessageAction) {
+        let ids = targetIDs
+        if ids == list.selectedIDs {
+            let selected = Set(ids)
+            let rows = list.ids.indices.filter { selected.contains(list.ids[$0]) }
+            if let last = rows.last, let first = rows.first {
+                selectAfterMove = list.ids[(last + 1)...].first { !selected.contains($0) }
+                    ?? list.ids[..<first].last
+            }
+        }
+        perform(action, on: ids)
+    }
+
+    private func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        model.perform(action, on: ids) { [weak self] count in
+            await self?.confirmPermanentDelete(count) ?? false
+        }
+    }
+
+    private func confirmPermanentDelete(_ count: Int) async -> Bool {
+        guard let window else { return false }
+        let alert = NSAlert()
+        alert.messageText = count == 1 ? "Delete this message permanently?" : "Delete \(count) messages permanently?"
+        alert.informativeText = "It’s already in Deleted Messages. This can’t be undone."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        return await withCheckedContinuation { done in
+            alert.beginSheetModal(for: window) { done.resume(returning: $0 == .alertFirstButtonReturn) }
         }
     }
 
@@ -484,4 +650,10 @@ final class CorrespondenceSplitView: NSSplitView {
         NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 158 / 255, alpha: 1).setFill()  // Shows as (168, 168, 172).
         NSRect(x: rect.minX + 1, y: rect.minY, width: rect.width - 1, height: rect.height).fill()
     }
+}
+
+/// A toolbar item made of its own buttons, which the toolbar's regular validation passes keep current.
+final class ValidatingToolbarItem: NSToolbarItem {
+    var onValidate: () -> Void = {}
+    override func validate() { onValidate() }
 }

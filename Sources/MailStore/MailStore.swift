@@ -319,6 +319,82 @@ public final class MailStore: Sendable {
         }
     }
 
+    // MARK: Local edits (applied right away; the server copy follows)
+
+    /// What the server needs to change a message: its account and remote id.
+    public struct MessageRef: Sendable, Hashable {
+        public var id: Int64
+        public var accountId: String
+        public var remoteId: String
+    }
+
+    public func refs(ids: [Int64]) throws -> [MessageRef] {
+        guard !ids.isEmpty else { return [] }
+        return try dbPool.read { db in
+            try Row.fetchAll(
+                db, sql: "SELECT id, accountId, remoteId FROM message WHERE id IN (\(Self.placeholders(ids.count)))",
+                arguments: StatementArguments(ids)
+            ).map { MessageRef(id: $0["id"], accountId: $0["accountId"], remoteId: $0["remoteId"]) }
+        }
+    }
+
+    /// An account's mailbox with a JMAP role ("archive", "junk", "trash", ...).
+    public func mailbox(accountId: String, role: String) throws -> MailboxRecord? {
+        try mailboxes().first { $0.accountId == accountId && $0.role == role }
+    }
+
+    /// Which of these messages are in a mailbox with this role.
+    public func messageIDs(_ ids: [Int64], inRole role: String) throws -> Set<Int64> {
+        guard !ids.isEmpty else { return [] }
+        return try dbPool.read { db in
+            Set(try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                    WHERE b.role = ? AND mm.messageId IN (\(Self.placeholders(ids.count)))
+                    """,
+                arguments: StatementArguments([role] as [any DatabaseValueConvertible] + ids)))
+        }
+    }
+
+    /// Sets or clears a keyword ("$seen", "$flagged", ...) and its column.
+    public func setKeyword(_ keyword: String, _ on: Bool, messageIds: [Int64]) throws {
+        guard !messageIds.isEmpty else { return }
+        let column = ["$seen": "isSeen", "$flagged": "isFlagged", "$answered": "isAnswered", "$draft": "isDraft"][keyword]
+        try dbPool.write { db in
+            let list = Self.placeholders(messageIds.count)
+            if let column {
+                try db.execute(
+                    sql: "UPDATE message SET \(column) = ? WHERE id IN (\(list))",
+                    arguments: StatementArguments([on] as [any DatabaseValueConvertible] + messageIds))
+            }
+            for id in messageIds {
+                try db.execute(
+                    sql: on ? "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)"
+                        : "DELETE FROM message_keyword WHERE messageId = ? AND keyword = ?",
+                    arguments: [id, keyword])
+            }
+        }
+    }
+
+    /// Puts the messages in exactly one mailbox, as a move does.
+    public func moveMessages(_ messageIds: [Int64], toMailboxId mailboxId: Int64) throws {
+        guard !messageIds.isEmpty else { return }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM message_mailbox WHERE messageId IN (\(Self.placeholders(messageIds.count)))",
+                arguments: StatementArguments(messageIds))
+            for id in messageIds {
+                try db.execute(
+                    sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [id, mailboxId])
+            }
+        }
+    }
+
+    private static func placeholders(_ count: Int) -> String {
+        Array(repeating: "?", count: count).joined(separator: ", ")
+    }
+
     /// A message's saved parts (embedded images and attachments), in the message's order.
     public func parts(messageId: Int64) throws -> [MessagePart] {
         try dbPool.read { db in

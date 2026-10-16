@@ -370,6 +370,56 @@ public actor JMAPAccountSync {
         }
     }
 
+    // MARK: Changes
+
+    /// Applies one patch to every email (Email/set update), e.g. `["keywords/$seen": true]` or
+    /// `["mailboxIds": {archive: true}]`. Emails the server didn't change are fetched again, so the
+    /// local copy (already changed by the caller) shows the server's state, and an error is thrown.
+    public func update(remoteIds: [String], patch: [String: JSONValue]) async throws {
+        guard !remoteIds.isEmpty else { return }
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let set = request.call("Email/set", [
+            "accountId": .string(accountId),
+            "update": .object(Dictionary(uniqueKeysWithValues: remoteIds.map { ($0, JSONValue.object(patch)) })),
+        ])
+        let failed: [String]
+        do {
+            failed = Array(try await client.send(request).arguments(set)["notUpdated"]?.objectValue?.keys ?? [:].keys)
+        } catch {
+            try? await refetch(remoteIds, accountId)
+            throw error
+        }
+        guard failed.isEmpty else {
+            try? await refetch(failed, accountId)
+            throw JMAPError.invalidResponse("the server didn’t change \(failed.count) message\(failed.count == 1 ? "" : "s")")
+        }
+    }
+
+    /// Deletes emails for good (Email/set destroy), here and on the server.
+    public func destroy(remoteIds: [String]) async throws {
+        guard !remoteIds.isEmpty else { return }
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(remoteIds)])
+        let failed = Set(try await client.send(request).arguments(set)["notDestroyed"]?.objectValue?.keys ?? [:].keys)
+        try store.deleteMessages(accountId: account.id, remoteIds: remoteIds.filter { !failed.contains($0) })
+        if !failed.isEmpty {
+            throw JMAPError.invalidResponse("the server didn’t delete \(failed.count) message\(failed.count == 1 ? "" : "s")")
+        }
+    }
+
+    /// Stores the server's current copy of these emails (and forgets ones it no longer has).
+    private func refetch(_ remoteIds: [String], _ accountId: String) async throws {
+        var request = JMAPRequest()
+        let get = request.call("Email/get", [
+            "accountId": .string(accountId), "ids": .strings(remoteIds), "properties": .strings(Email.properties),
+        ])
+        let result = try await client.send(request).decode(GetResponse<Email>.self, get)
+        try store.upsertMessages(accountId: account.id, result.list.map(Self.incoming))
+        try store.deleteMessages(accountId: account.id, remoteIds: result.notFound ?? [])
+    }
+
     // MARK: Mapping
 
     private func remoteAccountId(_ session: Session) throws -> String {
