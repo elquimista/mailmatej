@@ -105,8 +105,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         correspondencePane.view = stack
 
         let bottom = NSSplitViewController()
+        bottom.splitView = CorrespondenceSplitView()
         bottom.splitView.isVertical = true
-        bottom.splitView.dividerStyle = .thin
         bottom.addSplitViewItem(NSSplitViewItem(viewController: correspondencePane))
         bottom.addSplitViewItem(NSSplitViewItem(viewController: messageView))
         bottom.splitViewItems[0].minimumThickness = 220
@@ -116,7 +116,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
         let content = NSSplitViewController()
         content.splitView.isVertical = false
-        content.splitView.dividerStyle = .thin
+        // MailMate's divider between the list and the panes below: a 10 pt bar with a grip in the middle.
+        content.splitView.dividerStyle = .paneSplitter
         content.addSplitViewItem(NSSplitViewItem(viewController: list))
         content.addSplitViewItem(NSSplitViewItem(viewController: bottom))
         content.splitViewItems[0].minimumThickness = 120
@@ -442,5 +443,18 @@ private final class SheetHolder {
 
     func end(from parent: NSWindow) {
         if let window { parent.endSheet(window) }
+    }
+}
+
+/// The divider between the Correspondence list and the message, as MailMate draws it (measured at 1x):
+/// 4 pt wide, a black line beside the list, then light grey.
+final class CorrespondenceSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 4 }
+
+    override func drawDivider(in rect: NSRect) {
+        NSColor.black.setFill()
+        NSRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height).fill()
+        NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 158 / 255, alpha: 1).setFill()  // Shows as (168, 168, 172).
+        NSRect(x: rect.minX + 1, y: rect.minY, width: rect.width - 1, height: rect.height).fill()
     }
 }

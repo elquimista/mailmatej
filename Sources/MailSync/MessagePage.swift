@@ -146,7 +146,7 @@ public enum MessagePage {
                 + "<mmj-name title=\"\(escape(a.name))\">\(escape(a.name))</mmj-name><mmj-size>\(escape(a.size))</mmj-size>"
                 + buttonsHTML + "</mmj-att>"
         }
-        return "<mmj-attachments>" + items.joined() + "</mmj-attachments>"
+        return "<mmj-sep></mmj-sep><mmj-attachments>" + items.joined() + "</mmj-attachments>"
     }
 
     static func barHTML(_ bar: Bar, token: String) -> String {
@@ -189,6 +189,10 @@ public enum MessagePage {
            below, 23 px rows, every second row in a lighter box with 4 px corners inset 4 px (alternating
            rows, as in the lists); 20 px icon 15 px in, name, size, then 20 px round buttons 6 px apart,
            18 px from the right. */
+        /* The line between the headers and the attachments: fades in from both sides, 8 px of header above
+           and below it. */
+        mmj-sep { display: block !important; height: 1px !important; margin: 0 0 8px !important;
+          background: linear-gradient(to right, transparent, rgba(0,0,0,.25) 50%, transparent) !important; }
         mmj-attachments { display: block !important; padding: 5px 4px !important; background: rgba(0,0,0,.05) !important; }
         mmj-att { display: flex !important; align-items: center !important; height: 23px !important;
           padding: 0 14px 0 11px !important; border-radius: 4px !important; cursor: default !important;
@@ -217,13 +221,18 @@ public enum MessagePage {
           border: 1px solid rgba(0,0,0,.25) !important; border-radius: 5px !important; padding: 1px 9px !important;
           cursor: default !important; }
         mmj-bar a:active { background: #E5E5E5 !important; }
+        /* Dark: MailMate's colors as they show on screen (measured at 1x): headers (62,64,67), labels 146,
+           values white, separator peaking at 212, attachments (42,46,49) with rows (55,59,61), text 227.
+           WebKit renders CSS greys lighter on this display than AppKit draws the same values (CSS 43 shows
+           as 56), so these are the CSS values that come out as those, from a rendered grey ladder. */
         @media (prefers-color-scheme: dark) {
-          mmj-chrome { background: #2B2B2D !important; color: #E5E5E7 !important; border-bottom-color: #3D3D40 !important; }
-          mmj-label { color: #98989D !important; }
-          mmj-value { color: #F2F2F7 !important; }
-          mmj-attachments { background: rgba(0,0,0,.33) !important; }
-          mmj-att:nth-child(even) { background: rgba(255,255,255,.045) !important; }
-          mmj-name, mmj-size { color: #E3E3E3 !important; }
+          mmj-chrome { background: #303234 !important; color: #E5E5E7 !important; border-bottom: none !important; }
+          mmj-label { color: #808080 !important; }
+          mmj-value { color: #FFFFFF !important; }
+          mmj-sep { background: linear-gradient(to right, transparent, #CACACA 50%, transparent) !important; }
+          mmj-attachments { background: #202326 !important; }
+          mmj-att:nth-child(even) { background: #2A2E2F !important; }
+          mmj-name, mmj-size { color: #DEDEDE !important; }
           mmj-bar.loaded { background: #3A3A3C !important; color: #AEAEB2 !important; }
         }
         """

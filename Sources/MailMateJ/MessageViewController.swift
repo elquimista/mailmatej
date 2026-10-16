@@ -273,21 +273,21 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         return MessagePage.Attachment(name: name, size: size, icon: iconDataURL(forFileNamed: name, type: part.type))
     }
 
-    /// "51 B", "4.2 KiB", "3.1 MiB": binary units, as MailMate shows attachment sizes.
+    /// "51 B", "4.2 KiB", "32.6 KiB": binary units, as MailMate shows attachment sizes.
     static func binarySize(_ bytes: Int) -> String {
         guard bytes >= 1024 else { return "\(bytes) B" }
         var value = Double(bytes) / 1024
         for unit in ["KiB", "MiB", "GiB"] {
             if value < 1024 || unit == "GiB" {
-                return value < 10 ? String(format: "%.1f %@", value, unit) : String(format: "%.0f %@", value, unit)
+                return String(format: "%.1f %@", value, unit)  // "32.6 KiB", one decimal as MailMate shows
             }
             value /= 1024
         }
         return "\(bytes) B"
     }
 
-    /// The rows' round buttons, drawn as MailMate draws them (measured at 1x): 20 px grey circles
-    /// (171, 172, 172) with the symbol cut out.
+    /// The rows' round buttons, drawn as MailMate draws them (measured at 1x): 20 px grey circles showing
+    /// as (171, 172, 172), with the symbol cut out. Drawn in 157, which WebKit shows as 171 here.
     private static let attachmentButtons: [MessagePage.AttachmentButton] = [
         .init(action: "quicklook", title: "Quick Look", icon: circleButtonDataURL("eye.circle.fill")),
         .init(
@@ -311,7 +311,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         let scale = CGFloat(side) / max(ink.width, ink.height)
         symbol.draw(
             in: NSRect(x: -ink.minX * scale, y: -ink.minY * scale, width: symbol.size.width * scale, height: symbol.size.height * scale))
-        NSColor(srgbRed: 171 / 255, green: 172 / 255, blue: 172 / 255, alpha: 1).set()
+        NSColor(srgbRed: 157 / 255, green: 157 / 255, blue: 157 / 255, alpha: 1).set()
         NSRect(x: 0, y: 0, width: side, height: side).fill(using: .sourceAtop)
         NSGraphicsContext.restoreGraphicsState()
         return rep.representation(using: .png, properties: [:]).map { "data:image/png;base64," + $0.base64EncodedString() } ?? ""
@@ -565,6 +565,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
                 "return document.querySelectorAll('mmj-att').length + ' items, page scripts ' + "
                     + "(document.querySelector('noscript') ? 'n/a' : 'off')")
             NSLog("MMJ attachment probe: \(probe)")
+            NSLog("MMJ chrome style: \(await run("const c = getComputedStyle(document.querySelector('mmj-chrome')); return c.backgroundColor + ' ' + c.opacity + ' scheme ' + matchMedia('(prefers-color-scheme: dark)').matches"))")
             let centers = await run(
                 "return [...document.querySelectorAll('mmj-att')].map(e => { const r = e.getBoundingClientRect(); "
                     + "const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); "
