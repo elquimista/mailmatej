@@ -136,9 +136,11 @@ import Testing
             message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200, keywords: ["$seen"]),
             message("3", from: "c@x.com", box: "tr", at: 300),
         ])
-        #expect(try store.count(scope: .role("inbox"), unreadOnly: true) == 1)
-        #expect(try store.count(scope: .role("inbox"), unreadOnly: false) == 2)
-        #expect(try store.count(scope: .account("acc"), unreadOnly: false) == 3)
+        #expect(try store.count(scope: .role("inbox"), counting: .unread) == 1)
+        #expect(try store.count(scope: .role("inbox"), counting: .all) == 2)
+        #expect(try store.count(scope: .account("acc"), counting: .all) == 3)
+        #expect(try store.count(scope: .role("inbox"), counting: .flagged) == 0)
+        #expect(try store.count(scope: .role("inbox"), counting: .unreplied) == 2)
         for scope in [MessageScope.allMessages, .flagged, .role("inbox"), .mailbox(42), .account("A:B")] {
             #expect(MessageScope(key: scope.key) == scope)
         }

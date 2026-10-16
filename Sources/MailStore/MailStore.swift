@@ -383,10 +383,17 @@ public final class MailStore: Sendable {
         return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
     }
 
-    /// How many messages a list holds, or how many of them are unread (for Dock counters).
-    public func count(scope: MessageScope, unreadOnly: Bool) throws -> Int {
+    /// How many of a list's messages match `counting` (for Dock counters).
+    public func count(scope: MessageScope, counting: MessageCount) throws -> Int {
         let (filter, args) = Self.filter(scope: scope, search: nil)
-        let sql = "SELECT COUNT(*) FROM message m WHERE \(filter)\(unreadOnly ? " AND NOT m.isSeen" : "")"
+        let condition: String
+        switch counting {
+        case .all: condition = ""
+        case .unread: condition = " AND NOT m.isSeen"
+        case .flagged: condition = " AND m.isFlagged"
+        case .unreplied: condition = " AND NOT m.isAnswered AND NOT m.isDraft"
+        }
+        let sql = "SELECT COUNT(*) FROM message m WHERE \(filter)\(condition)"
         return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: args) ?? 0 }
     }
 

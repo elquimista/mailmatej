@@ -236,6 +236,15 @@ public enum MessageScope: Hashable, Sendable {
     }
 }
 
+/// What a counter counts within a list (MailMate's "Count" choices that apply to received mail).
+public enum MessageCount: Hashable, Sendable {
+    case all
+    case unread
+    case flagged
+    /// Not answered (no `$answered`), drafts excluded.
+    case unreplied
+}
+
 public struct MessageSort: Hashable, Sendable {
     public enum Key: String, Sendable { case receivedAt, from, subject, size }
     public var key: Key

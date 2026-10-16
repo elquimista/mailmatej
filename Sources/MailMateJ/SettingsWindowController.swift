@@ -39,49 +39,109 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-/// One choice in the Mailbox menu.
-struct CounterSource: Identifiable, Hashable {
-    let key: String
-    let title: String
-    let symbol: String
-    let depth: Int
-    var id: String { key }
-}
+/// MailMate's Mailbox menu: the sidebar's "Mailboxes" and "Sources" sections, with each mailbox
+/// that has children opening a submenu. As in MailMate, such a parent can itself be chosen by
+/// clicking it, which AppKit doesn't do on its own (see `Coordinator`).
+struct MailboxMenuButton: NSViewRepresentable {
+    let roots: [SidebarNode]
+    @Binding var selection: String
 
-extension AppModel {
-    /// Everything a counter can count, in sidebar order: unified mailboxes, then each account and its mailboxes.
-    func counterSources() -> [CounterSource] {
-        var sources: [CounterSource] = [
-            .init(key: MessageScope.role("inbox").key, title: "Inbox", symbol: "tray", depth: 0),
-            .init(key: MessageScope.flagged.key, title: "Flagged", symbol: "flag", depth: 0),
-            .init(key: MessageScope.role("drafts").key, title: "Drafts", symbol: "doc", depth: 0),
-            .init(key: MessageScope.role("sent").key, title: "Sent Messages", symbol: "paperplane", depth: 0),
-            .init(key: MessageScope.role("archive").key, title: "Archive", symbol: "archivebox", depth: 0),
-            .init(key: MessageScope.role("junk").key, title: "Junk", symbol: "xmark.bin", depth: 0),
-            .init(key: MessageScope.role("trash").key, title: "Deleted Messages", symbol: "trash", depth: 0),
-            .init(key: MessageScope.allMessages.key, title: "All Messages", symbol: "tray.full", depth: 0),
-        ]
-        let boxes = Dictionary(grouping: (try? store.mailboxes()) ?? [], by: \.accountId)
-        for account in (try? store.accounts()) ?? [] {
-            sources.append(.init(key: MessageScope.account(account.id).key, title: account.name, symbol: "at", depth: 0))
-            let children = Dictionary(grouping: boxes[account.id] ?? [], by: { $0.parentRemoteId ?? "" })
-            let roleOrder = ["inbox", "drafts", "sent", "archive", "junk", "trash"]
-            func add(_ parent: String, depth: Int) {
-                let sorted = (children[parent] ?? []).sorted { a, b in
-                    let ra = a.role.flatMap(roleOrder.firstIndex) ?? 99
-                    let rb = b.role.flatMap(roleOrder.firstIndex) ?? 99
-                    return (ra, a.sortOrder, a.name.lowercased()) < (rb, b.sortOrder, b.name.lowercased())
-                }
-                for box in sorted {
-                    sources.append(.init(
-                        key: MessageScope.mailbox(box.id).key, title: box.name,
-                        symbol: SidebarViewController.symbol(forRole: box.role), depth: depth))
-                    add(box.remoteId, depth: depth + 1)
-                }
-            }
-            add("", depth: 1)
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: true)
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.choose = { selection = $0 }
+        let signature = selection + "|" + roots.flatMap(\.children).map(\.key).joined(separator: ",")
+        guard signature != coordinator.signature else { return }  // Rebuild only when something changed.
+        coordinator.signature = signature
+
+        let menu = NSMenu()
+        menu.delegate = coordinator
+        coordinator.rootMenu = menu
+        let titleItem = NSMenuItem(title: "None", action: nil, keyEquivalent: "")  // Pull-down's own title.
+        menu.addItem(titleItem)
+        for root in roots {
+            if root !== roots.first { menu.addItem(.separator()) }
+            menu.addItem(.sectionHeader(title: root.title))
+            for node in root.children { menu.addItem(item(for: node, coordinator: coordinator, titleItem: titleItem)) }
         }
-        return sources
+        button.menu = menu
+    }
+
+    private func item(for node: SidebarNode, coordinator: Coordinator, titleItem: NSMenuItem) -> NSMenuItem {
+        let item = choice(for: node, coordinator: coordinator, titleItem: titleItem)
+        guard !node.children.isEmpty else { return item }
+        let submenu = NSMenu()
+        submenu.delegate = coordinator
+        for child in node.children { submenu.addItem(self.item(for: child, coordinator: coordinator, titleItem: titleItem)) }
+        item.submenu = submenu
+        return item
+    }
+
+    private func choice(for node: SidebarNode, coordinator: Coordinator, titleItem: NSMenuItem) -> NSMenuItem {
+        let item = NSMenuItem(title: node.title, action: #selector(Coordinator.chosen(_:)), keyEquivalent: "")
+        item.target = coordinator
+        item.representedObject = node.scope?.key
+        item.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
+        if node.scope?.key == selection {
+            item.state = .on
+            titleItem.title = node.title
+            titleItem.image = item.image
+        }
+        return item
+    }
+
+    /// Chooses items, including parents of submenus: while the menu is open it follows the
+    /// highlighted item and polls the mouse button (menu tracking doesn't hand the app its mouse
+    /// events), and a release over a parent item chooses it and closes the menu.
+    final class Coordinator: NSObject, NSMenuDelegate {
+        var choose: (String) -> Void = { _ in }
+        var signature = ""
+        weak var rootMenu: NSMenu?
+        private var highlighted: NSMenuItem?
+        private var timer: Timer?
+        private var wasPressed = false
+
+        @objc func chosen(_ sender: NSMenuItem) {
+            if let key = sender.representedObject as? String { choose(key) }
+        }
+
+        func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+            highlighted = item
+        }
+
+        func menuWillOpen(_ menu: NSMenu) {
+            guard menu === rootMenu else { return }
+            highlighted = nil
+            wasPressed = NSEvent.pressedMouseButtons & 1 != 0  // Still down from the click that opened it.
+            let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.poll() }
+            }
+            RunLoop.current.add(timer, forMode: .common)
+            self.timer = timer
+        }
+
+        func menuDidClose(_ menu: NSMenu) {
+            guard menu === rootMenu else { return }
+            timer?.invalidate()
+            timer = nil
+        }
+
+        private func poll() {
+            let pressed = NSEvent.pressedMouseButtons & 1 != 0
+            defer { wasPressed = pressed }
+            guard wasPressed, !pressed, let item = highlighted, item.hasSubmenu,
+                let key = item.representedObject as? String
+            else { return }
+            rootMenu?.cancelTracking()
+            choose(key)
+        }
     }
 }
 
@@ -89,7 +149,7 @@ extension AppModel {
 struct CountersPane: View {
     @ObservedObject private var settings = CounterSettings.shared
     @State private var corner: Corner = .topRight
-    @State private var sources: [CounterSource] = AppModel.shared.counterSources()
+    @State private var roots = SidebarViewController.buildTree(model: AppModel.shared)
 
     var body: some View {
         HStack(alignment: .top, spacing: 28) {
@@ -112,20 +172,13 @@ struct CountersPane: View {
                     }
                     GridRow {
                         Text("Mailbox:")
-                        Picker("Mailbox", selection: binding(\.source)) {
-                            ForEach(sources) { source in
-                                Label(String(repeating: "    ", count: source.depth) + source.title, systemImage: source.symbol)
-                                    .tag(source.key)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 240)
+                        MailboxMenuButton(roots: roots, selection: binding(\.source))
+                            .frame(width: 240)
                     }
                     GridRow {
                         Text("Count:")
-                        Picker("Count", selection: binding(\.unreadOnly)) {
-                            Text("Unread").tag(true)
-                            Text("All Messages").tag(false)
+                        Picker("Count", selection: binding(\.count)) {
+                            ForEach(CountKind.allCases) { Text($0.title).tag($0) }
                         }
                         .labelsHidden()
                         .frame(width: 240)
@@ -137,7 +190,7 @@ struct CountersPane: View {
         }
         .padding(24)
         .frame(width: 560)
-        .onAppear { sources = AppModel.shared.counterSources() }
+        .onAppear { roots = SidebarViewController.buildTree(model: AppModel.shared) }
     }
 
     private func binding<T>(_ keyPath: WritableKeyPath<CounterConfig, T>) -> Binding<T> {

@@ -8,11 +8,53 @@ enum Corner: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// MailMate's "Count" choices, except Outgoing and Pending & Outgoing, which wait for sending, and
+/// Recent, which has no clear meaning in JMAP.
+enum CountKind: String, Codable, CaseIterable, Identifiable {
+    case all, unread, flagged, unreplied
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: "All"
+        case .unread: "Unread"
+        case .flagged: "Flagged"
+        case .unreplied: "Unreplied"
+        }
+    }
+}
+
 struct CounterConfig: Codable, Equatable {
     var showInDock: Bool
     /// A `MessageScope.key`: "role:inbox", "flagged", "mailbox:42", "account:<id>", "all".
     var source: String
-    var unreadOnly: Bool
+    var count: CountKind
+
+    init(showInDock: Bool, source: String, count: CountKind) {
+        self.showInDock = showInDock
+        self.source = source
+        self.count = count
+    }
+
+    private enum CodingKeys: String, CodingKey { case showInDock, source, count, unreadOnly }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        showInDock = try c.decode(Bool.self, forKey: .showInDock)
+        source = try c.decode(String.self, forKey: .source)
+        if let count = try? c.decode(CountKind.self, forKey: .count) {
+            self.count = count
+        } else {  // Saved before the Count menu had more than Unread and All.
+            count = (try? c.decode(Bool.self, forKey: .unreadOnly)) == false ? .all : .unread
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(showInDock, forKey: .showInDock)
+        try c.encode(source, forKey: .source)
+        try c.encode(count, forKey: .count)
+    }
 }
 
 /// The four Dock counters, saved in user defaults. Changes take effect immediately.
@@ -31,7 +73,7 @@ final class CounterSettings: ObservableObject {
 
     private init() {
         var counters = Dictionary(uniqueKeysWithValues: Corner.allCases.map {
-            ($0, CounterConfig(showInDock: false, source: MessageScope.role("inbox").key, unreadOnly: true))
+            ($0, CounterConfig(showInDock: false, source: MessageScope.role("inbox").key, count: .unread))
         })
         counters[.topRight]?.showInDock = true  // Like the standard Dock badge: unread in all inboxes.
         if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
@@ -186,13 +228,22 @@ final class DockCounters {
         }
     }
 
+    private func counting(_ kind: CountKind) -> MessageCount {
+        switch kind {
+        case .all: .all
+        case .unread: .unread
+        case .flagged: .flagged
+        case .unreplied: .unreplied
+        }
+    }
+
     /// Recomputes the counters and redraws the Dock icon if anything changed.
     func update() {
         var values: [Corner: Int] = [:]
         for (corner, config) in CounterSettings.shared.counters where config.showInDock || isPreviewing {
             guard config.showInDock else { values[corner] = 0; continue }
             guard let scope = MessageScope(key: config.source) else { continue }
-            values[corner] = (try? store.count(scope: scope, unreadOnly: config.unreadOnly)) ?? 0
+            values[corner] = (try? store.count(scope: scope, counting: counting(config.count))) ?? 0
         }
         guard values != lastValues else { return }
         lastValues = values

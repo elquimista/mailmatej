@@ -134,7 +134,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Rebuilds the tree from the store, keeping expansion and selection.
     func reload() {
         let selectedKey = selectedNode?.key ?? "unified.inbox"
-        roots = buildTree()
+        roots = Self.buildTree(model: model)
         isReloading = true
         defer { isReloading = false }
         suppressSelection = true
@@ -183,7 +183,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return nil
     }
 
-    private func buildTree() -> [SidebarNode] {
+    /// The sidebar's tree; also the Counters pane's Mailbox menu.
+    static func buildTree(model: AppModel) -> [SidebarNode] {
         let store = model.store
         let accounts = (try? store.accounts()) ?? []
         let mailboxes = (try? store.mailboxes()) ?? []
@@ -217,13 +218,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             node.badge = counts.unreadByAccount[account.id] ?? 0
             node.warning = model.syncWarning(accountId: account.id)
             node.info = model.downloadInfo(accountId: account.id)
-            node.children = mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
+            node.children = Self.mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
             sources.children.append(node)
         }
         return [unified, sources]
     }
 
-    private func mailboxTree(_ boxes: [MailboxRecord], accountId: String) -> [SidebarNode] {
+    private static func mailboxTree(_ boxes: [MailboxRecord], accountId: String) -> [SidebarNode] {
         let roleOrder = ["inbox", "drafts", "sent", "archive", "junk", "trash"]
         let children = Dictionary(grouping: boxes, by: { $0.parentRemoteId ?? "" })
         func build(_ parent: String) -> [SidebarNode] {
