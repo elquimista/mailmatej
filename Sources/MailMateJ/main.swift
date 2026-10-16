@@ -45,7 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
+                if let points = Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL"] ?? "") {
+                    windowController?.debugScrollList(by: points)
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_ROUNDTRIP"] {
+                    writeSnapshot(of: windowController?.window, to: path.replacingOccurrences(of: ".png", with: "-before.png"))
                     windowController?.debugSelectSidebar(key: key)
                     try? await Task.sleep(for: .seconds(1))
                     windowController?.debugSelectSidebar(key: "unified.inbox")
@@ -57,12 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1.5))
                     target = target?.attachedSheet
                 }
-                guard let frameView = target?.contentView?.superview,
-                    let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds)
-                else { return }
-                frameView.cacheDisplay(in: frameView.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                writeSnapshot(of: target, to: path)
             }
+        }
+
+        private func writeSnapshot(of window: NSWindow?, to path: String) {
+            guard let frameView = window?.contentView?.superview,
+                let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds)
+            else { return }
+            frameView.cacheDisplay(in: frameView.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
         }
     #endif
 

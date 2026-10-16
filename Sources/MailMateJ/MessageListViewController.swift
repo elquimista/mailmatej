@@ -125,20 +125,37 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     var selectedID: Int64? { selectedIDs.count == 1 ? selectedIDs[0] : nil }
 
+    /// Where the list is scrolled, as "message X's top edge is `offset` points below the top of the view",
+    /// so it survives rows being inserted or removed above it.
+    struct ScrollAnchor {
+        let id: Int64
+        let offset: CGFloat
+    }
+
     enum Scroll {
         /// Keep the same messages in view (used when data changes underneath the user).
         case keepPosition
-        /// Bring the first selected message into view.
+        /// Return to a saved position; falls back to centering the selection.
+        case restore(ScrollAnchor?)
+        /// Bring the first selected message into view (centered if it was off-screen).
         case toSelection
         /// Bring a specific message into view.
         case toMessage(Int64?)
+    }
+
+    var scrollAnchor: ScrollAnchor? {
+        guard let clip = tableView.enclosingScrollView?.contentView, !ids.isEmpty else { return nil }
+        let top = clip.bounds.minY
+        let row = tableView.row(at: NSPoint(x: 0, y: max(top, 0)))
+        guard row >= 0, row < ids.count else { return nil }
+        return ScrollAnchor(id: ids[row], offset: top - tableView.rect(ofRow: row).minY)
     }
 
     /// Replaces the list without firing `onSelectionChange`. `selecting: nil` keeps the current
     /// selection (where those messages still exist); `[]` clears it.
     func setIDs(_ newIDs: [Int64], selecting: [Int64]? = nil, scroll: Scroll = .keepPosition) {
         let wanted = selecting ?? selectedIDs
-        let firstVisible = firstVisibleID()
+        let anchor = scrollAnchor
 
         ids = newIDs
         cache.removeAll(keepingCapacity: true)
@@ -149,20 +166,35 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         suppressSelection = false
 
         switch scroll {
+        case .keepPosition:
+            if let anchor { restore(anchor) }
+        case .restore(let saved):
+            if !(saved.map(restore) ?? false), let row = indexes.first { center(row) }
         case .toSelection:
-            if let row = indexes.first { tableView.scrollRowToVisible(row) }
+            if let row = indexes.first, !tableView.rows(in: tableView.visibleRect).contains(row) { center(row) }
         case .toMessage(let id):
             if let id, let row = newIDs.firstIndex(of: id) { tableView.scrollRowToVisible(row) }
-        case .keepPosition:
-            if let firstVisible, let row = newIDs.firstIndex(of: firstVisible) {
-                tableView.scroll(NSPoint(x: 0, y: tableView.rect(ofRow: row).minY - tableView.headerView!.frame.height))
-            }
         }
     }
 
-    private func firstVisibleID() -> Int64? {
-        let row = tableView.rows(in: tableView.visibleRect).location
-        return row >= 0 && row < ids.count && tableView.visibleRect.minY > 0 ? ids[row] : nil
+    @discardableResult
+    private func restore(_ anchor: ScrollAnchor) -> Bool {
+        guard let row = ids.firstIndex(of: anchor.id) else { return false }
+        scrollClip(toY: tableView.rect(ofRow: row).minY + anchor.offset)
+        return true
+    }
+
+    private func center(_ row: Int) {
+        guard let clip = tableView.enclosingScrollView?.contentView else { return }
+        scrollClip(toY: tableView.rect(ofRow: row).midY - clip.bounds.height / 2)
+    }
+
+    private func scrollClip(toY y: CGFloat) {
+        guard let scrollView = tableView.enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        let target = clip.constrainBoundsRect(NSRect(origin: NSPoint(x: clip.bounds.minX, y: y), size: clip.bounds.size))
+        clip.scroll(to: target.origin)
+        scrollView.reflectScrolledClipView(clip)
     }
 
     private func row(at index: Int) -> MessageRow? {

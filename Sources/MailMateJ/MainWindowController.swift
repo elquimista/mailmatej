@@ -21,7 +21,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private var correspondenceTask: Task<Void, Never>?
     /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
     /// mailbox restores it; a mailbox not visited yet this run opens scrolled to its newest message.
-    private var rememberedSelection: [MessageScope: [Int64]] = [:]
+    private var remembered: [MessageScope: (selection: [Int64], anchor: MessageListViewController.ScrollAnchor?)] = [:]
 
     private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged }
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
@@ -140,7 +140,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private func wireUp() {
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
-            rememberedSelection[self.scope] = list.selectedIDs
+            remembered[self.scope] = (list.selectedIDs, list.scrollAnchor)
             self.scope = scope
             self.scopeTitle = node.title
             self.reloadList(.scopeChanged)
@@ -180,9 +180,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
             switch reason {
             case .scopeChanged:
-                let remembered = rememberedSelection[scope] ?? []
-                if remembered.contains(where: ids.contains) {
-                    list.setIDs(ids, selecting: remembered, scroll: .toSelection)
+                if let saved = remembered[scope], saved.selection.contains(where: ids.contains) {
+                    list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
                 } else {
                     list.setIDs(ids, selecting: [], scroll: .toMessage(newest))
                 }
@@ -248,6 +247,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     #if DEBUG
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+
+        func debugScrollList(by points: CGFloat) {
+            guard let scrollView = list.tableView.enclosingScrollView else { return }
+            let clip = scrollView.contentView
+            clip.scroll(to: NSPoint(x: 0, y: clip.bounds.minY + points))
+            scrollView.reflectScrolledClipView(clip)
+        }
 
         /// Moves the main list selection down one row, as the down-arrow key would.
         func debugSelectNextMessage() {
