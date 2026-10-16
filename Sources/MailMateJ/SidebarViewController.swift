@@ -474,23 +474,13 @@ final class BadgeView: NSView {
     }
 }
 
-/// MailMate's sidebar selection: indigo while the sidebar has focus, grey otherwise.
+/// Sidebar selection in MailMate's shape (inset, rounded) and the app's own colors: the same
+/// accent-based selection color as the message lists while focused, grey otherwise.
 final class SidebarRowView: NSTableRowView {
-    /// Sampled from MailMate: rgb(52, 43, 135).
-    private static let focused = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 52 / 255, green: 43 / 255, blue: 135 / 255, alpha: 1)
-            : NSColor(srgbRed: 88 / 255, green: 76 / 255, blue: 190 / 255, alpha: 1)
-    }
-    private static let unfocused = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(white: 1, alpha: 0.14) : NSColor(white: 0, alpha: 0.12)
-    }
-
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
         let rect = bounds.insetBy(dx: 10, dy: 0)
-        (isEmphasized ? Self.focused : Self.unfocused).setFill()
+        (isEmphasized ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor).setFill()
         NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
     }
 }

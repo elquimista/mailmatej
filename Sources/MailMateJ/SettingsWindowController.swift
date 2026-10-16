@@ -87,12 +87,14 @@ struct CountersPane: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 28) {
-            VStack(spacing: 10) {
-                CornerPicker(selection: $corner, enabled: Set(Corner.allCases.filter { settings.counters[$0]?.showInDock == true }))
+            VStack(spacing: 16) {
+                CornerPicker(selection: $corner)
+                // 9 pt with 13 pt line pitch, as MailMate draws it (fitted by ink width at 1x).
                 Text("Dock Icon\nCounter Positions")
-                    .font(.caption)
+                    .font(.system(size: 9))
+                    .lineSpacing(2)
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color(white: 0.75))
             }
             .padding(.top, 16)
 
@@ -139,10 +141,14 @@ struct CountersPane: View {
     }
 }
 
-/// The app icon with a radio button at each corner; enabled corners show a filled dot.
+/// The app icon with a radio button on each corner, drawn as MailMate draws it (measured at 1x):
+/// 14 pt dots centered ±30.5/±32 pt from the icon's center, plain grey; the selected one in the
+/// app's accent color (like the other controls in this pane) with a white center.
 struct CornerPicker: View {
     @Binding var selection: Corner
-    let enabled: Set<Corner>
+
+    private static let dotGradient = LinearGradient(
+        colors: [Color(white: 99 / 255), Color(white: 126 / 255)], startPoint: .top, endPoint: .bottom)
 
     var body: some View {
         ZStack {
@@ -150,25 +156,24 @@ struct CornerPicker: View {
                 .resizable()
                 .frame(width: 64, height: 64)
             ForEach(Corner.allCases) { corner in
-                Button { selection = corner } label: {
-                    // Selected: radio button with a white center. Others: the corner's badge color if shown in the Dock, grey if not.
-                    ZStack {
-                        Circle().fill(enabled.contains(corner) || selection == corner
-                            ? Color(nsColor: DockTileView.color(for: corner)) : Color.gray.opacity(0.45))
-                        if selection == corner {
-                            Circle().fill(Color.white).frame(width: 6, height: 6)
-                        }
-                    }
-                    .frame(width: 15, height: 15)
-                    .overlay(Circle().strokeBorder(Color.white.opacity(selection == corner ? 0.9 : 0), lineWidth: 1.5))
-                }
-                .buttonStyle(.plain)
-                .help(corner.title)
-                .offset(x: corner == .topLeft || corner == .bottomLeft ? -38 : 38,
-                        y: corner == .topLeft || corner == .topRight ? -38 : 38)
+                Button { selection = corner } label: { dot(selected: selection == corner) }
+                    .buttonStyle(.plain)
+                    .help(corner.title)
+                    .offset(x: corner == .topLeft || corner == .bottomLeft ? -30.5 : 30.5,
+                            y: corner == .topLeft || corner == .topRight ? -32 : 32)
             }
         }
-        .frame(width: 96, height: 96)
+        .frame(width: 78, height: 78)
+    }
+
+    @ViewBuilder private func dot(selected: Bool) -> some View {
+        if selected {
+            Circle().fill(Color.accentColor)
+                .overlay(Circle().fill(Color.white).frame(width: 6, height: 6))
+                .frame(width: 14, height: 14)
+        } else {
+            Circle().fill(Self.dotGradient).frame(width: 14, height: 14)
+        }
     }
 }
 
