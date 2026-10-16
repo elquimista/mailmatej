@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The Settings window: toolbar-style tabs like MailMate's preferences. One pane for now.
 @MainActor
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
     private init() {
@@ -22,6 +22,7 @@ final class SettingsWindowController: NSWindowController {
         window.title = "Counters"
         window.setFrameAutosaveName("SettingsWindow")
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -30,6 +31,11 @@ final class SettingsWindowController: NSWindowController {
         if window?.isVisible != true { window?.center() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        AppModel.shared.dockCounters?.isPreviewing = true  // Counters is the only pane.
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        AppModel.shared.dockCounters?.isPreviewing = false
     }
 }
 

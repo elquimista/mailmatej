@@ -88,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     await windowController?.debugCheckRawMessage()
                 }
                 if let path = ProcessInfo.processInfo.environment["MMJ_DOCK_RENDER"] {
+                    if ProcessInfo.processInfo.environment["MMJ_DOCK_PREVIEW"] != nil {
+                        AppModel.shared.dockCounters?.isPreviewing = true
+                    }
                     AppModel.shared.dockCounters?.update()
                     AppModel.shared.dockCounters?.debugRender(to: path)
                     AppModel.shared.dockCounters?.debugRender(

@@ -6,16 +6,6 @@ import MailStore
 enum Corner: String, Codable, CaseIterable, Identifiable {
     case topLeft, topRight, bottomLeft, bottomRight
     var id: String { rawValue }
-
-    /// The other corner on the same row.
-    var rowPartner: Corner {
-        switch self {
-        case .topLeft: .topRight
-        case .topRight: .topLeft
-        case .bottomLeft: .bottomRight
-        case .bottomRight: .bottomLeft
-        }
-    }
 }
 
 struct CounterConfig: Codable, Equatable {
@@ -57,6 +47,8 @@ final class CounterSettings: ObservableObject {
 /// about a third of the tile tall, in the tile's corners, one color per corner.
 final class DockTileView: NSView {
     var values: [Corner: Int] = [:]
+    /// Draw zero counts too (while previewing the corners in Settings).
+    var showsZeros = false
 
     override func draw(_ dirtyRect: NSRect) {
         #if DEBUG
@@ -65,10 +57,21 @@ final class DockTileView: NSView {
             }
         #endif
         NSApp.applicationIconImage?.draw(in: bounds)
+        let shown = values.filter { $0.value > 0 || showsZeros }  // Zero counts aren't shown.
+        var badges: [Corner: Badge] = [:]
+        for (left, right) in [(Corner.topLeft, Corner.topRight), (.bottomLeft, .bottomRight)] {
+            // Each badge is sized by its own count alone, so it looks the same whatever its neighbor
+            // shows. Only if two badges on a row would collide does each get about half the width.
+            var pair = [left, right].compactMap { corner in shown[corner].map { (corner, $0) } }
+                .map { ($0.0, $0.1, badge(for: $0.1, maxWidth: bounds.width * 0.62)) }
+            if pair.count == 2 && pair[0].2.width + pair[1].2.width > bounds.width {
+                pair = pair.map { ($0.0, $0.1, badge(for: $0.1, maxWidth: bounds.width * 0.52)) }
+            }
+            for (corner, _, badge) in pair { badges[corner] = badge }
+        }
         // Bottom row first, then top-left, then top-right on top (as MailMate overlaps them).
         for corner in [Corner.bottomLeft, .bottomRight, .topLeft, .topRight] {
-            guard let value = values[corner], value > 0 else { continue }  // Zero counts aren't shown.
-            drawBadge(value, at: corner, sharesRow: (values[corner.rowPartner] ?? 0) > 0)
+            if let badge = badges[corner] { draw(badge, at: corner) }
         }
     }
 
@@ -94,11 +97,15 @@ final class DockTileView: NSView {
         return millions < 10 ? String(format: "%.1fM", floor(millions * 10) / 10) : "\(value / 1_000_000)M"
     }
 
-    /// - Parameter sharesRow: another badge is on the same row; each then gets about half the width,
-    ///   so neither hides the other.
-    private func drawBadge(_ value: Int, at corner: Corner, sharesRow: Bool) {
-        let height = (bounds.height * 0.36).rounded()
-        let maxWidth = bounds.width * (sharesRow ? 0.52 : 0.62)
+    private struct Badge {
+        var label: NSAttributedString
+        var width: CGFloat
+    }
+
+    private var badgeHeight: CGFloat { (bounds.height * 0.36).rounded() }
+
+    private func badge(for value: Int, maxWidth: CGFloat) -> Badge {
+        let height = badgeHeight
         let padding = height * 0.5
         let minFont = height * 0.42
 
@@ -117,11 +124,14 @@ final class DockTileView: NSView {
                 label = Self.attributed(Self.compactLabel(for: value), size: fontSize)
             }
         }
+        return Badge(label: label, width: min(maxWidth, max(height, label.size().width + padding)))
+    }
+
+    private func draw(_ badge: Badge, at corner: Corner) {
+        let height = badgeHeight, width = badge.width, label = badge.label
         let textSize = label.size()
-        let width = min(maxWidth, max(height, textSize.width + padding))
 
         // In the tile's corner, as MailMate places them: flush with the top or bottom edge and the side.
-        // Two badges on a row each keep to their own side (they may touch in the middle).
         let left = corner == .topLeft || corner == .bottomLeft
         let top = corner == .topLeft || corner == .topRight
         let rect = NSRect(
@@ -155,6 +165,15 @@ final class DockCounters {
     private let store: MailStore
     private let view: DockTileView
     private var lastValues: [Corner: Int]?
+    /// While the Counters settings are open, all four corners are shown so it's clear where each
+    /// counter sits (as MailMate does): enabled ones with their count, even zero; disabled ones as 0.
+    var isPreviewing = false {
+        didSet {
+            guard isPreviewing != oldValue else { return }
+            lastValues = nil
+            update()
+        }
+    }
     private var cancellable: AnyCancellable?
 
     init(store: MailStore) {
@@ -170,7 +189,8 @@ final class DockCounters {
     /// Recomputes the counters and redraws the Dock icon if anything changed.
     func update() {
         var values: [Corner: Int] = [:]
-        for (corner, config) in CounterSettings.shared.counters where config.showInDock {
+        for (corner, config) in CounterSettings.shared.counters where config.showInDock || isPreviewing {
+            guard config.showInDock else { values[corner] = 0; continue }
             guard let scope = MessageScope(key: config.source) else { continue }
             values[corner] = (try? store.count(scope: scope, unreadOnly: config.unreadOnly)) ?? 0
         }
@@ -183,8 +203,9 @@ final class DockCounters {
         #endif
         let tile = NSApp.dockTile
         tile.badgeLabel = nil
-        if values.values.contains(where: { $0 > 0 }) {
+        if isPreviewing || values.values.contains(where: { $0 > 0 }) {
             view.values = values
+            view.showsZeros = isPreviewing
             if tile.contentView !== view { tile.contentView = view }
         } else {
             tile.contentView = nil
