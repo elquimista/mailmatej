@@ -44,6 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: .milliseconds(400))
                     }
                 }
+                // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
+                if let key = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_ROUNDTRIP"] {
+                    windowController?.debugSelectSidebar(key: key)
+                    try? await Task.sleep(for: .seconds(1))
+                    windowController?.debugSelectSidebar(key: "unified.inbox")
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SHEET"] != nil {
                     windowController?.addAccount(nil)

@@ -15,11 +15,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     private var scope: MessageScope = .role("inbox")
     private var scopeTitle = "Inbox"
-    private var sort = MessageSort.newestFirst
     private var search = ""
     private var loadGeneration = 0
     private var correspondent: String?
     private var correspondenceTask: Task<Void, Never>?
+    /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
+    /// mailbox restores it; a mailbox not visited yet this run opens scrolled to its newest message.
+    private var rememberedSelection: [MessageScope: [Int64]] = [:]
+
+    private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged }
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
 
     init(model: AppModel) {
@@ -136,18 +140,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private func wireUp() {
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
+            rememberedSelection[self.scope] = list.selectedIDs
             self.scope = scope
             self.scopeTitle = node.title
-            self.reloadList(selectFirst: true)
+            self.reloadList(.scopeChanged)
         }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
             messageView.show(messageID: id, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: id)
         }
-        list.onSortChange = { [weak self] sort in
-            self?.sort = sort
-            self?.reloadList(selectFirst: false)
+        list.onSortChange = { [weak self] _ in
+            self?.reloadList(.sortChanged)
+        }
+        correspondence.onSortChange = { [weak self] _ in
+            guard let self else { return }
+            reloadCorrespondence(selecting: list.selectedID ?? correspondence.selectedID)
         }
         correspondence.onSelectionChange = { [weak self] id in
             guard let self, let id else { return }
@@ -157,21 +165,40 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     // MARK: Loading
 
-    private func reloadList(selectFirst: Bool) {
+    private func reloadList(_ reason: ReloadReason) {
         loadGeneration += 1
         let generation = loadGeneration
-        let (store, scope, sort, search) = (model.store, scope, sort, search)
+        let (store, scope, sort) = (model.store, scope, list.sort)
+        let search: String? = search.isEmpty ? nil : search
         Task {
-            let ids = await Task.detached(priority: .userInitiated) {
-                (try? store.messageIDs(scope: scope, sort: sort, search: search.isEmpty ? nil : search)) ?? []
+            let (ids, newest) = await Task.detached(priority: .userInitiated) {
+                ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? [],
+                 try? store.newestMessageID(scope: scope, search: search))
             }.value
             guard generation == loadGeneration else { return }
-            let wasEmpty = list.ids.isEmpty
-            list.setIDs(ids, scrollToSelection: selectFirst)
-            if selectFirst || wasEmpty {
-                if list.selectedID == nil { list.tableView.scrollRowToVisible(0) }
-                list.selectFirstIfNeeded()
-                if ids.isEmpty { messageView.show(messageID: nil) }
+            let before = list.selectedIDs
+
+            switch reason {
+            case .scopeChanged:
+                let remembered = rememberedSelection[scope] ?? []
+                if remembered.contains(where: ids.contains) {
+                    list.setIDs(ids, selecting: remembered, scroll: .toSelection)
+                } else {
+                    list.setIDs(ids, selecting: [], scroll: .toMessage(newest))
+                }
+            case .searchChanged, .sortChanged:
+                // Keep the selection if it is still in the list; otherwise show the newest message.
+                let kept = before.filter(ids.contains)
+                list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newest) : .toSelection)
+            case .dataChanged:
+                // A list that just got its first messages (initial sync) opens at the newest one.
+                let wasEmpty = list.ids.isEmpty
+                list.setIDs(ids, scroll: wasEmpty ? .toMessage(newest) : .keepPosition)
+            }
+
+            if list.selectedIDs != before || reason == .scopeChanged {
+                messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
+                scheduleCorrespondenceUpdate(for: list.selectedID)
             }
             updateTitle()
         }
@@ -194,14 +221,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             return
         }
         correspondent = email
-        let ids = (try? model.store.correspondenceIDs(email: email)) ?? []
+        let ids = (try? model.store.correspondenceIDs(email: email, sort: correspondence.sort)) ?? []
         correspondenceTitle.stringValue = "Correspondence with \(email) (\(ids.count))"
-        correspondence.setIDs(ids, select: id, scrollToSelection: true)
+        correspondence.setIDs(ids, selecting: [id], scroll: .toSelection)
     }
 
     private func storeDidChange() {
         sidebar.reload()
-        reloadList(selectFirst: false)
+        reloadList(.dataChanged)
         if list.selectedID != nil || correspondent != nil {
             reloadCorrespondence(selecting: list.selectedID ?? correspondence.selectedID)
         }
@@ -220,6 +247,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     }
 
     #if DEBUG
+        func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+
         /// Moves the main list selection down one row, as the down-arrow key would.
         func debugSelectNextMessage() {
             let next = list.tableView.selectedRow + 1
@@ -255,7 +284,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     @objc private func searchChanged(_ sender: NSSearchField) {
         search = sender.stringValue
-        reloadList(selectFirst: true)
+        reloadList(.searchChanged)
     }
 
     // MARK: Toolbar

@@ -31,6 +31,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     var onSelectionChange: ((Int64?) -> Void)?
     var onSortChange: ((MessageSort) -> Void)?
 
+    /// The list's sort, remembered across launches (per list, keyed by its autosave name).
+    private(set) var sort: MessageSort
+
     private let store: MailStore
     private let columns: [Column]
     private let autosaveName: String
@@ -48,6 +51,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         self.columns = columns
         self.autosaveName = autosaveName
         self.widths = widths
+        sort = Self.savedSort(autosaveName) ?? .newestFirst
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -101,6 +105,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         }
         table.autosaveName = autosaveName
         table.autosaveTableColumns = true
+        table.sortDescriptors = [NSSortDescriptor(key: sort.key.rawValue, ascending: sort.ascending)]
         table.dataSource = self
         table.delegate = self
 
@@ -120,9 +125,19 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     var selectedID: Int64? { selectedIDs.count == 1 ? selectedIDs[0] : nil }
 
-    /// Replaces the list. Keeps the current selection (or selects `select`) without firing `onSelectionChange`.
-    func setIDs(_ newIDs: [Int64], select: Int64? = nil, scrollToSelection: Bool = false) {
-        let wanted = select.map { [$0] } ?? selectedIDs
+    enum Scroll {
+        /// Keep the same messages in view (used when data changes underneath the user).
+        case keepPosition
+        /// Bring the first selected message into view.
+        case toSelection
+        /// Bring a specific message into view.
+        case toMessage(Int64?)
+    }
+
+    /// Replaces the list without firing `onSelectionChange`. `selecting: nil` keeps the current
+    /// selection (where those messages still exist); `[]` clears it.
+    func setIDs(_ newIDs: [Int64], selecting: [Int64]? = nil, scroll: Scroll = .keepPosition) {
+        let wanted = selecting ?? selectedIDs
         let firstVisible = firstVisibleID()
 
         ids = newIDs
@@ -133,17 +148,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         tableView.selectRowIndexes(indexes, byExtendingSelection: false)
         suppressSelection = false
 
-        if scrollToSelection, let row = indexes.first {
-            tableView.scrollRowToVisible(row)
-        } else if let firstVisible, let row = newIDs.firstIndex(of: firstVisible) {
-            tableView.scroll(NSPoint(x: 0, y: tableView.rect(ofRow: row).minY - tableView.headerView!.frame.height))
+        switch scroll {
+        case .toSelection:
+            if let row = indexes.first { tableView.scrollRowToVisible(row) }
+        case .toMessage(let id):
+            if let id, let row = newIDs.firstIndex(of: id) { tableView.scrollRowToVisible(row) }
+        case .keepPosition:
+            if let firstVisible, let row = newIDs.firstIndex(of: firstVisible) {
+                tableView.scroll(NSPoint(x: 0, y: tableView.rect(ofRow: row).minY - tableView.headerView!.frame.height))
+            }
         }
-    }
-
-    /// Selects the first row, firing `onSelectionChange`.
-    func selectFirstIfNeeded() {
-        guard tableView.selectedRow < 0, !ids.isEmpty else { return }
-        tableView.selectRowIndexes([0], byExtendingSelection: false)
     }
 
     private func firstVisibleID() -> Int64? {
@@ -197,7 +211,19 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         guard let first = tableView.sortDescriptors.first, let key = first.key.flatMap(MessageSort.Key.init) else { return }
-        onSortChange?(MessageSort(key: key, ascending: first.ascending))
+        sort = MessageSort(key: key, ascending: first.ascending)
+        UserDefaults.standard.set(["key": key.rawValue, "ascending": first.ascending], forKey: Self.sortDefaultsKey(autosaveName))
+        onSortChange?(sort)
+    }
+
+    private static func sortDefaultsKey(_ name: String) -> String { "\(name).Sort" }
+
+    private static func savedSort(_ name: String) -> MessageSort? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: sortDefaultsKey(name)),
+            let key = (saved["key"] as? String).flatMap(MessageSort.Key.init),
+            let ascending = saved["ascending"] as? Bool
+        else { return nil }
+        return MessageSort(key: key, ascending: ascending)
     }
 
     // MARK: Cells

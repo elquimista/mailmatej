@@ -38,6 +38,8 @@ import Testing
         #expect(try store.rows(ids: [inbox[0]]).first?.fromEmail == "c@x.com")  // newest first
         #expect(try store.messageIDs(scope: .allMessages).count == 2)  // trash excluded
         #expect(try store.messageIDs(scope: .flagged).count == 1)
+        let bySubject = try store.messageIDs(scope: .role("inbox"), sort: MessageSort(key: .from, ascending: true))
+        #expect(try store.newestMessageID(scope: .role("inbox")) == bySubject.last)  // c@x.com, newest
         #expect(try store.rows(ids: inbox).first { $0.fromEmail == "c@x.com" }?.isSeen == true)
     }
 
@@ -67,6 +69,8 @@ import Testing
         let thread = try store.correspondenceIDs(email: "ada@x.com")
         #expect(thread.count == 2)
         #expect(thread.first == sent)
+        let oldestFirst = try store.correspondenceIDs(email: "ada@x.com", sort: MessageSort(key: .receivedAt, ascending: true))
+        #expect(oldestFirst == thread.reversed())
     }
 
     @Test func search() throws {

@@ -89,6 +89,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         suppressSelection = false
     }
 
+    #if DEBUG
+        /// Selects the item with `key` as a click would (fires `onSelect`).
+        func debugSelect(key: String) {
+            guard let node = find(key, in: roots) else { return }
+            let row = outline.row(forItem: node)
+            if row >= 0 { outline.selectRowIndexes([row], byExtendingSelection: false) }
+        }
+    #endif
+
     /// Selects the default item and notifies `onSelect`.
     func selectInitial() {
         reload()

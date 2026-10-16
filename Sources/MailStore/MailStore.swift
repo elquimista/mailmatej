@@ -237,6 +237,20 @@ public final class MailStore: Sendable {
     public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil) throws
         -> [Int64]
     {
+        let (filter, args) = Self.filter(scope: scope, search: search)
+        let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
+        return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
+    }
+
+    /// The most recently received message in a list, whatever the list's sort order.
+    public func newestMessageID(scope: MessageScope, search: String? = nil) throws -> Int64? {
+        let (filter, args) = Self.filter(scope: scope, search: search)
+        let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY m.receivedAt DESC, m.id DESC LIMIT 1"
+        return try dbPool.read { db in try Int64.fetchOne(db, sql: sql, arguments: args) }
+    }
+
+    /// WHERE clause (on a table aliased `m`) and arguments selecting a list's messages.
+    static func filter(scope: MessageScope, search: String?) -> (String, StatementArguments) {
         var clauses: [String] = []
         var args: [(any DatabaseValueConvertible)?] = []
 
@@ -267,17 +281,7 @@ public final class MailStore: Sendable {
             args.append(query)
         }
 
-        let direction = sort.ascending ? "ASC" : "DESC"
-        let order: String =
-            switch sort.key {
-            case .receivedAt: "m.receivedAt \(direction), m.id \(direction)"
-            case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
-            case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
-            case .size: "m.size \(direction), m.receivedAt DESC"
-            }
-
-        let sql = "SELECT m.id FROM message m WHERE \(clauses.joined(separator: " AND ")) ORDER BY \(order)"
-        return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: StatementArguments(args)) }
+        return (clauses.joined(separator: " AND "), StatementArguments(args))
     }
 
     public func rows(ids: [Int64]) throws -> [MessageRow] {
@@ -343,15 +347,18 @@ public final class MailStore: Sendable {
         }
     }
 
-    /// Messages from or to `email`, across all accounts and mailboxes, newest first.
-    public func correspondenceIDs(email: String, limit: Int = 2000) throws -> [Int64] {
+    /// Messages from or to `email`, across all accounts and mailboxes: the newest `limit`, in `sort` order.
+    public func correspondenceIDs(email: String, sort: MessageSort = .newestFirst, limit: Int = 2000) throws -> [Int64] {
         try dbPool.read { db in
             try Int64.fetchAll(
                 db,
                 sql: """
-                    SELECT m.id FROM message m
-                    WHERE m.id IN (SELECT messageId FROM address WHERE email = ?)
-                    ORDER BY m.receivedAt DESC LIMIT ?
+                    SELECT m.id FROM (
+                        SELECT id, receivedAt, fromDisplay, sortSubject, size FROM message
+                        WHERE id IN (SELECT messageId FROM address WHERE email = ?)
+                        ORDER BY receivedAt DESC LIMIT ?
+                    ) m
+                    ORDER BY \(Self.orderBy(sort))
                     """,
                 arguments: [email.lowercased(), limit])
         }
@@ -397,6 +404,17 @@ public final class MailStore: Sendable {
     }
 
     // MARK: Helpers
+
+    /// ORDER BY terms for `sort`, on a table aliased `m`.
+    static func orderBy(_ sort: MessageSort) -> String {
+        let direction = sort.ascending ? "ASC" : "DESC"
+        return switch sort.key {
+        case .receivedAt: "m.receivedAt \(direction), m.id \(direction)"
+        case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
+        case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
+        case .size: "m.size \(direction), m.receivedAt DESC"
+        }
+    }
 
     static func sortSubject(_ subject: String) -> String {
         var s = Substring(subject)

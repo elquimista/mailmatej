@@ -2,6 +2,7 @@ import AppKit
 import JMAPKit
 import MailStore
 import MailSync
+import os
 
 extension Notification.Name {
     /// Posted on the main thread (debounced) after synced data changed.
@@ -54,6 +55,7 @@ final class AppModel {
         myAddresses = (try? store.myAddresses()) ?? []
         #if DEBUG
             addDevAccountsIfRequested()
+            if ProcessInfo.processInfo.environment["MMJ_KEYCHAIN_SELFTEST"] != nil { keychainSelfTest() }
         #endif
         Task { try? await coordinator.start() }
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -161,6 +163,22 @@ final class AppModel {
     }
 
     #if DEBUG
+        /// Round-trips two secrets through the (Dev app's own) keychain item and logs the outcome.
+        private func keychainSelfTest() {
+            let log = Logger(subsystem: "app.mailmatej", category: "selftest")
+            do {
+                try Keychain.set("one", account: "selftest-1")
+                try Keychain.set("two", account: "selftest-2")
+                let ok = try Keychain.get(account: "selftest-1") == "one" && Keychain.get(account: "selftest-2") == "two"
+                Keychain.delete(account: "selftest-1")
+                Keychain.delete(account: "selftest-2")
+                let gone = (try? Keychain.get(account: "selftest-1")) == nil
+                log.notice("Keychain self-test: \(ok && gone ? "PASS" : "FAIL", privacy: .public)")
+            } catch {
+                log.error("Keychain self-test error: \(String(describing: error), privacy: .public)")
+            }
+        }
+
         /// `MMJ_DEV_ACCOUNTS=alice,bob,carol` adds the accounts created by dev/stalwart/seed.py,
         /// without touching the keychain (their passwords are derived from the name).
         private func addDevAccountsIfRequested() {
