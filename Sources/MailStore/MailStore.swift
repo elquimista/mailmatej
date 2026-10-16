@@ -383,6 +383,13 @@ public final class MailStore: Sendable {
         return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
     }
 
+    /// How many messages a list holds, or how many of them are unread (for Dock counters).
+    public func count(scope: MessageScope, unreadOnly: Bool) throws -> Int {
+        let (filter, args) = Self.filter(scope: scope, search: nil)
+        let sql = "SELECT COUNT(*) FROM message m WHERE \(filter)\(unreadOnly ? " AND NOT m.isSeen" : "")"
+        return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: args) ?? 0 }
+    }
+
     /// The most recently received message in a list, whatever the list's sort order.
     public func newestMessageID(scope: MessageScope, search: String? = nil) throws -> Int64? {
         let (filter, args) = Self.filter(scope: scope, search: search)

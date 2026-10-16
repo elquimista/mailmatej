@@ -131,6 +131,20 @@ import Testing
         #expect(count.value > 0)
     }
 
+    @Test func countsAndScopeKeys() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200, keywords: ["$seen"]),
+            message("3", from: "c@x.com", box: "tr", at: 300),
+        ])
+        #expect(try store.count(scope: .role("inbox"), unreadOnly: true) == 1)
+        #expect(try store.count(scope: .role("inbox"), unreadOnly: false) == 2)
+        #expect(try store.count(scope: .account("acc"), unreadOnly: false) == 3)
+        for scope in [MessageScope.allMessages, .flagged, .role("inbox"), .mailbox(42), .account("A:B")] {
+            #expect(MessageScope(key: scope.key) == scope)
+        }
+        #expect(MessageScope(key: "mailbox:x") == nil)
+    }
+
     @Test func search() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100, subject: "Quarterly planning"),

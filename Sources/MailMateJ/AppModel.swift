@@ -29,6 +29,7 @@ final class AppModel {
     private(set) var myAddresses: Set<String> = []
     private var observation: StoreObservation?
     private var refreshScheduled = false
+    private(set) var dockCounters: DockCounters?
 
     static func bootstrap() throws {
         shared = try AppModel()
@@ -53,6 +54,8 @@ final class AppModel {
             Task { @MainActor in AppModel.shared?.scheduleRefresh() }
         }
         myAddresses = (try? store.myAddresses()) ?? []
+        dockCounters = DockCounters(store: store)
+        dockCounters?.update()
         #if DEBUG
             addDevAccountsIfRequested()
             if ProcessInfo.processInfo.environment["MMJ_KEYCHAIN_SELFTEST"] != nil { keychainSelfTest() }
@@ -210,6 +213,7 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(300))
             refreshScheduled = false
             myAddresses = (try? store.myAddresses()) ?? myAddresses
+            dockCounters?.update()
             NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
         }
     }

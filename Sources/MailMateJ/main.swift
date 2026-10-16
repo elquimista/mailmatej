@@ -78,7 +78,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_RAW"] != nil {
                     await windowController?.debugCheckRawMessage()
                 }
+                if let path = ProcessInfo.processInfo.environment["MMJ_DOCK_RENDER"] {
+                    AppModel.shared.dockCounters?.update()
+                    AppModel.shared.dockCounters?.debugRender(to: path)
+                    AppModel.shared.dockCounters?.debugRender(
+                        to: path.replacingOccurrences(of: ".png", with: "-long.png"),
+                        values: [.topLeft: 12_345, .topRight: 123_456, .bottomLeft: 7, .bottomRight: 2_345_678])
+                }
                 var target = windowController?.window
+                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTINGS"] != nil {
+                    SettingsWindowController.shared.show()
+                    try? await Task.sleep(for: .seconds(1))
+                    target = SettingsWindowController.shared.window
+                }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SHEET"] != nil {
                     windowController?.addAccount(nil)
                     try? await Task.sleep(for: .seconds(1.5))
@@ -98,6 +110,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     #endif
 
+    @objc func showSettings(_ sender: Any?) {
+        SettingsWindowController.shared.show()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -113,6 +129,8 @@ enum MainMenu {
 
         let app = submenu(main, appName)
         app.addItem(withTitle: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
         app.addItem(.separator())
         let services = NSMenu()
         app.addItem(withTitle: "Services", action: nil, keyEquivalent: "").submenu = services

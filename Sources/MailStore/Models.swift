@@ -211,6 +211,29 @@ public enum MessageScope: Hashable, Sendable {
     case flagged
     case mailbox(Int64)
     case account(String)
+
+    /// A stable string form, for settings: "all", "flagged", "role:inbox", "mailbox:42", "account:<id>".
+    public var key: String {
+        switch self {
+        case .allMessages: "all"
+        case .flagged: "flagged"
+        case .role(let role): "role:\(role)"
+        case .mailbox(let id): "mailbox:\(id)"
+        case .account(let id): "account:\(id)"
+        }
+    }
+
+    public init?(key: String) {
+        let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
+        switch (parts.first, parts.count) {
+        case ("all", 1): self = .allMessages
+        case ("flagged", 1): self = .flagged
+        case ("role", 2): self = .role(parts[1])
+        case ("mailbox", 2): if let id = Int64(parts[1]) { self = .mailbox(id) } else { return nil }
+        case ("account", 2): self = .account(parts[1])
+        default: return nil
+        }
+    }
 }
 
 public struct MessageSort: Hashable, Sendable {
