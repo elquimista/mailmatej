@@ -18,6 +18,24 @@ public struct Session: Decodable, Sendable {
     public internal(set) var uploadUrl: String
     public internal(set) var eventSourceUrl: String
     public let state: String
+    /// Set when the endpoints were moved onto a loopback origin (see `rebased(onto:)`).
+    var loopbackOrigin: URL?
+
+    /// The RFC 8887 WebSocket endpoint, if the server offers push over it.
+    public var webSocketURL: URL? {
+        guard let capability = capabilities[Capability.webSocket], capability["supportsPush"]?.boolValue == true,
+            let string = capability["url"]?.stringValue,
+            var components = URLComponents(url: URL(string: string, relativeTo: apiUrl)?.absoluteURL ?? apiUrl, resolvingAgainstBaseURL: false)
+        else { return nil }
+        if components.scheme == "https" { components.scheme = "wss" }
+        if components.scheme == "http" { components.scheme = "ws" }
+        if let origin = loopbackOrigin {
+            components.scheme = origin.scheme == "https" ? "wss" : "ws"
+            components.host = origin.host
+            components.port = origin.port
+        }
+        return components.url
+    }
 
     /// Moves the advertised endpoints onto `origin` (scheme, host, port), keeping their paths.
     /// Used for servers reached on loopback (a local dev server) that advertise their public hostname.
@@ -33,6 +51,7 @@ public struct Session: Decodable, Sendable {
                 .replacingOccurrences(of: "%7D", with: "}")
         }
         var s = self
+        s.loopbackOrigin = origin
         s.apiUrl = URL(string: rebase(apiUrl.absoluteString)) ?? apiUrl
         s.downloadUrl = rebase(downloadUrl)
         s.uploadUrl = rebase(uploadUrl)

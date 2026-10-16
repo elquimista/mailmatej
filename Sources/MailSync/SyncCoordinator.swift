@@ -43,6 +43,9 @@ public actor SyncCoordinator {
     private var pending: Set<String> = []
     private var pushTasks: [String: Task<Void, Never>] = [:]
     private var downloadTasks: [String: Task<Void, Never>] = [:]
+    private var fastPollTasks: [String: Task<Void, Never>] = [:]
+    /// How often an account is checked for new mail while its push doesn't work.
+    private let fastPollInterval: Duration = .seconds(20)
     /// Full downloads run for at most this many accounts at a time, separately from syncing.
     private let downloadLimiter = AsyncLimiter(limit: 3)
     /// Pause between download batches of one account, to stay well under server rate limits.
@@ -89,6 +92,8 @@ public actor SyncCoordinator {
         pollTask?.cancel()
         for task in downloadTasks.values { task.cancel() }
         downloadTasks.removeAll()
+        for task in fastPollTasks.values { task.cancel() }
+        fastPollTasks.removeAll()
         for task in pushTasks.values { task.cancel() }
         pushTasks.removeAll()
     }
@@ -101,6 +106,7 @@ public actor SyncCoordinator {
     public func removeAccount(id: String) {
         pushTasks.removeValue(forKey: id)?.cancel()
         downloadTasks.removeValue(forKey: id)?.cancel()
+        fastPollTasks.removeValue(forKey: id)?.cancel()
         engines.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
         pending.remove(id)
@@ -218,23 +224,65 @@ public actor SyncCoordinator {
         onStatus(status)
     }
 
+    /// Keeps a push connection open: WebSocket first (proxies don't buffer it), EventSource as the
+    /// fallback. A connection that delivers nothing at all — not even the server's pings — counts as
+    /// broken; while push is broken the account is checked for new mail every 20 s instead.
     private func startPush(_ accountId: String, engine: JMAPAccountSync) {
         pushTasks[accountId]?.cancel()
         pushTasks[accountId] = Task { [weak self] in
+            let name = engine.account.name
+            var transport: JMAPAccountSync.PushTransport = await engine.supportsWebSocketPush() ? .webSocket : .eventSource
             var backoff: Double = 5
             while !Task.isCancelled {
+                let started = ContinuousClock.now
+                var signals = 0
+                var failure: String?
                 do {
-                    let stream = try await engine.changeNotifications()
-                    backoff = 5
-                    for try await _ in stream {
-                        await self?.requestSync(accountId)
+                    let stream = try await engine.pushSignals(transport)
+                    syncLog.notice("Push connecting over \(transport.rawValue, privacy: .public) for \(name, privacy: .public)")
+                    for try await signal in stream {
+                        signals += 1
+                        if signals == 1 {
+                            syncLog.notice("Push working over \(transport.rawValue, privacy: .public) for \(name, privacy: .public)")
+                            await self?.setPushWorking(accountId, true, name: name)
+                        }
+                        if case .changed = signal { await self?.requestSync(accountId) }
                     }
                 } catch {
-                    // Connection dropped or push unsupported; the poll keeps us current meanwhile.
+                    failure = ErrorText.technical(error)
                 }
-                try? await Task.sleep(for: .seconds(backoff))
-                backoff = min(backoff * 2, 300)
+                guard !Task.isCancelled else { return }
+                let seconds = (ContinuousClock.now - started).components.seconds
+                syncLog.notice("Push over \(transport.rawValue, privacy: .public) ended for \(name, privacy: .public) after \(seconds)s with \(signals) signals\(failure.map { ": " + $0 } ?? "", privacy: .public)")
+                if signals == 0 {
+                    await self?.setPushWorking(accountId, false, name: name)
+                    // Try the other transport next.
+                    if transport == .webSocket {
+                        transport = .eventSource
+                    } else if await engine.supportsWebSocketPush() {
+                        transport = .webSocket
+                    }
+                } else {
+                    backoff = 5
+                }
                 await self?.requestSync(accountId)  // Catch up on anything missed while disconnected.
+                try? await Task.sleep(for: .seconds(backoff))
+                if signals == 0 { backoff = min(backoff * 2, 300) }
+            }
+        }
+    }
+
+    /// Fast polling covers an account while its push doesn't work.
+    private func setPushWorking(_ accountId: String, _ working: Bool, name: String) {
+        if working {
+            fastPollTasks.removeValue(forKey: accountId)?.cancel()
+        } else if fastPollTasks[accountId] == nil {
+            syncLog.notice("Push not working for \(name, privacy: .public); checking for new mail every \(Int(self.fastPollInterval.components.seconds))s")
+            fastPollTasks[accountId] = Task { [weak self, fastPollInterval] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: fastPollInterval)
+                    await self?.requestSync(accountId)
+                }
             }
         }
     }

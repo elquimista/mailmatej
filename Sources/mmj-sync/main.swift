@@ -70,9 +70,11 @@ let inbox = try store.messageIDs(scope: .role("inbox")).count
 print("Store: \(total) messages in account, \(inbox) in unified Inbox — \(directory.path)")
 
 if CommandLine.arguments.contains("--watch") {
-    print("Watching for push changes (Ctrl-C to stop)…")
     let engine = try JMAPAccountSync(account: account, credentials: credentials, store: store)
-    for try await _ in try await engine.changeNotifications() {
+    let transport: JMAPAccountSync.PushTransport = await engine.supportsWebSocketPush() ? .webSocket : .eventSource
+    print("Watching for push changes over \(transport.rawValue) (Ctrl-C to stop)…")
+    for try await signal in try await engine.pushSignals(transport) {
+        guard case .changed = signal else { continue }
         let r = try await engine.sync()
         print("\(Date().formatted(date: .omitted, time: .standard)) push → \(r.created) new, \(r.updated) updated, \(r.destroyed) removed")
     }

@@ -255,7 +255,8 @@ final class AppModel {
             for (i, name) in names.split(separator: ",").enumerated() {
                 let record = AccountRecord(
                     id: "dev-\(name)", name: "\(name.capitalized) (local)",
-                    sessionURL: "http://localhost:18080/.well-known/jmap", username: "\(name)@mmj.test",
+                    sessionURL: "http://localhost:\(ProcessInfo.processInfo.environment["MMJ_DEV_PORT"] ?? "18080")/.well-known/jmap",
+                    username: "\(name)@mmj.test",
                     authKind: .basic, sortOrder: 1000 + i)
                 try? store.save(record)  // Upsert, so a changed dev server URL is picked up.
             }

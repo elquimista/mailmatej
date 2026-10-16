@@ -77,15 +77,18 @@ public actor JMAPClient {
         return try await perform(authorized(URLRequest(url: url))).0
     }
 
-    // MARK: Push (EventSource, RFC 8620 §7.3)
+    // MARK: Push
 
-    /// Streams StateChange events until cancelled or the connection drops.
-    public func stateChanges() async throws -> AsyncThrowingStream<StateChange, Error> {
+    /// Streams push signals over EventSource (RFC 8620 §7.3) until cancelled or the connection drops.
+    /// The server pings every 30 s; if no bytes arrive for `silenceTimeout` (e.g. a proxy buffers the
+    /// stream), the request times out and the stream ends with an error.
+    public func eventSourceSignals(silenceTimeout: TimeInterval = 75) async throws -> AsyncThrowingStream<PushSignal, Error> {
         let session = try await currentSession()
         guard let url = session.eventSourceURL() else { throw JMAPError.invalidResponse("bad eventSourceUrl") }
         var request = authorized(URLRequest(url: url))
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 120  // Server pings every 30 s.
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.timeoutInterval = silenceTimeout
         let (bytes, response) = try await urlSession.bytes(for: request, delegate: RedirectAuthDelegate.shared)
         try check(response, body: Data())
 
@@ -98,7 +101,9 @@ public actor JMAPClient {
                         if event.type == "state", let data = event.data.data(using: .utf8),
                             let change = try? JSONDecoder().decode(StateChange.self, from: data)
                         {
-                            continuation.yield(change)
+                            continuation.yield(.changed(change))
+                        } else {
+                            continuation.yield(.alive)  // "ping" and anything else prove the stream flows.
                         }
                     }
                     continuation.finish()
@@ -108,6 +113,74 @@ public actor JMAPClient {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Streams push signals over a JMAP WebSocket (RFC 8887). Unlike EventSource, proxies don't buffer
+    /// WebSocket traffic. The connection is checked with a WebSocket ping every 30 s.
+    public func webSocketSignals() async throws -> AsyncThrowingStream<PushSignal, Error> {
+        let session = try await currentSession()
+        guard let url = session.webSocketURL else { throw JMAPError.missingCapability(Capability.webSocket) }
+        var request = authorized(URLRequest(url: url))
+        request.setValue("jmap", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let task = urlSession.webSocketTask(with: request)
+        task.resume()
+        // Fails here if the handshake fails (e.g. a proxy that doesn't pass WebSocket upgrades).
+        try await task.send(.string(#"{"@type":"WebSocketPushEnable","dataTypes":null}"#))
+
+        return AsyncThrowingStream { continuation in
+            let receiver = Task {
+                do {
+                    while !Task.isCancelled {
+                        let message = try await task.receive()
+                        let data: Data? =
+                            switch message {
+                            case .string(let text): text.data(using: .utf8)
+                            case .data(let data): data
+                            @unknown default: nil
+                            }
+                        if let data, let json = try? JSONDecoder().decode(JSONValue.self, from: data),
+                            json["@type"]?.stringValue == "StateChange",
+                            let change = try? json.decode(StateChange.self)
+                        {
+                            continuation.yield(.changed(change))
+                        } else {
+                            continuation.yield(.alive)
+                        }
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            let pinger = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    guard !Task.isCancelled else { return }
+                    if await Self.ping(task, timeout: .seconds(20)) {
+                        continuation.yield(.alive)
+                    } else {
+                        task.cancel(with: .goingAway, reason: nil)  // Dead connection; ends the receiver too.
+                        return
+                    }
+                }
+            }
+            continuation.onTermination = { _ in
+                receiver.cancel()
+                pinger.cancel()
+                task.cancel(with: .goingAway, reason: nil)
+            }
+        }
+    }
+
+    /// Sends a WebSocket ping; true if the pong arrives within `timeout`.
+    private static func ping(_ task: URLSessionWebSocketTask, timeout: Duration) async -> Bool {
+        let result = PongResult()
+        task.sendPing { error in result.set(error == nil) }
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let answered = result.value { return answered }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        return false
     }
 
     // MARK: HTTP
@@ -133,6 +206,22 @@ public actor JMAPClient {
             throw JMAPError.http(status: http.statusCode, body: String(decoding: body, as: UTF8.self), url: http.url)
         }
     }
+}
+
+/// What a push connection delivers.
+public enum PushSignal: Sendable {
+    /// Something changed on the server.
+    case changed(StateChange)
+    /// A ping or other traffic: the connection works.
+    case alive
+}
+
+/// Thread-safe holder for a WebSocket pong result.
+final class PongResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answered: Bool?
+    func set(_ value: Bool) { lock.withLock { answered = value } }
+    var value: Bool? { lock.withLock { answered } }
 }
 
 /// Keeps the Authorization header across same-host redirects

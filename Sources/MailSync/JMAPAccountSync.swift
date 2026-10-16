@@ -7,6 +7,7 @@ public actor JMAPAccountSync {
     public let account: AccountRecord
     private let client: JMAPClient
     private let store: MailStore
+    private var lastIdentitySync: Date?
 
     public init(account: AccountRecord, credentials: Credentials, store: MailStore, urlSession: URLSession = .shared)
         throws
@@ -33,8 +34,9 @@ public actor JMAPAccountSync {
             "Syncing \(self.account.name, privacy: .public): api \(session.apiUrl.absoluteString, privacy: .public), account \(accountId, privacy: .public)")
         var result = Result()
         result.mailboxes = try await syncMailboxes(accountId)
-        if session.supports(Capability.submission) {
+        if session.supports(Capability.submission), lastIdentitySync.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
             try await syncIdentities(accountId)
+            lastIdentitySync = Date()
         }
         try await syncEmails(accountId, session: session, into: &result)
         return result
@@ -165,16 +167,40 @@ public actor JMAPAccountSync {
         return try await client.download(accountId: accountId, blobId: blobId, type: type, name: name)
     }
 
-    /// Push notifications. Yields whenever the server reports a change for this account.
-    public func changeNotifications() async throws -> AsyncThrowingStream<Void, Error> {
+    public enum PushTransport: String, Sendable {
+        case webSocket = "WebSocket"
+        case eventSource = "EventSource"
+    }
+
+    public enum PushSignal: Sendable {
+        /// Something changed in this account.
+        case changed
+        /// The connection is alive (a ping, or a change in another account).
+        case alive
+    }
+
+    public func supportsWebSocketPush() async -> Bool {
+        (try? await client.currentSession())?.webSocketURL != nil
+    }
+
+    /// Push for this account over `transport`, until cancelled or the connection fails.
+    public func pushSignals(_ transport: PushTransport) async throws -> AsyncThrowingStream<PushSignal, Error> {
         let session = try await client.currentSession()
         let accountId = try remoteAccountId(session)
-        let changes = try await client.stateChanges()
+        let signals =
+            switch transport {
+            case .webSocket: try await client.webSocketSignals()
+            case .eventSource: try await client.eventSourceSignals()
+            }
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    for try await change in changes where change.changed[accountId] != nil {
-                        continuation.yield()
+                    for try await signal in signals {
+                        if case .changed(let change) = signal, change.changed[accountId] != nil {
+                            continuation.yield(.changed)
+                        } else {
+                            continuation.yield(.alive)
+                        }
                     }
                     continuation.finish()
                 } catch {

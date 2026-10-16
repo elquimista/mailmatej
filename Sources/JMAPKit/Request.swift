@@ -4,6 +4,8 @@ public enum Capability {
     public static let core = "urn:ietf:params:jmap:core"
     public static let mail = "urn:ietf:params:jmap:mail"
     public static let submission = "urn:ietf:params:jmap:submission"
+    /// RFC 8887: JMAP over WebSocket, including push.
+    public static let webSocket = "urn:ietf:params:jmap:websocket"
     /// RFC 9404: Blob/get can return several blobs' contents in one request.
     public static let blob = "urn:ietf:params:jmap:blob"
 }

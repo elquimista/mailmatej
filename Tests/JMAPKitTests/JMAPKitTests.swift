@@ -73,6 +73,19 @@ import Testing
         #expect(response.notFound == ["B2"])
     }
 
+    @Test func webSocketURLFromCapability() throws {
+        let json = Data("""
+            {"capabilities": {"urn:ietf:params:jmap:websocket": {"url": "wss://mail.test/jmap/ws", "supportsPush": true}},
+             "accounts": {}, "primaryAccounts": {}, "username": "u", "state": "s",
+             "apiUrl": "https://mail.test/jmap/", "downloadUrl": "https://mail.test/d", "uploadUrl": "https://mail.test/u",
+             "eventSourceUrl": "https://mail.test/es"}
+            """.utf8)
+        let session = try JMAPCoding.decoder.decode(Session.self, from: json)
+        #expect(session.webSocketURL?.absoluteString == "wss://mail.test/jmap/ws")
+        let local = session.rebased(onto: URL(string: "http://localhost:18080/.well-known/jmap")!)
+        #expect(local.webSocketURL?.absoluteString == "ws://localhost:18080/jmap/ws")
+    }
+
     @Test func eventStreamParser() {
         var parser = EventStreamParser()
         var events: [EventStreamParser.Event] = []
@@ -95,5 +108,6 @@ import Testing
         #expect(session.apiUrl.absoluteString == "http://localhost:8080/jmap/")
         #expect(session.downloadUrl == "http://localhost:8080/d/{accountId}/{blobId}")
         #expect(session.eventSourceUrl == "http://localhost:8080/es/?types={types}")
+        #expect(session.webSocketURL == nil)  // Not advertised in this session.
     }
 }
