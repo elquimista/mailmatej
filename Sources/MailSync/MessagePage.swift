@@ -140,7 +140,9 @@ public enum MessagePage {
 
     static let htmlCSS = """
 
-        html, body { margin: 0; padding: 0; }
+        /* The chrome must run edge to edge: emails often give <body> a margin, padding or width. */
+        html, body { margin: 0 !important; padding: 0 !important; border: 0 !important;
+          width: auto !important; min-width: 0 !important; max-width: none !important; }
         mmj-content { display: block; margin: 14px; font-family: Helvetica, Arial, sans-serif; font-size: 14px;
           overflow-wrap: break-word; }
         img[data-mmj-blocked] { object-fit: fill !important; }
@@ -149,7 +151,7 @@ public enum MessagePage {
 
     static let plainCSS = """
 
-        html, body { margin: 0; padding: 0; }
+        html, body { margin: 0 !important; padding: 0 !important; }
         mmj-content { display: block; margin: 14px; font: 13px -apple-system, sans-serif; white-space: pre-wrap;
           overflow-wrap: anywhere; line-height: 1.45; }
         .status { color: GrayText; }
