@@ -215,13 +215,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private func reloadCorrespondence(selecting id: Int64?) {
         guard let id, let email = try? model.store.correspondent(messageId: id, myAddresses: model.myAddresses) else {
             correspondent = nil
-            correspondenceTitle.stringValue = "Correspondence"
             correspondence.setIDs([])
             return
         }
         correspondent = email
         let ids = (try? model.store.correspondenceIDs(email: email, sort: correspondence.sort)) ?? []
-        correspondenceTitle.stringValue = "Correspondence with \(email) (\(ids.count))"
         correspondence.setIDs(ids, selecting: [id], scroll: .toSelection)
     }
 
