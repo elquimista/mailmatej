@@ -73,6 +73,23 @@ import Testing
         #expect(oldestFirst == thread.reversed())
     }
 
+    @Test func partsAndRemoteAllowList() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        let id = try #require(store.messageIDs(scope: .allMessages).first)
+        try store.saveBody(messageId: id, MessageBody(html: "<img src=cid:Logo@X>", text: nil), parts: [
+            MessagePart(blobId: "B1", cid: "<Logo@X>", type: "image/png", name: "logo.png", size: 10)
+        ])
+        #expect(try store.part(messageId: id, cid: "logo@x")?.part.blobId == "B1")
+        #expect(try store.part(messageId: id, cid: "<LOGO@x>")?.accountId == "acc")
+
+        #expect(try !store.isRemoteContentAllowed(email: "news@shop.com"))
+        try store.allowRemoteContent("@Shop.com")
+        #expect(try store.isRemoteContentAllowed(email: "News@shop.com"))
+        #expect(try !store.isRemoteContentAllowed(email: "news@other.com"))
+        try store.disallowRemoteContent("@shop.com")
+        #expect(try !store.isRemoteContentAllowed(email: "news@shop.com"))
+    }
+
     @Test func search() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100, subject: "Quarterly planning"),

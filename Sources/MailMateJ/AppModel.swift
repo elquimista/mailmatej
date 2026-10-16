@@ -126,6 +126,15 @@ final class AppModel {
         #endif
     }
 
+    /// The bytes of a message part (e.g. an embedded image), cached on disk after the first download.
+    func partData(accountId: String, part: MessagePart) async throws -> Data {
+        if let cached = store.blobs.readPart(accountId: accountId, blobId: part.blobId) { return cached }
+        let data = try await coordinator.downloadBlob(
+            accountId: accountId, blobId: part.blobId, type: part.type, name: part.name ?? "part")
+        try? store.blobs.writePart(data, accountId: accountId, blobId: part.blobId)
+        return data
+    }
+
     func fetchBody(messageId: Int64, accountId: String) async throws -> MessageBody {
         try await coordinator.fetchBody(messageId: messageId, accountId: accountId)
     }
@@ -183,13 +192,12 @@ final class AppModel {
         /// without touching the keychain (their passwords are derived from the name).
         private func addDevAccountsIfRequested() {
             guard let names = ProcessInfo.processInfo.environment["MMJ_DEV_ACCOUNTS"] else { return }
-            let existing = Set(((try? store.accounts()) ?? []).map(\.id))
-            for (i, name) in names.split(separator: ",").enumerated() where !existing.contains("dev-\(name)") {
+            for (i, name) in names.split(separator: ",").enumerated() {
                 let record = AccountRecord(
                     id: "dev-\(name)", name: "\(name.capitalized) (local)",
-                    sessionURL: "http://localhost:8080/.well-known/jmap", username: "\(name)@mmj.test",
+                    sessionURL: "http://localhost:18080/.well-known/jmap", username: "\(name)@mmj.test",
                     authKind: .basic, sortOrder: 1000 + i)
-                try? store.save(record)
+                try? store.save(record)  // Upsert, so a changed dev server URL is picked up.
             }
         }
     #endif

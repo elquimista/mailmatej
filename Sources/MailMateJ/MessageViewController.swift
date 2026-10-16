@@ -1,21 +1,35 @@
 import AppKit
 import MailStore
+import MailSync
 import WebKit
 
-/// Header fields plus the rendered body. Remote content and JavaScript are blocked.
+/// Header fields plus the rendered body. JavaScript is off. Embedded images always show;
+/// remote content is blocked unless the user loads it, and trackers/insecure loads never load.
 @MainActor
 final class MessageViewController: NSViewController, WKNavigationDelegate {
     private let model: AppModel
     private let grid = NSGridView()
     private let headerContainer = NSView()
     private let placeholder = NSTextField(labelWithString: "No Message Selected")
+    private let remoteBar = RemoteContentBar()
+    private var remoteBarHeight: NSLayoutConstraint!
     private var webView: WKWebView!
-    private var currentID: Int64?
+    private let partHandler: EmbeddedPartSchemeHandler
 
-    private static var blockRules: WKContentRuleList?
+    private var currentID: Int64?
+    private var currentSender: String?
+    private var currentBody: MessageBody?
+    /// The user clicked Load for the message on screen.
+    private var loadRemoteForCurrent = false
+
+    /// Blocks every network load. Attached unless the user loads remote content.
+    private static var blockAllRules: WKContentRuleList?
+    /// Blocks trackers and insecure loads. Always attached.
+    private static var strictRules: WKContentRuleList?
 
     init(model: AppModel) {
         self.model = model
+        partHandler = EmbeddedPartSchemeHandler(model: model)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -26,6 +40,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.suppressesIncrementalRendering = true
+        config.setURLSchemeHandler(partHandler, forURLScheme: MessageHTML.cidScheme)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsMagnification = true
@@ -44,7 +59,25 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         placeholder.alignment = .center
 
         let root = NSView()
-        for v in [headerContainer, separator, webView!, placeholder] as [NSView] {
+        remoteBar.onLoad = { [weak self] in
+            self?.loadRemoteForCurrent = true
+            self?.rerender()
+        }
+        remoteBar.onAlwaysLoad = { [weak self] value in
+            try? self?.model.store.allowRemoteContent(value)
+            self?.rerender()
+        }
+        remoteBar.onStopAlwaysLoading = { [weak self] in
+            guard let self, let sender = currentSender else { return }
+            for entry in (try? model.store.remoteContentAllowEntries(email: sender)) ?? [] {
+                try? model.store.disallowRemoteContent(entry)
+            }
+            loadRemoteForCurrent = false
+            rerender()
+        }
+        remoteBarHeight = remoteBar.heightAnchor.constraint(equalToConstant: 0)
+
+        for v in [headerContainer, separator, remoteBar, webView!, placeholder] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -59,7 +92,11 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             separator.topAnchor.constraint(equalTo: headerContainer.bottomAnchor),
             separator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            remoteBar.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            remoteBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            remoteBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            remoteBarHeight,
+            webView.topAnchor.constraint(equalTo: remoteBar.bottomAnchor),
             webView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -79,10 +116,15 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
         guard messageID != currentID else { return }
         currentID = messageID
+        currentBody = nil
+        loadRemoteForCurrent = false
+        partHandler.allowedMessageID = messageID
+        setRemoteBar(visible: false)
         guard let detail = try? model.store.detail(id: messageID) else {
             showPlaceholder("Message Not Found")
             return
         }
+        currentSender = detail.addresses(.from).first?.email
         placeholder.isHidden = true
         headerContainer.isHidden = false
         webView.isHidden = false
@@ -117,6 +159,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         placeholder.isHidden = false
         headerContainer.isHidden = true
         webView.isHidden = true
+        setRemoteBar(visible: false)
         webView.loadHTMLString("", baseURL: nil)
     }
 
@@ -174,33 +217,64 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     }
 
     private func render(_ body: MessageBody) {
-        if let html = body.html {
-            loadHTML(Self.page(body: html, plain: false))
-        } else {
+        currentBody = body
+        guard let html = body.html, let id = currentID else {
+            setRemoteBar(visible: false)
+            applyRules(loadRemote: false)
             loadHTML(Self.page(body: Self.escape(body.text ?? ""), plain: true))
+            return
         }
+        let prepared = MessageHTML.prepare(html, messageId: id)
+        let allowedBy = currentSender.flatMap { try? model.store.remoteContentAllowEntries(email: $0) } ?? []
+        // Fail closed: remote content only loads when the strict rules are in place.
+        let loadRemote = (loadRemoteForCurrent || !allowedBy.isEmpty) && Self.strictRules != nil
+        applyRules(loadRemote: loadRemote)
+        loadHTML(Self.page(body: prepared.html, plain: false, remote: loadRemote))
+
+        if prepared.remoteCount > 0 {
+            remoteBar.update(
+                remote: prepared.remoteCount, strict: prepared.strictCount, loaded: loadRemote, sender: currentSender,
+                allowedBy: allowedBy)
+            setRemoteBar(visible: true)
+        } else {
+            setRemoteBar(visible: false)
+        }
+    }
+
+    #if DEBUG
+        func debugLoadRemote() { remoteBar.onLoad?() }
+    #endif
+
+    private func rerender() {
+        if let currentBody { render(currentBody) }
+    }
+
+    private func setRemoteBar(visible: Bool) {
+        remoteBar.isHidden = !visible
+        remoteBarHeight.constant = visible ? 30 : 0
+    }
+
+    private func applyRules(loadRemote: Bool) {
+        let controller = webView.configuration.userContentController
+        controller.removeAllContentRuleLists()
+        if let strict = Self.strictRules { controller.add(strict) }
+        if !loadRemote, let all = Self.blockAllRules { controller.add(all) }
     }
 
     private func loadHTML(_ html: String) {
-        if !attachedRules, let rules = Self.blockRules {
-            webView.configuration.userContentController.add(rules)
-            attachedRules = true
-        }
         webView.loadHTMLString(html, baseURL: nil)
     }
 
-    private var attachedRules = false
-
-    /// Compiles the rule list that blocks every network load from message content. Call once at launch.
+    /// Compiles the content-rule lists. Call once at launch, before showing messages.
     static func prepareBlockRules() async {
-        let rules = """
-            [{"trigger": {"url-filter": "^https?:"}, "action": {"type": "block"}},
-             {"trigger": {"url-filter": "^wss?:"}, "action": {"type": "block"}},
-             {"trigger": {"url-filter": "^ftp:"}, "action": {"type": "block"}}]
-            """
+        let store = WKContentRuleListStore.default()
         do {
-            blockRules = try await WKContentRuleListStore.default().compileContentRuleList(
-                forIdentifier: "mmj-block-remote", encodedContentRuleList: rules)
+            blockAllRules = try await store?.compileContentRuleList(
+                forIdentifier: "mmj-block-remote",
+                encodedContentRuleList: RemoteContentRules.contentRuleListJSON(RemoteContentRules.remotePatterns))
+            strictRules = try await store?.compileContentRuleList(
+                forIdentifier: "mmj-block-strict",
+                encodedContentRuleList: RemoteContentRules.contentRuleListJSON(RemoteContentRules.strictPatterns))
         } catch {
             NSLog("MailMateJ: could not compile remote-content rules: \(error)")
         }
@@ -227,10 +301,16 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    static func page(body: String, plain: Bool) -> String {
+    /// Wraps message content in a page whose Content-Security-Policy is a second line of defense
+    /// behind the content rules: only embedded parts and data: URLs, plus https when `remote`.
+    static func page(body: String, plain: Bool, remote: Bool = false) -> String {
+        let https = remote ? " https:" : ""
+        let csp = "default-src 'none'; style-src 'unsafe-inline'\(https); img-src data: \(MessageHTML.cidScheme):\(https); "
+            + "font-src data:\(https); media-src \(MessageHTML.cidScheme):"
         if plain {
             return """
-                <!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:; font-src data:">
+                <!doctype html><html><head><meta charset="utf-8">
+                <meta http-equiv="Content-Security-Policy" content="\(csp)">
                 <meta name="color-scheme" content="light dark">
                 <style>
                   body { font: 13px -apple-system, sans-serif; margin: 14px; white-space: pre-wrap;
@@ -241,7 +321,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
         return """
             <!doctype html><html><head><meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:; font-src data:">
+            <meta http-equiv="Content-Security-Policy" content="\(csp)">
             <style>.status { font: 13px -apple-system, sans-serif; color: GrayText; margin: 14px; }</style>
             </head><body>\(body)</body></html>
             """

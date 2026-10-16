@@ -52,7 +52,7 @@ cd dev/stalwart && docker compose up -d
 First time only, complete Stalwart's bootstrap (fixed dev admin from `docker-compose.yml`) and seed:
 
 ```bash
-curl -s -u admin:mmj-dev-admin -H 'Content-Type: application/json' http://localhost:8080/jmap -d '{"using":["urn:ietf:params:jmap:core","urn:stalwart:jmap"],"methodCalls":[["x:Bootstrap/set",{"update":{"singleton":{"serverHostname":"mail.mmj.test","defaultDomain":"mmj.test","requestTlsCertificate":false,"generateDkimKeys":false}}},"c0"]]}'
+curl -s -u admin:mmj-dev-admin -H 'Content-Type: application/json' http://localhost:18080/jmap -d '{"using":["urn:ietf:params:jmap:core","urn:stalwart:jmap"],"methodCalls":[["x:Bootstrap/set",{"update":{"singleton":{"serverHostname":"mail.mmj.test","defaultDomain":"mmj.test","requestTlsCertificate":false,"generateDkimKeys":false}}},"c0"]]}'
 ```
 
 The response contains the permanent admin. Save it as `user:secret` in `dev/stalwart/data/admin-credentials`. Then restart the server and seed it:
@@ -67,7 +67,7 @@ Then:
 
 ```bash
 scripts/run-dev.sh   # builds and launches MailMateJ Dev with the local accounts added
-MMJ_PASSWORD=alice-dev-pass swift run mmj-sync --url http://localhost:8080 --user alice@mmj.test --watch
+MMJ_PASSWORD=alice-dev-pass swift run mmj-sync --url http://localhost:18080 --user alice@mmj.test --watch
 ```
 
 Stalwart always advertises `https://<hostname>` endpoints. For session URLs on localhost the client rewrites them onto the local origin. Debug builds also accept `MMJ_SNAPSHOT=/path.png` to save a window image a few seconds after launch.

@@ -11,6 +11,25 @@ public struct BlobStore: Sendable {
             .appendingPathComponent(safe + ".eml")
     }
 
+    /// Cached MIME parts (e.g. embedded images): `Messages/<accountId>/parts/<xx>/<blobId>`.
+    public func partURL(accountId: String, blobId: String) -> URL {
+        let message = url(accountId: accountId, blobId: blobId)
+        return root.appendingPathComponent(accountId, isDirectory: true)
+            .appendingPathComponent("parts", isDirectory: true)
+            .appendingPathComponent(message.deletingLastPathComponent().lastPathComponent, isDirectory: true)
+            .appendingPathComponent(message.deletingPathExtension().lastPathComponent)
+    }
+
+    public func readPart(accountId: String, blobId: String) -> Data? {
+        try? Data(contentsOf: partURL(accountId: accountId, blobId: blobId))
+    }
+
+    public func writePart(_ data: Data, accountId: String, blobId: String) throws {
+        let target = partURL(accountId: accountId, blobId: blobId)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: target, options: .atomic)
+    }
+
     public func contains(accountId: String, blobId: String) -> Bool {
         FileManager.default.fileExists(atPath: url(accountId: accountId, blobId: blobId).path)
     }

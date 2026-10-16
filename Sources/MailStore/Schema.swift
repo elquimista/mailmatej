@@ -146,6 +146,31 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v2-parts-and-remote-content") { db in
+            try db.execute(sql: """
+                -- Body parts of fetched messages, so embedded (cid:) images can be served.
+                CREATE TABLE message_part (
+                    messageId INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+                    blobId TEXT NOT NULL,
+                    cid TEXT,                        -- lowercased, without <>
+                    type TEXT NOT NULL,
+                    name TEXT,
+                    size INTEGER,
+                    PRIMARY KEY (messageId, blobId)
+                ) WITHOUT ROWID;
+                CREATE INDEX message_part_cid ON message_part(messageId, cid);
+
+                -- Senders ("a@b.com") and domains ("@b.com") whose remote content loads automatically.
+                CREATE TABLE remote_content_allow (
+                    value TEXT PRIMARY KEY,
+                    addedAt REAL NOT NULL
+                );
+
+                -- Cached bodies predate part tracking; refetch them on demand.
+                DELETE FROM message_body;
+                """)
+        }
+
         return m
     }
 }

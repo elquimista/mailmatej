@@ -4,8 +4,9 @@
     python3 seed.py                      # alice, bob, carol with 300 messages each
     python3 seed.py --accounts 100 --messages 50   # user001..user100 (scale testing)
     python3 seed.py --live alice         # deliver one new message every 10 s (push testing)
+    python3 seed.py --rich alice         # add messages with embedded, remote and tracking images
 
-Every account's password is "<name>-dev-pass". The JMAP URL for MailMateJ is http://localhost:8080.
+Every account's password is "<name>-dev-pass". The JMAP URL for MailMateJ is http://localhost:18080.
 Requires the server to be set up first: docker compose up -d, then the bootstrap step in README.md.
 """
 
@@ -13,14 +14,16 @@ import argparse
 import base64
 import json
 import random
+import struct
 import time
+import zlib
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, make_msgid
 from pathlib import Path
 
-BASE = "http://localhost:8080"
+BASE = "http://localhost:18080"
 DOMAIN = "mmj.test"
 HERE = Path(__file__).parent
 CORE, MAIL, BLOB = "urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:blob"
@@ -175,6 +178,58 @@ def seed_user(name, count):
     print(f"  {name}: imported {imported} messages")
 
 
+def png(width, height, rgb):
+    """A solid-color PNG, so the embedded-image test needs no files."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    rows = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def rich(name):
+    """Messages for checking image handling: embedded (cid:), remote, insecure, tracker and 1x1 pixel."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    me = f"{name.capitalize()} <{name}@{DOMAIN}>"
+    now = datetime.now(timezone.utc)
+    logo = base64.encodebytes(png(160, 48, (30, 90, 200))).decode()
+
+    embedded = "\r\n".join([
+        "From: Ashley Recruiter <ashley@trova.example>", f"To: {me}", "Subject: Embedded logo test",
+        f"Date: {format_datetime(now - timedelta(minutes=1))}", f"Message-ID: {make_msgid(domain='seed.mmj.test')}",
+        "MIME-Version: 1.0", 'Content-Type: multipart/related; boundary="rel"', "",
+        "--rel", "Content-Type: text/html; charset=utf-8", "",
+        "<p>I just reminded him to send it out :)</p><p>With kindness,<br>Ashley</p>"
+        '<img src="cid:trova-logo@trova.example" alt="Trova logo">',
+        "--rel", "Content-Type: image/png; name=logo.png", "Content-Transfer-Encoding: base64",
+        "Content-ID: <trova-logo@trova.example>", "Content-Disposition: inline; filename=logo.png", "", logo,
+        "--rel--", ""])
+
+    def newsletter(sender, subject, minutes):
+        html = (
+            "<h2>Weekly picks</h2>"
+            '<img src="https://www.w3.org/Icons/w3c_home.png" alt="remote 1">'
+            '<img src="https://www.w3.org/Icons/valid-html401.png" alt="remote 2">'
+            '<img src="http://insecure.example.com/banner.png" alt="insecure">'
+            '<img src="https://us1.list-manage.com/track/open.php?u=1&id=2" alt="">'
+            '<img src="https://shop.example.com/open-pixel.png" width="1" height="1" alt="">'
+            "<p>Thanks for reading.</p>")
+        return "\r\n".join([
+            f"From: {sender}", f"To: {me}", f"Subject: {subject}",
+            f"Date: {format_datetime(now - timedelta(minutes=minutes))}",
+            f"Message-ID: {make_msgid(domain='seed.mmj.test')}", "MIME-Version: 1.0",
+            "Content-Type: text/html; charset=utf-8", "", html, ""])
+
+    items = [
+        (embedded, [inbox], {}, now - timedelta(minutes=1)),
+        (newsletter("Shop News <news@shop.example>", "Remote images test", 2), [inbox], {}, now - timedelta(minutes=2)),
+        (newsletter("Shop Deals <deals@shop.example>", "Remote images test (same domain)", 3), [inbox], {},
+         now - timedelta(minutes=3)),
+    ]
+    print(f"  {name}: imported {import_batch(auth, account, items)} rich messages")
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -192,10 +247,13 @@ def main():
     p.add_argument("--accounts", type=int, help="create userNNN accounts instead of alice/bob/carol")
     p.add_argument("--messages", type=int, default=300)
     p.add_argument("--live", metavar="USER")
+    p.add_argument("--rich", metavar="USER")
     args = p.parse_args()
     random.seed(42)
     if args.live:
         return live(args.live)
+    if args.rich:
+        return rich(args.rich)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)

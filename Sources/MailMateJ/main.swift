@@ -45,6 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
+                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_LOAD_REMOTE"] != nil {
+                    try? await Task.sleep(for: .seconds(1))
+                    windowController?.debugLoadRemote()
+                    try? await Task.sleep(for: .seconds(3))
+                }
                 if let points = Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL"] ?? "") {
                     windowController?.debugScrollList(by: points)
                     try? await Task.sleep(for: .milliseconds(400))

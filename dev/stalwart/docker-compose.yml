@@ -1,13 +1,13 @@
 # Local Stalwart for developing MailMateJ.
 #   docker compose up -d
 #   python3 seed.py          # creates test accounts and mail
-# JMAP: http://localhost:8080  ·  IMAP: localhost:1143  ·  SMTP: localhost:1025
+# JMAP: http://localhost:18080  ·  IMAP: localhost:1143  ·  SMTP: localhost:1025
 services:
   stalwart:
     image: stalwartlabs/stalwart:v0.16
     container_name: mmj-stalwart
     ports:
-      - "8080:8080"
+      - "18080:8080"  # 18080 on the Mac: 8080 is commonly taken by other dev servers
       - "1143:143"
       - "1025:25"
     volumes:

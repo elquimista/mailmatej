@@ -180,6 +180,28 @@ public struct MessageBody: Sendable {
     }
 }
 
+/// A MIME part of a message that can be fetched on its own (an embedded image, an attachment).
+public struct MessagePart: Sendable, Hashable {
+    public var blobId: String
+    public var cid: String?
+    public var type: String
+    public var name: String?
+    public var size: Int?
+
+    public init(blobId: String, cid: String?, type: String, name: String?, size: Int?) {
+        self.blobId = blobId
+        self.cid = cid
+        self.type = type
+        self.name = name
+        self.size = size
+    }
+
+    /// Content-IDs are compared without angle brackets and case-insensitively.
+    public static func normalizeCID(_ cid: String) -> String {
+        cid.trimmingCharacters(in: CharacterSet(charactersIn: "<> ")).lowercased()
+    }
+}
+
 /// Which messages a list shows.
 public enum MessageScope: Hashable, Sendable {
     /// Everything except Trash and Junk, across all accounts.

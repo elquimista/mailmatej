@@ -219,15 +219,77 @@ public final class MailStore: Sendable {
         }
     }
 
-    public func saveBody(messageId: Int64, _ body: MessageBody) throws {
+    public func saveBody(messageId: Int64, _ body: MessageBody, parts: [MessagePart] = []) throws {
         try dbPool.write { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, ?, ?)",
                 arguments: [messageId, body.html, body.text, Date().timeIntervalSince1970])
+            try db.execute(sql: "DELETE FROM message_part WHERE messageId = ?", arguments: [messageId])
+            for p in parts {
+                try db.execute(
+                    sql: "INSERT OR REPLACE INTO message_part (messageId, blobId, cid, type, name, size) VALUES (?, ?, ?, ?, ?, ?)",
+                    arguments: [messageId, p.blobId, p.cid.map(MessagePart.normalizeCID), p.type, p.name, p.size])
+            }
             if let text = body.text {
                 try db.execute(
                     sql: "UPDATE message_fts SET body = ? WHERE rowid = ?", arguments: [String(text.prefix(100_000)), messageId])
             }
+        }
+    }
+
+    /// The part of a message with Content-ID `cid`, plus the message's account.
+    public func part(messageId: Int64, cid: String) throws -> (accountId: String, part: MessagePart)? {
+        try dbPool.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT m.accountId, p.blobId, p.cid, p.type, p.name, p.size
+                    FROM message_part p JOIN message m ON m.id = p.messageId
+                    WHERE p.messageId = ? AND p.cid = ?
+                    """,
+                arguments: [messageId, MessagePart.normalizeCID(cid)]
+            ).map {
+                ($0["accountId"], MessagePart(blobId: $0["blobId"], cid: $0["cid"], type: $0["type"], name: $0["name"], size: $0["size"]))
+            }
+        }
+    }
+
+    // MARK: Remote content allow-list
+
+    /// Whether remote content from `email` loads automatically (allowed by address or by domain).
+    public func isRemoteContentAllowed(email: String) throws -> Bool {
+        let address = email.lowercased()
+        let domain = address.split(separator: "@").last.map { "@" + $0 } ?? address
+        return try dbPool.read { db in
+            try Bool.fetchOne(
+                db, sql: "SELECT EXISTS (SELECT 1 FROM remote_content_allow WHERE value IN (?, ?))",
+                arguments: [address, domain]) ?? false
+        }
+    }
+
+    /// The allow-list entries matching `email` (its address and/or its "@domain").
+    public func remoteContentAllowEntries(email: String) throws -> [String] {
+        let address = email.lowercased()
+        let domain = address.split(separator: "@").last.map { "@" + $0 } ?? address
+        return try dbPool.read { db in
+            try String.fetchAll(
+                db, sql: "SELECT value FROM remote_content_allow WHERE value IN (?, ?) ORDER BY value",
+                arguments: [address, domain])
+        }
+    }
+
+    /// Adds `"name@domain"` or `"@domain"` to the allow-list.
+    public func allowRemoteContent(_ value: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO remote_content_allow (value, addedAt) VALUES (?, ?)",
+                arguments: [value.lowercased(), Date().timeIntervalSince1970])
+        }
+    }
+
+    public func disallowRemoteContent(_ value: String) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM remote_content_allow WHERE value = ?", arguments: [value.lowercased()])
         }
     }
 

@@ -246,6 +246,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     #if DEBUG
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
 
+        func debugLoadRemote() { messageView.debugLoadRemote() }
+
         func debugScrollList(by points: CGFloat) {
             guard let scrollView = list.tableView.enclosingScrollView else { return }
             let clip = scrollView.contentView

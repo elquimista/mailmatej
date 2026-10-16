@@ -4,7 +4,7 @@ import MailStore
 import MailSync
 
 // Headless sync for development:
-//   MMJ_PASSWORD=… swift run mmj-sync --url http://localhost:8080 --user alice
+//   MMJ_PASSWORD=… swift run mmj-sync --url http://localhost:18080 --user alice
 //   MMJ_TOKEN=…    swift run mmj-sync --url https://api.fastmail.com/jmap/session
 // Options: --db <dir> (default ./.dev-store), --watch (stay running on push), --name <account name>
 

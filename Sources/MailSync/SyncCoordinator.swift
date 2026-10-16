@@ -111,6 +111,11 @@ public actor SyncCoordinator {
         return try await engine.sync()
     }
 
+    public func downloadBlob(accountId: String, blobId: String, type: String, name: String) async throws -> Data {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        return try await engine.downloadBlob(blobId: blobId, type: type, name: name)
+    }
+
     public func fetchBody(messageId: Int64, accountId: String) async throws -> MessageBody {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         return try await engine.fetchBody(messageId: messageId)

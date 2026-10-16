@@ -61,11 +61,17 @@ public actor JMAPAccountSync {
             throw JMAPError.invalidResponse("message no longer exists on the server")
         }
         let body = Self.render(email)
-        try store.saveBody(messageId: messageId, body)
+        try store.saveBody(messageId: messageId, body, parts: Self.parts(email))
         if let data = await raw {
             try? store.blobs.write(data, accountId: account.id, blobId: detail.blobId)
         }
         return body
+    }
+
+    /// Downloads one blob (e.g. an embedded image part).
+    public func downloadBlob(blobId: String, type: String, name: String) async throws -> Data {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        return try await client.download(accountId: accountId, blobId: blobId, type: type, name: name)
     }
 
     /// Push notifications. Yields whenever the server reports a change for this account.
@@ -284,6 +290,17 @@ public actor JMAPAccountSync {
             messageIdHeader: e.messageId?.first, inReplyTo: e.inReplyTo?.first,
             subject: e.subject ?? "", preview: e.preview ?? "", hasAttachment: e.hasAttachment,
             addresses: addresses)
+    }
+
+    /// Parts worth keeping a reference to: anything with a Content-ID (embedded images) and attachments.
+    static func parts(_ email: EmailBody) -> [MessagePart] {
+        var seen = Set<String>()
+        return (email.htmlBody + email.attachments).compactMap { part in
+            guard let blobId = part.blobId, part.cid != nil || part.disposition == "attachment" || part.name != nil,
+                seen.insert(blobId).inserted
+            else { return nil }
+            return MessagePart(blobId: blobId, cid: part.cid, type: part.type, name: part.name, size: part.size)
+        }
     }
 
     /// Builds displayable HTML and plain text from the JMAP body structure.
