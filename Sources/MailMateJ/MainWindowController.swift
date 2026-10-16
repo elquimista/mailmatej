@@ -158,6 +158,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
             guard let self else { return }
             reloadCorrespondence(selecting: list.selectedID ?? correspondence.selectedID)
         }
+        for messageList in [list, correspondence] {
+            messageList.onShowInFinder = { [weak self] id in self?.model.showInFinder(messageId: id, window: self?.window) }
+        }
         correspondence.onSelectionChange = { [weak self] id in
             guard let self, let id else { return }
             messageView.show(messageID: id)
@@ -250,6 +253,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     #if DEBUG
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
 
+        /// Deletes the displayed message's .eml, then fetches it through the Show in Finder path.
+        func debugCheckRawMessage() async {
+            guard let id = messageView.displayedMessageID, let detail = try? model.store.detail(id: id) else {
+                return NSLog("MMJ raw: no message displayed")
+            }
+            let path = model.store.blobs.url(accountId: detail.accountId, blobId: detail.blobId)
+            try? FileManager.default.removeItem(at: path)
+            do {
+                let url = try await model.rawMessageURL(messageId: id)
+                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
+                NSLog("MMJ raw: \(url.path) exists=\(FileManager.default.fileExists(atPath: url.path)) bytes=\(size)")
+            } catch {
+                NSLog("MMJ raw: error \(error)")
+            }
+        }
+
         func debugFocusSidebar() {
             NSApp.activate()
             window?.makeKeyAndOrderFront(nil)
@@ -281,6 +300,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     #endif
 
     // MARK: Actions
+
+    /// Message → Show in Finder: the message on screen.
+    @objc func showInFinder(_ sender: Any?) {
+        guard let id = messageView.displayedMessageID else { return NSSound.beep() }
+        model.showInFinder(messageId: id, window: window)
+    }
 
     @objc func getAllMail(_ sender: Any?) {
         model.syncAll()

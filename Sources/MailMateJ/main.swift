@@ -75,6 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugFocusSidebar()
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_RAW"] != nil {
+                    await windowController?.debugCheckRawMessage()
+                }
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SHEET"] != nil {
                     windowController?.addAccount(nil)
@@ -147,6 +150,10 @@ enum MainMenu {
 
         let mailbox = submenu(main, "Mailbox")
         mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
+
+        let message = submenu(main, "Message")
+        message.addItem(withTitle: "Show in Finder", action: #selector(MainWindowController.showInFinder(_:)), keyEquivalent: "R")
+            .keyEquivalentModifierMask = [.command, .shift]
 
         let window = submenu(main, "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")

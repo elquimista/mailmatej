@@ -126,6 +126,33 @@ final class AppModel {
         #endif
     }
 
+    /// The message's raw .eml file on disk, downloading it from the server first if needed.
+    func rawMessageURL(messageId: Int64) async throws -> URL {
+        guard let detail = try store.detail(id: messageId) else { throw CocoaError(.fileNoSuchFile) }
+        let url = store.blobs.url(accountId: detail.accountId, blobId: detail.blobId)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            let data = try await coordinator.downloadBlob(
+                accountId: detail.accountId, blobId: detail.blobId, type: "message/rfc822", name: "message.eml")
+            try store.blobs.write(data, accountId: detail.accountId, blobId: detail.blobId)
+        }
+        return url
+    }
+
+    /// Selects the message's .eml file in Finder.
+    func showInFinder(messageId: Int64, window: NSWindow?) {
+        Task {
+            do {
+                let url = try await rawMessageURL(messageId: messageId)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t show this message in Finder."
+                alert.informativeText = Self.describe(error)
+                if let window { alert.beginSheetModal(for: window, completionHandler: nil) } else { alert.runModal() }
+            }
+        }
+    }
+
     /// The bytes of a message part (e.g. an embedded image), cached on disk after the first download.
     func partData(accountId: String, part: MessagePart) async throws -> Data {
         if let cached = store.blobs.readPart(accountId: accountId, blobId: part.blobId) { return cached }

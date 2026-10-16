@@ -4,7 +4,7 @@ import MailStore
 /// A virtualized message list. It holds only the ordered IDs; rows are fetched in blocks
 /// around what is visible and kept in a small cache, so memory stays flat for any list size.
 @MainActor
-final class MessageListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class MessageListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     enum Column: String {
         case unread, flag, attachment, from, subject, date, source
 
@@ -30,6 +30,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     var onSelectionChange: ((Int64?) -> Void)?
     var onSortChange: ((MessageSort) -> Void)?
+    /// "Show in Finder" chosen from a row's context menu.
+    var onShowInFinder: ((Int64) -> Void)?
 
     /// The list's sort, remembered across launches (per list, keyed by its autosave name).
     private(set) var sort: MessageSort
@@ -106,6 +108,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         table.autosaveName = autosaveName
         table.autosaveTableColumns = true
         table.sortDescriptors = [NSSortDescriptor(key: sort.key.rawValue, ascending: sort.ascending)]
+        let menu = NSMenu()
+        menu.delegate = self
+        table.menu = menu
         table.dataSource = self
         table.delegate = self
 
@@ -256,6 +261,22 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             let ascending = saved["ascending"] as? Bool
         else { return nil }
         return MessageSort(key: key, ascending: ascending)
+    }
+
+    // MARK: Context menu
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard row >= 0, row < ids.count else { return }
+        let item = menu.addItem(withTitle: "Show in Finder", action: #selector(showInFinderClicked(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = ids[row]
+    }
+
+    @objc private func showInFinderClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? Int64 else { return }
+        onShowInFinder?(id)
     }
 
     // MARK: Cells

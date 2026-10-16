@@ -14,6 +14,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private let partHandler: EmbeddedPartSchemeHandler
 
     private var currentID: Int64?
+
+    /// The message on screen, if one real message is shown.
+    var displayedMessageID: Int64? { currentID.flatMap { $0 > 0 && currentDetail != nil ? $0 : nil } }
     private var currentDetail: MessageDetail?
     private var currentBody: MessageBody?
     /// The user clicked Load for the message on screen.
