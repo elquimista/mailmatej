@@ -46,9 +46,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         list = MessageListViewController(
             store: model.store, columns: [.unread, .flag, .from, .subject, .date, .source, .attachment],
             autosaveName: "MainMessageList")
+        // As MailMate's Correspondence pane (measured at 1x): no unread column, flag last, relative dates,
+        // oldest first.
         correspondence = MessageListViewController(
-            store: model.store, columns: [.unread, .subject, .date, .source, .attachment],
-            autosaveName: "CorrespondenceList", widths: [.subject: 200, .date: 135, .source: 120])
+            store: model.store, columns: [.subject, .date, .source, .attachment, .flag],
+            autosaveName: "CorrespondenceList", widths: [.subject: 254, .date: 94, .source: 127],
+            defaultSort: MessageSort(key: .receivedAt, ascending: true), relativeDates: true)
         messageView = MessageViewController(model: model)
 
         let window = NSWindow(
@@ -93,15 +96,39 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
     private func buildLayout() -> NSViewController {
         let correspondencePane = NSViewController()
-        correspondenceTitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        correspondenceTitle.textColor = .secondaryLabelColor
+        // MailMate's title band (measured at 1x): 24 pt, 11 pt regular title in the label color, and a
+        // 1 pt line (showing as (79, 82, 83)) above the column headers.
+        correspondenceTitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        correspondenceTitle.textColor = .labelColor
         correspondenceTitle.alignment = .center
         correspondenceTitle.lineBreakMode = .byTruncatingMiddle
-        let stack = NSStackView(views: [correspondenceTitle, correspondence.view])
+        let band = NSView()
+        let line = NSBox()
+        line.boxType = .custom
+        line.borderWidth = 0
+        line.fillColor = NSColor(srgbRed: 63 / 255, green: 66 / 255, blue: 67 / 255, alpha: 1)
+        for v in [correspondenceTitle, line] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            band.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            band.heightAnchor.constraint(equalToConstant: 25),
+            correspondenceTitle.leadingAnchor.constraint(equalTo: band.leadingAnchor, constant: 4),
+            correspondenceTitle.trailingAnchor.constraint(equalTo: band.trailingAnchor, constant: -4),
+            correspondenceTitle.centerYAnchor.constraint(equalTo: band.topAnchor, constant: 12),
+            line.leadingAnchor.constraint(equalTo: band.leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: band.trailingAnchor),
+            line.bottomAnchor.constraint(equalTo: band.bottomAnchor),
+            line.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        let stack = NSStackView(views: [band, correspondence.view])
         stack.orientation = .vertical
-        stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
+        stack.spacing = 0
         correspondenceTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The title mustn't pull the pane narrower than the user left it (its hugging would tie with the
+        // split item's holding priority).
+        correspondenceTitle.setContentHuggingPriority(.init(1), for: .horizontal)
+        for v in [band, correspondence.view] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         correspondencePane.view = stack
 
         let bottom = NSSplitViewController()

@@ -40,6 +40,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private let columns: [Column]
     private let autosaveName: String
     private let widths: [Column: CGFloat]
+    /// Dates as "47 hours ago", "11 days ago" (MailMate's Correspondence pane) instead of day and time.
+    private let relativeDates: Bool
+    private var relativeTimer: Timer?
     private(set) var ids: [Int64] = []
     private var cache: [Int64: MessageRow] = [:]
     private var suppressSelection = false
@@ -48,12 +51,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private static let blockSize = 150
     private static let cacheLimit = 3000
 
-    init(store: MailStore, columns: [Column], autosaveName: String, widths: [Column: CGFloat] = [:]) {
+    init(
+        store: MailStore, columns: [Column], autosaveName: String, widths: [Column: CGFloat] = [:],
+        defaultSort: MessageSort = .newestFirst, relativeDates: Bool = false
+    ) {
         self.store = store
         self.columns = columns
         self.autosaveName = autosaveName
         self.widths = widths
-        sort = Self.savedSort(autosaveName) ?? .newestFirst
+        self.relativeDates = relativeDates
+        sort = Self.savedSort(autosaveName) ?? defaultSort
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -63,6 +70,12 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         // "Today" and "Yesterday" move on at midnight, even in a list left open for days.
         NotificationCenter.default.addObserver(
             self, selector: #selector(dayChanged), name: .NSCalendarDayChanged, object: nil)
+        if relativeDates {
+            // "3 minutes ago" moves on by the minute; only the visible dates are redrawn.
+            relativeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshVisibleDates() }
+            }
+        }
         let table = tableView
         table.style = .fullWidth
         table.usesAlternatingRowBackgroundColors = true
@@ -269,10 +282,18 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .subject:
             return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: !row.isSeen)
         case .date:
+            if relativeDates { return textCell(tableView, column, Formatters.relative(row.receivedAt), bold: !row.isSeen) }
             return dateCell(tableView, row.receivedAt, bold: !row.isSeen)
         case .source:
             return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: !row.isSeen)
         }
+    }
+
+    private func refreshVisibleDates() {
+        let column = tableView.column(withIdentifier: NSUserInterfaceItemIdentifier(Column.date.rawValue))
+        let rows = tableView.rows(in: tableView.visibleRect)
+        guard column >= 0, rows.length > 0 else { return }
+        tableView.reloadData(forRowIndexes: IndexSet(integersIn: rows.location..<NSMaxRange(rows)), columnIndexes: [column])
     }
 
     @objc private func dayChanged() {
@@ -525,6 +546,20 @@ enum Formatters {
     }()
 
     static func listDay(_ date: Date) -> String { day.string(from: date) }
+
+    /// "5 minutes ago", "47 hours ago", "11 days ago", as MailMate's Correspondence pane shows dates:
+    /// hours up to two days, then days; months and years for old mail.
+    static func relative(_ date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        func ago(_ n: Int, _ unit: String) -> String { "\(n) \(unit)\(n == 1 ? "" : "s") ago" }
+        if seconds < 60 { return "Just now" }
+        if seconds < 3600 { return ago(Int(seconds / 60), "minute") }
+        if seconds < 48 * 3600 { return ago(Int(seconds / 3600), "hour") }
+        let days = Int(seconds / 86400)
+        if days < 60 { return ago(days, "day") }
+        if days < 730 { return ago(days / 30, "month") }
+        return ago(days / 365, "year")
+    }
 
     static func listTime(_ date: Date) -> String { time.string(from: date) }
 
