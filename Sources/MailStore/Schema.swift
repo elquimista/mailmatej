@@ -195,6 +195,14 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v6-body-parts-not-attachments") { db in
+            // HTML or text bodies that carried a Content-ID were kept as parts and listed as attachments.
+            try db.execute(sql: """
+                DELETE FROM message_part
+                WHERE cid IS NOT NULL AND name IS NULL AND type IN ('text/html', 'text/plain')
+                """)
+        }
+
         return m
     }
 }

@@ -414,7 +414,10 @@ public actor JMAPAccountSync {
     /// part beside the text and HTML; MailMate shows it as "Attachment.ics").
     static func parts(_ email: EmailBody) -> [MessagePart] {
         var seen = Set<String>()
-        return (email.htmlBody.filter { $0.cid != nil } + email.attachments).compactMap { part in
+        // From the body, only embedded media: some senders (LinkedIn) give the HTML body itself a
+        // Content-ID, and it isn't an attachment.
+        let embedded = email.htmlBody.filter { $0.cid != nil && !$0.type.lowercased().hasPrefix("text/") }
+        return (embedded + email.attachments).compactMap { part in
             guard let blobId = part.blobId, seen.insert(blobId).inserted else { return nil }
             return MessagePart(blobId: blobId, cid: part.cid, type: part.type, name: part.name, size: part.size)
         }
