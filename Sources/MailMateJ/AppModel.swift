@@ -168,9 +168,38 @@ final class AppModel {
 
     // MARK: Private
 
+    private var statusPostScheduled = false
+
+    /// Stores the status and notifies the UI, at most twice a second (downloads report often).
     private func statusChanged(_ status: AccountSyncStatus) {
         statuses[status.accountId] = status
-        NotificationCenter.default.post(name: .syncStatusDidChange, object: nil)
+        guard !statusPostScheduled else { return }
+        statusPostScheduled = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            statusPostScheduled = false
+            NotificationCenter.default.post(name: .syncStatusDidChange, object: nil)
+        }
+    }
+
+    /// Messages still to download across accounts that are downloading now.
+    var downloadsRemaining: Int {
+        statuses.values.filter(\.isDownloading).map { $0.total - $0.downloaded }.reduce(0, +)
+    }
+
+    /// Mailboxes (local ids) any download is working on right now.
+    var busyMailboxIDs: Set<Int64> { statuses.values.reduce(into: Set<Int64>()) { $0.formUnion($1.busyMailboxes) } }
+
+    /// Whether the account is syncing or downloading messages right now (shows a spinner).
+    func isBusy(accountId: String) -> Bool {
+        guard let s = statuses[accountId] else { return false }
+        return s.phase == .syncing || s.isDownloading
+    }
+
+    /// "Downloaded X of Y messages" while an account isn't fully stored locally.
+    func downloadInfo(accountId: String) -> String? {
+        guard let s = statuses[accountId], s.total > 0, s.downloaded < s.total else { return nil }
+        return "Downloaded \(s.downloaded.formatted()) of \(s.total.formatted()) messages"
     }
 
     /// Coalesces bursts of commits (e.g. during an initial sync) into at most ~3 UI refreshes per second.

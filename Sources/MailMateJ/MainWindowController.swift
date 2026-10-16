@@ -236,7 +236,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     }
 
     private func syncStatusDidChange() {
-        sidebar.reload()
+        sidebar.refreshStatuses()
         updateTitle()
     }
 
@@ -247,7 +247,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
         let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
         window?.title = subject.map { ($0.isEmpty ? "(no subject)" : $0) + " — " + mailbox } ?? mailbox
         let syncing = model.syncingCount
-        window?.subtitle = syncing > 0 ? "Syncing \(syncing) account\(syncing == 1 ? "" : "s")…" : ""
+        let remaining = model.downloadsRemaining
+        window?.subtitle =
+            syncing > 0 ? "Syncing \(syncing) account\(syncing == 1 ? "" : "s")…"
+            : remaining > 0 ? "Downloading messages… \(remaining.formatted()) left" : ""
     }
 
     #if DEBUG

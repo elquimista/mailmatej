@@ -11,8 +11,12 @@ final class SidebarNode: NSObject {
     let symbol: String
     let scope: MessageScope?
     let accountId: String?
+    /// JMAP role of a mailbox node ("inbox", "sent", ...).
+    var role: String?
     var badge = 0
     var warning: String?
+    var info: String?
+    var isBusy = false
     var children: [SidebarNode] = []
 
     init(key: String, kind: Kind, title: String, symbol: String = "", scope: MessageScope? = nil, accountId: String? = nil) {
@@ -35,6 +39,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var roots: [SidebarNode] = []
     private var expandedKeys: Set<String>
     private var suppressSelection = false
+    /// Set while `reload()` re-expands rows, so expansion callbacks don't refresh statuses per row.
+    private var isReloading = false
     private static let expandedDefaultsKey = "SidebarExpandedKeys"
 
     init(model: AppModel) {
@@ -73,10 +79,64 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     var selectedNode: SidebarNode? { outline.item(atRow: outline.selectedRow) as? SidebarNode }
 
+    /// Updates activity spinners, warnings and tooltips of visible rows in place (no reload, so
+    /// spinners keep animating). A row spins when its account syncs or downloads, when the download
+    /// is working on its mailbox, for unified mailboxes when any mailbox with that role is busy, and
+    /// for collapsed rows when anything inside them is busy.
+    func refreshStatuses() {
+        let busyIDs = model.busyMailboxIDs
+        var busyRoles = Set<String>()
+
+        func selfBusy(_ node: SidebarNode) -> Bool {
+            switch node.kind {
+            case .account: return node.accountId.map(model.isBusy) ?? false
+            case .mailbox:
+                if case .mailbox(let id)? = node.scope { return busyIDs.contains(id) }
+                return false
+            default: return false
+            }
+        }
+        /// Updates `node` and its subtree; returns whether anything in the subtree is busy.
+        @discardableResult
+        func update(_ node: SidebarNode) -> Bool {
+            let own = selfBusy(node)
+            if own, let role = node.role { busyRoles.insert(role) }
+            let inside = node.children.map(update).contains(true)
+            if node.kind == .account, let id = node.accountId {
+                node.warning = model.syncWarning(accountId: id)
+                node.info = model.downloadInfo(accountId: id)
+            }
+            node.isBusy = own || (inside && !outline.isItemExpanded(node))
+            return own || inside
+        }
+        for root in roots where root.key != "header.mailboxes" { root.children.forEach { update($0) } }
+        // Unified mailboxes, from what the account trees reported.
+        for node in roots.first(where: { $0.key == "header.mailboxes" })?.children ?? [] {
+            switch node.scope {
+            case .role(let role)?: node.isBusy = busyRoles.contains(role)
+            case .allMessages?: node.isBusy = !busyIDs.isEmpty
+            default: node.isBusy = false
+            }
+        }
+        reconfigureVisibleRows()
+    }
+
+    private func reconfigureVisibleRows() {
+        let rows = outline.rows(in: outline.visibleRect)
+        for row in rows.location..<(rows.location + rows.length) {
+            guard let node = outline.item(atRow: row) as? SidebarNode, node.kind != .header,
+                let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell
+            else { continue }
+            cell.configure(node)
+        }
+    }
+
     /// Rebuilds the tree from the store, keeping expansion and selection.
     func reload() {
         let selectedKey = selectedNode?.key ?? "unified.inbox"
         roots = buildTree()
+        isReloading = true
+        defer { isReloading = false }
         suppressSelection = true
         outline.reloadData()
         for root in roots {
@@ -88,6 +148,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             if row >= 0 { outline.selectRowIndexes([row], byExtendingSelection: false) }
         }
         suppressSelection = false
+        refreshStatuses()
     }
 
     #if DEBUG
@@ -155,6 +216,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 scope: .account(account.id), accountId: account.id)
             node.badge = counts.unreadByAccount[account.id] ?? 0
             node.warning = model.syncWarning(accountId: account.id)
+            node.info = model.downloadInfo(accountId: account.id)
             node.children = mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
             sources.children.append(node)
         }
@@ -173,6 +235,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 let node = SidebarNode(
                     key: "mailbox.\(accountId).\(box.remoteId)", kind: .mailbox, title: box.name,
                     symbol: Self.symbol(forRole: box.role), scope: .mailbox(box.id), accountId: accountId)
+                node.role = box.role
                 if box.role != "sent" && box.role != "trash" && box.role != "drafts" { node.badge = box.unreadEmails }
                 node.children = build(box.remoteId)
                 return node
@@ -256,12 +319,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
         expandedKeys.insert(node.key)
         UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
+        if !isReloading { refreshStatuses() }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
         expandedKeys.remove(node.key)
         UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
+        if !isReloading { refreshStatuses() }
     }
 
     // MARK: Context menu
@@ -311,6 +376,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 /// Icon, title, and an unread-count capsule.
 final class SidebarCell: NSTableCellView {
     private let badge = BadgeView()
+    /// Shown instead of the badge while the account syncs or downloads, as in MailMate.
+    private let spinner: NSProgressIndicator = {
+        let p = NSProgressIndicator()
+        p.style = .spinning
+        p.controlSize = .small
+        p.isDisplayedWhenStopped = false
+        return p
+    }()
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -318,7 +391,7 @@ final class SidebarCell: NSTableCellView {
         let image = NSImageView()
         let field = NSTextField(labelWithString: "")
         field.lineBreakMode = .byTruncatingTail
-        for v in [image, field, badge] as [NSView] {
+        for v in [image, field, badge, spinner] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -335,6 +408,10 @@ final class SidebarCell: NSTableCellView {
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: field.trailingAnchor, constant: 6),
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            spinner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
+            spinner.widthAnchor.constraint(equalToConstant: 14),
+            spinner.heightAnchor.constraint(equalToConstant: 14),
         ])
     }
 
@@ -349,9 +426,15 @@ final class SidebarCell: NSTableCellView {
         } else {
             imageView?.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
             imageView?.contentTintColor = node.kind == .account ? .secondaryLabelColor : .controlAccentColor
-            toolTip = nil
+            toolTip = node.info
         }
         badge.count = node.badge
+        if node.isBusy {
+            badge.isHidden = true
+            spinner.startAnimation(nil)
+        } else {
+            spinner.stopAnimation(nil)
+        }
     }
 }
 

@@ -90,6 +90,47 @@ import Testing
         #expect(try !store.isRemoteContentAllowed(email: "news@shop.com"))
     }
 
+    @Test func downloadQueueIsNewestFirstAndResetsOnBlobChange() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 300), message("3", from: "c@x.com", at: 200),
+        ])
+        let pending = try store.pendingDownloads(accountId: "acc", limit: 10)
+        #expect(pending.map(\.remoteId) == ["2", "3", "1"])
+        #expect(pending.allSatisfy { !$0.hasBody })
+
+        try store.setDownloadState(1, messageIds: pending.map(\.id))
+        #expect(try store.pendingDownloads(accountId: "acc", limit: 10).isEmpty)
+        #expect(try store.downloadProgress(accountId: "acc") == (3, 3))
+
+        // Same blob: stays downloaded. New blob (message content replaced): queued again.
+        try store.upsertMessages(accountId: "acc", [message("2", from: "b@x.com", at: 300, keywords: ["$seen"])])
+        #expect(try store.pendingDownloads(accountId: "acc", limit: 10).isEmpty)
+        var changed = message("1", from: "a@x.com", at: 100)
+        changed.blobId = "new-blob"
+        try store.upsertMessages(accountId: "acc", [changed])
+        #expect(try store.pendingDownloads(accountId: "acc", limit: 10).map(\.remoteId) == ["1"])
+
+        try store.setDownloadState(2, messageIds: [pending[2].id])
+        #expect(try store.pendingDownloads(accountId: "acc", limit: 10).isEmpty)
+        try store.retryFailedDownloads()
+        #expect(try store.pendingDownloads(accountId: "acc", limit: 10).count == 1)
+    }
+
+    @Test func downloadBookkeepingDoesNotNotifyTheUI() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        let id = try #require(store.messageIDs(scope: .allMessages).first)
+        let count = Counter()
+        let observation = store.observeChanges { count.increment() }
+        defer { observation.cancel() }
+
+        try store.setDownloadState(1, messageIds: [id])
+        try store.saveBody(messageId: id, MessageBody(html: nil, text: "full body"))
+        #expect(count.value == 0)
+
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100, keywords: ["$seen"])])
+        #expect(count.value > 0)
+    }
+
     @Test func search() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100, subject: "Quarterly planning"),
@@ -104,4 +145,11 @@ import Testing
         #expect(MailStore.sortSubject("Re: Fwd: [3] Hello") == "[3] hello")
         #expect(MailStore.sortSubject("AW: RE[2]: Plan") == "plan")
     }
+}
+
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
 }

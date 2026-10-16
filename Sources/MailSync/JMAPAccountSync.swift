@@ -62,10 +62,101 @@ public actor JMAPAccountSync {
         }
         let body = Self.render(email)
         try store.saveBody(messageId: messageId, body, parts: Self.parts(email))
-        if let data = await raw {
-            try? store.blobs.write(data, accountId: account.id, blobId: detail.blobId)
+        if let data = await raw, (try? store.blobs.write(data, accountId: account.id, blobId: detail.blobId)) != nil {
+            try store.setDownloadState(1, messageIds: [messageId])
         }
         return body
+    }
+
+    public struct DownloadBatchResult: Sendable {
+        /// Messages handled in this batch (downloaded or given up on); 0 means nothing is left.
+        public var processed: Int
+        public var failed: Int
+    }
+
+    /// Downloads the next messages not yet stored locally, newest first: body text, HTML and parts
+    /// (searchable, instant to open) and the raw .eml. Messages up to 512 KB come in batched
+    /// Blob/get requests where the server supports them; larger ones are downloaded one by one.
+    public func downloadNextBatch(limit: Int = 25) async throws -> DownloadBatchResult {
+        let pending = try store.pendingDownloads(accountId: account.id, limit: limit)
+        guard !pending.isEmpty else { return DownloadBatchResult(processed: 0, failed: 0) }
+        let session = try await client.currentSession()
+        let accountId = try remoteAccountId(session)
+        var failed = Set<Int64>()
+
+        // Bodies, all in one request.
+        let needBody = pending.filter { !$0.hasBody }
+        if !needBody.isEmpty {
+            var request = JMAPRequest()
+            let get = request.call("Email/get", [
+                "accountId": .string(accountId),
+                "ids": .strings(needBody.map(\.remoteId)),
+                "properties": .strings(EmailBody.properties),
+                "fetchTextBodyValues": true,
+                "fetchHTMLBodyValues": true,
+                "maxBodyValueBytes": 2_000_000,
+            ])
+            let result = try await client.send(request).decode(GetResponse<EmailBody>.self, get)
+            let ids = Dictionary(needBody.map { ($0.remoteId, $0.id) }, uniquingKeysWith: { a, _ in a })
+            for email in result.list {
+                if let id = ids[email.id] { try store.saveBody(messageId: id, Self.render(email), parts: Self.parts(email)) }
+            }
+            for gone in result.notFound ?? [] { if let id = ids[gone] { failed.insert(id) } }
+        }
+
+        // Raw messages.
+        let needRaw = pending.filter { !failed.contains($0.id) && !store.blobs.contains(accountId: account.id, blobId: $0.blobId) }
+        var oneByOne = needRaw
+        if session.supports(Capability.blob) {
+            let small = needRaw.filter { $0.size <= 512_000 }
+            oneByOne = needRaw.filter { $0.size > 512_000 }
+            for group in Self.groups(small, maxBytes: 4_000_000) {
+                var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.blob])
+                let blobIds = Array(Set(group.map(\.blobId)))
+                let get = request.call("Blob/get", [
+                    "accountId": .string(accountId), "ids": .strings(blobIds), "properties": ["data:asBase64"],
+                ])
+                let result = try await client.send(request).decode(BlobGetResponse.self, get)
+                var written = Set<String>()
+                for blob in result.list {
+                    guard let data = blob.data, blob.isTruncated != true else { continue }
+                    try store.blobs.write(data, accountId: account.id, blobId: blob.id)
+                    written.insert(blob.id)
+                }
+                for item in group where !written.contains(item.blobId) { failed.insert(item.id) }
+            }
+        }
+        for item in oneByOne {
+            do {
+                let data = try await client.download(
+                    accountId: accountId, blobId: item.blobId, type: "message/rfc822", name: "message.eml")
+                try store.blobs.write(data, accountId: account.id, blobId: item.blobId)
+            } catch JMAPError.http(status: 404, _, _) {
+                failed.insert(item.id)
+            }
+        }
+
+        try store.setDownloadState(1, messageIds: pending.map(\.id).filter { !failed.contains($0) })
+        try store.setDownloadState(2, messageIds: Array(failed))
+        return DownloadBatchResult(processed: pending.count, failed: failed.count)
+    }
+
+    /// Splits downloads into groups whose sizes add up to at most `maxBytes` (at least one per group).
+    static func groups(_ items: [MailStore.PendingDownload], maxBytes: Int) -> [[MailStore.PendingDownload]] {
+        var groups: [[MailStore.PendingDownload]] = []
+        var current: [MailStore.PendingDownload] = []
+        var bytes = 0
+        for item in items {
+            if !current.isEmpty && bytes + item.size > maxBytes {
+                groups.append(current)
+                current = []
+                bytes = 0
+            }
+            current.append(item)
+            bytes += item.size
+        }
+        if !current.isEmpty { groups.append(current) }
+        return groups
     }
 
     /// Downloads one blob (e.g. an embedded image part).
@@ -307,7 +398,10 @@ public actor JMAPAccountSync {
     static func render(_ email: EmailBody) -> MessageBody {
         func value(_ part: EmailBodyPart) -> String? { part.partId.flatMap { email.bodyValues[$0]?.value } }
 
-        let text = email.textBody.compactMap(value).joined(separator: "\n\n")
+        // Plain text for display and search; HTML-only parts are reduced to their text.
+        let text = email.textBody.compactMap { part in
+            value(part).map { part.type.lowercased() == "text/html" ? plainText(fromHTML: $0) : $0 }
+        }.joined(separator: "\n\n")
         let hasHTML = email.htmlBody.contains { $0.type.lowercased() == "text/html" }
         guard hasHTML else { return MessageBody(html: nil, text: text) }
 
@@ -321,6 +415,21 @@ public actor JMAPAccountSync {
             }
         }
         return MessageBody(html: html, text: text)
+    }
+
+    /// Readable text from HTML, for the search index: drops style/script/head and tags,
+    /// decodes common entities and collapses whitespace.
+    static func plainText(fromHTML html: String) -> String {
+        var s = html.replacingOccurrences(
+            of: #"(?is)<(style|script|head|title)\b.*?</\1>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?i)<(br|/p|/div|/tr|/li|/h\d)\b[^>]*>"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        for (entity, char) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+            s = s.replacingOccurrences(of: entity, with: char)
+        }
+        s = s.replacingOccurrences(of: #"[ \t\r\f]+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\s*\n\s*"#, with: "\n", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func escapeHTML(_ s: String) -> String {

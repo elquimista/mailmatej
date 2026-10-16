@@ -28,6 +28,6 @@ let package = Package(
         .executableTarget(name: "mmj-sync", dependencies: ["MailSync", "MailStore", "JMAPKit"]),
         .testTarget(name: "JMAPKitTests", dependencies: ["JMAPKit"]),
         .testTarget(name: "MailStoreTests", dependencies: ["MailStore"]),
-        .testTarget(name: "MailSyncTests", dependencies: ["MailSync", "JMAPKit"]),
+        .testTarget(name: "MailSyncTests", dependencies: ["MailSync", "JMAPKit", "MailStore"]),
     ]
 )

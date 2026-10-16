@@ -156,7 +156,8 @@ public final class MailStore: Sendable {
                     fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
                     size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
                     hasAttachment = excluded.hasAttachment, isSeen = excluded.isSeen,
-                    isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft
+                    isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft,
+                    downloadState = CASE WHEN blobId = excluded.blobId THEN downloadState ELSE 0 END
                 RETURNING id
                 """)
             let clearMailboxes = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
@@ -216,6 +217,84 @@ public final class MailStore: Sendable {
                     sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))",
                     arguments: StatementArguments([accountId] + chunk))
             }
+        }
+    }
+
+    // MARK: Full download
+
+    public struct PendingDownload: Sendable {
+        public var id: Int64
+        public var remoteId: String
+        public var blobId: String
+        public var size: Int
+        public var hasBody: Bool
+
+        public init(id: Int64, remoteId: String, blobId: String, size: Int, hasBody: Bool) {
+            self.id = id
+            self.remoteId = remoteId
+            self.blobId = blobId
+            self.size = size
+            self.hasBody = hasBody
+        }
+    }
+
+    /// Messages of an account not yet fully downloaded, newest first (so new mail goes first).
+    public func pendingDownloads(accountId: String, limit: Int) throws -> [PendingDownload] {
+        try dbPool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT m.id, m.remoteId, m.blobId, m.size,
+                           EXISTS (SELECT 1 FROM message_body b WHERE b.messageId = m.id) AS hasBody
+                    FROM message m
+                    WHERE m.accountId = ? AND m.downloadState = 0
+                    ORDER BY m.receivedAt DESC LIMIT ?
+                    """,
+                arguments: [accountId, limit]
+            ).map { PendingDownload(id: $0["id"], remoteId: $0["remoteId"], blobId: $0["blobId"], size: $0["size"], hasBody: $0["hasBody"]) }
+        }
+    }
+
+    /// Mailboxes holding the next `limit` messages to download: the ones the download is working on.
+    public func mailboxIdsOfPendingDownloads(accountId: String, limit: Int) throws -> Set<Int64> {
+        try dbPool.read { db in
+            Set(try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT mm.mailboxId FROM (
+                        SELECT id FROM message WHERE accountId = ? AND downloadState = 0
+                        ORDER BY receivedAt DESC LIMIT ?
+                    ) p JOIN message_mailbox mm ON mm.messageId = p.id
+                    """,
+                arguments: [accountId, limit]))
+        }
+    }
+
+    public func setDownloadState(_ state: Int, messageIds: [Int64]) throws {
+        guard !messageIds.isEmpty else { return }
+        try dbPool.write { db in
+            for chunk in messageIds.chunked(500) {
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                try db.execute(
+                    sql: "UPDATE message SET downloadState = ? WHERE id IN (\(marks))",
+                    arguments: StatementArguments([state] + chunk.map { $0 as Int64 }))
+            }
+        }
+    }
+
+    /// Lets messages that failed to download in an earlier run be tried again.
+    public func retryFailedDownloads() throws {
+        try dbPool.write { db in try db.execute(sql: "UPDATE message SET downloadState = 0 WHERE downloadState = 2") }
+    }
+
+    /// (downloaded, total) messages for an account.
+    public func downloadProgress(accountId: String) throws -> (downloaded: Int, total: Int) {
+        try dbPool.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: "SELECT SUM(downloadState = 1) AS done, COUNT(*) AS total FROM message WHERE accountId = ?",
+                arguments: [accountId])
+            return ((row?["done"] as Int?) ?? 0, (row?["total"] as Int?) ?? 0)
         }
     }
 
@@ -459,8 +538,13 @@ public final class MailStore: Sendable {
     /// Calls `onChange` after every committed transaction that touches messages, mailboxes or accounts.
     /// Called on a background queue; the caller is expected to debounce and hop to the main thread.
     public func observeChanges(_ onChange: @escaping @Sendable () -> Void) -> StoreObservation {
+        // Only the message columns the UI shows: download bookkeeping (`downloadState`), bodies and the
+        // search index change constantly during a full download and must not refresh the UI.
+        let shown = Table("message").select(
+            Column("accountId"), Column("subject"), Column("fromDisplay"), Column("fromEmail"), Column("receivedAt"),
+            Column("isSeen"), Column("isFlagged"), Column("isAnswered"), Column("hasAttachment"), Column("size"))
         let observation = DatabaseRegionObservation(
-            tracking: Table("message"), Table("message_mailbox"), Table("mailbox"), Table("account"))
+            tracking: shown, Table("message_mailbox"), Table("mailbox"), Table("account"))
         let cancellable = observation.start(in: dbPool, onError: { _ in }, onChange: { _ in onChange() })
         return StoreObservation(cancellable)
     }

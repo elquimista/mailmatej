@@ -66,6 +66,13 @@ import Testing
             == "https://api.fastmail.com/jmap/session")
     }
 
+    @Test func decodesBlobGet() throws {
+        let json: JSONValue = ["accountId": "a", "list": [["id": "B1", "data:asBase64": "aGVsbG8="]], "notFound": ["B2"]]
+        let response = try json.decode(BlobGetResponse.self)
+        #expect(response.list.first?.data == Data("hello".utf8))
+        #expect(response.notFound == ["B2"])
+    }
+
     @Test func eventStreamParser() {
         var parser = EventStreamParser()
         var events: [EventStreamParser.Event] = []

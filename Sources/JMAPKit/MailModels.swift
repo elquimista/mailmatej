@@ -111,6 +111,27 @@ public struct QueryResponse: Decodable, Sendable {
     public let total: Int?
 }
 
+/// One item of a Blob/get response (RFC 9404) asked for `data:asBase64`.
+public struct BlobData: Decodable, Sendable {
+    public let id: String
+    public let base64: String?
+    public let isEncodingProblem: Bool?
+    public let isTruncated: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, isEncodingProblem, isTruncated
+        case base64 = "data:asBase64"
+    }
+
+    public var data: Data? { base64.flatMap { Data(base64Encoded: $0, options: .ignoreUnknownCharacters) } }
+}
+
+/// A Blob/get response. Unlike other /get responses it need not carry a `state`.
+public struct BlobGetResponse: Decodable, Sendable {
+    public let list: [BlobData]
+    public let notFound: [String]?
+}
+
 /// A push StateChange (RFC 8620 §7.1): accountId → (type → new state).
 public struct StateChange: Decodable, Sendable {
     public let changed: [String: [String: String]]

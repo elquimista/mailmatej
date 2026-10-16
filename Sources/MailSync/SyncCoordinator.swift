@@ -18,6 +18,12 @@ public struct AccountSyncStatus: Sendable {
     public var lastSuccess: Date?
     /// The raw error behind `.failed`, for debug builds and logs.
     public var errorDetail: String?
+    /// Full-download progress: messages stored locally / messages in the account.
+    public var downloaded = 0
+    public var total = 0
+    public var isDownloading = false
+    /// Local mailbox ids the download is working on right now.
+    public var busyMailboxes: Set<Int64> = []
 }
 
 /// Runs sync for all accounts: a bounded number at a time, triggered by push, polling and the user.
@@ -36,6 +42,11 @@ public actor SyncCoordinator {
     private var running: Set<String> = []
     private var pending: Set<String> = []
     private var pushTasks: [String: Task<Void, Never>] = [:]
+    private var downloadTasks: [String: Task<Void, Never>] = [:]
+    /// Full downloads run for at most this many accounts at a time, separately from syncing.
+    private let downloadLimiter = AsyncLimiter(limit: 3)
+    /// Pause between download batches of one account, to stay well under server rate limits.
+    private let downloadPause: Duration = .milliseconds(500)
     private var pollTask: Task<Void, Never>?
 
     public init(
@@ -55,6 +66,7 @@ public actor SyncCoordinator {
 
     /// Loads all enabled accounts, syncs them, and keeps them current with push plus a fallback poll.
     public func start(pollInterval: Duration = .seconds(300), push: Bool = true) throws {
+        try store.retryFailedDownloads()
         try loadAccounts(push: push)
         syncAll()
         pollTask?.cancel()
@@ -75,6 +87,8 @@ public actor SyncCoordinator {
 
     public func stop() {
         pollTask?.cancel()
+        for task in downloadTasks.values { task.cancel() }
+        downloadTasks.removeAll()
         for task in pushTasks.values { task.cancel() }
         pushTasks.removeAll()
     }
@@ -86,6 +100,7 @@ public actor SyncCoordinator {
 
     public func removeAccount(id: String) {
         pushTasks.removeValue(forKey: id)?.cancel()
+        downloadTasks.removeValue(forKey: id)?.cancel()
         engines.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
         pending.remove(id)
@@ -143,12 +158,64 @@ public actor SyncCoordinator {
             do {
                 try await engine.sync()
                 update(accountId, .idle, success: true)
+                startDownloads(accountId)
             } catch {
                 update(accountId, failure: error)
             }
             await limiter.release()
         } while pending.contains(accountId)
         running.remove(accountId)
+    }
+
+    // MARK: Full download
+
+    /// Starts downloading the account's messages that aren't stored locally yet (no-op if running).
+    public func startDownloads(_ accountId: String) {
+        guard downloadTasks[accountId] == nil, let engine = engines[accountId] else { return }
+        downloadTasks[accountId] = Task { await downloadLoop(accountId, engine: engine) }
+    }
+
+    private func downloadLoop(_ accountId: String, engine: JMAPAccountSync) async {
+        reportDownloadProgress(accountId, active: true)
+        await downloadLimiter.acquire()
+        var backoff = 5.0
+        while !Task.isCancelled {
+            do {
+                reportBusyMailboxes(accountId, (try? store.mailboxIdsOfPendingDownloads(accountId: accountId, limit: 25)) ?? [])
+                let result = try await engine.downloadNextBatch()
+                reportDownloadProgress(accountId, active: true)
+                if result.processed == 0 { break }
+                backoff = 5
+                try? await Task.sleep(for: downloadPause)
+            } catch {
+                syncLog.error("Download failed for \(engine.account.name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
+                if backoff > 600 { break }  // Give up until the next sync restarts it.
+                try? await Task.sleep(for: .seconds(backoff))
+                backoff *= 2
+            }
+        }
+        await downloadLimiter.release()
+        downloadTasks[accountId] = nil
+        reportBusyMailboxes(accountId, [])
+        reportDownloadProgress(accountId, active: false)
+    }
+
+    private func reportBusyMailboxes(_ accountId: String, _ ids: Set<Int64>) {
+        var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .idle, lastSuccess: nil)
+        guard status.busyMailboxes != ids else { return }
+        status.busyMailboxes = ids
+        statuses[accountId] = status
+        onStatus(status)
+    }
+
+    private func reportDownloadProgress(_ accountId: String, active: Bool) {
+        guard let progress = try? store.downloadProgress(accountId: accountId) else { return }
+        var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .idle, lastSuccess: nil)
+        status.downloaded = progress.downloaded
+        status.total = progress.total
+        status.isDownloading = active && progress.downloaded < progress.total
+        statuses[accountId] = status
+        onStatus(status)
     }
 
     private func startPush(_ accountId: String, engine: JMAPAccountSync) {

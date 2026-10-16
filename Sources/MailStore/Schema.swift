@@ -171,6 +171,15 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v3-full-download") { db in
+            try db.execute(sql: """
+                -- Whether the full message (raw .eml plus body text and parts) is stored locally:
+                -- 0 = not yet, 1 = downloaded, 2 = failed this run (retried on the next launch).
+                ALTER TABLE message ADD COLUMN downloadState INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX message_download_pending ON message(accountId, receivedAt) WHERE downloadState = 0;
+                """)
+        }
+
         return m
     }
 }
