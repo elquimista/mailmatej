@@ -52,6 +52,8 @@ final class RemoteContentBar: NSView {
     func update(remote: Int, strict: Int, loaded: Bool, sender: String?, allowedBy: [String]) {
         let loadable = remote - strict
         let trackerNote = strict > 0 ? " · \(strict) tracker or insecure resource\(strict == 1 ? "" : "s") always blocked" : ""
+        // On orange, use light-appearance controls (white buttons, dark text) in dark mode too.
+        appearance = loaded ? nil : NSAppearance(named: .aqua)
         if loaded {
             label.stringValue = "Loaded \(loadable) remote resource\(loadable == 1 ? "" : "s")\(trackerNote)"
             layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor

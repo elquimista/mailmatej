@@ -35,8 +35,44 @@ import Testing
         #expect(out.remoteCount == 5)
         #expect(out.strictCount == 4)
         #expect(out.html.contains(#"src="data:," width="1""#))
-        #expect(out.html.contains("product.png"))
-        #expect(!out.html.contains("hidden.png"))
+        #expect(!out.html.contains("hidden.png\""))
+    }
+
+    @Test func blockedImagesBecomePlaceholdersAtTheirSize() {
+        let html = #"<img alt="LE &amp; Co" src="https://cdn.x.com/a.webp" srcset="https://cdn.x.com/a2.webp 2x" width="32" height="32">"#
+        let blocked = MessageHTML.prepare(html, messageId: 1, blockRemote: true).html
+        #expect(blocked.contains(MessageHTML.blockedImagePlaceholder(alt: "LE & Co")))
+        #expect(blocked.contains(#"title="Blocked: https://cdn.x.com/a.webp""#))
+        #expect(blocked.contains(#"width="32" height="32""#))
+        #expect(!blocked.contains("srcset"))
+        #expect(!blocked.contains(#"src="https://"#))  // the remote source is gone (only the tooltip keeps it)
+
+        let loaded = MessageHTML.prepare(html, messageId: 1, blockRemote: false).html
+        #expect(loaded == html)
+
+        let insecure = MessageHTML.prepare(#"<img src="http://x.com/a.png">"#, messageId: 1, blockRemote: false).html
+        #expect(insecure.contains("data:image/svg+xml"))  // strict: boxed even when loading
+        #expect(insecure.contains(#"width="40" height="40""#))  // no size given, no alt
+    }
+
+    @Test func placeholderShowsAltText() throws {
+        let uri = MessageHTML.blockedImagePlaceholder(alt: "Logo <Trova>")
+        let data = try #require(Data(base64Encoded: String(uri.dropFirst("data:image/svg+xml;base64,".count))))
+        let svg = String(decoding: data, as: UTF8.self)
+        #expect(svg.contains(">Logo &lt;Trova&gt;</text>"))
+        #expect(MessageHTML.placeholderSize(alt: "Company logo").height == 20)
+    }
+
+    @Test func genericSansSerifIsPinnedToHelveticaInCSSOnly() {
+        let html = """
+            <style>td { font-family: Arial, sans-serif !important; }</style>
+            <p style="font: bold 16px sans-serif">Text about sans-serif fonts</p><font face='sans-serif'>x</font>
+            """
+        let out = MessageHTML.prepare(html, messageId: 1).html
+        #expect(out.contains("font-family: Arial, Helvetica, sans-serif !important"))
+        #expect(out.contains(#"style="font: bold 16px Helvetica, sans-serif""#))
+        #expect(out.contains("face='Helvetica, sans-serif'"))
+        #expect(out.contains("Text about sans-serif fonts"))  // body text untouched
     }
 
     @Test func rulePatternsMatchExpectedURLs() {

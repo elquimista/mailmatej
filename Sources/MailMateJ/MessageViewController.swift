@@ -3,7 +3,7 @@ import MailStore
 import MailSync
 import WebKit
 
-/// Header fields plus the rendered body. JavaScript is off. Embedded images always show;
+/// Header fields plus the rendered body. Scripts never run. Embedded images always show;
 /// remote content is blocked unless the user loads it, and trackers/insecure loads never load.
 @MainActor
 final class MessageViewController: NSViewController, WKNavigationDelegate {
@@ -26,6 +26,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private static var blockAllRules: WKContentRuleList?
     /// Blocks trackers and insecure loads. Always attached.
     private static var strictRules: WKContentRuleList?
+    /// Blocks every script load. Always attached.
+    private static var scriptRules: WKContentRuleList?
 
     init(model: AppModel) {
         self.model = model
@@ -37,7 +39,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     override func loadView() {
         let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        // Scripts are blocked by the page's CSP (`script-src 'none'`, emitted before any email content)
+        // and by a content rule, not by `allowsContentJavaScript = false`: that switch also changes how
+        // WebKit draws text (bold renders noticeably heavier on 1x displays than in MailMate).
         config.websiteDataStore = .nonPersistent()
         config.suppressesIncrementalRendering = true
         config.setURLSchemeHandler(partHandler, forURLScheme: MessageHTML.cidScheme)
@@ -224,10 +228,10 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             loadHTML(Self.page(body: Self.escape(body.text ?? ""), plain: true))
             return
         }
-        let prepared = MessageHTML.prepare(html, messageId: id)
         let allowedBy = currentSender.flatMap { try? model.store.remoteContentAllowEntries(email: $0) } ?? []
-        // Fail closed: remote content only loads when the strict rules are in place.
-        let loadRemote = (loadRemoteForCurrent || !allowedBy.isEmpty) && Self.strictRules != nil
+        // Fail closed: remote content only loads when the strict and script rules are in place.
+        let loadRemote = (loadRemoteForCurrent || !allowedBy.isEmpty) && Self.strictRules != nil && Self.scriptRules != nil
+        let prepared = MessageHTML.prepare(html, messageId: id, blockRemote: !loadRemote)
         applyRules(loadRemote: loadRemote)
         loadHTML(Self.page(body: prepared.html, plain: false, remote: loadRemote))
 
@@ -243,6 +247,27 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     #if DEBUG
         func debugLoadRemote() { remoteBar.onLoad?() }
+
+        /// Shows arbitrary HTML through the normal pipeline (prepare, wrapper page, content rules).
+        func debugRender(html: String) {
+            currentID = -1
+            partHandler.allowedMessageID = -1
+            placeholder.isHidden = true
+            headerContainer.isHidden = false
+            webView.isHidden = false
+            render(MessageBody(html: html, text: nil))
+        }
+
+        /// Writes the web view's content at full (Retina) resolution.
+        func debugSnapshotWeb(to path: String) async {
+            let config = WKSnapshotConfiguration()
+            config.snapshotWidth = NSNumber(value: Double(webView.bounds.width * 2))  // 2x pixels
+            guard let image = try? await webView.takeSnapshot(configuration: config),
+                let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            else { return }
+            let rep = NSBitmapImageRep(cgImage: cg)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
     #endif
 
     private func rerender() {
@@ -257,11 +282,17 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private func applyRules(loadRemote: Bool) {
         let controller = webView.configuration.userContentController
         controller.removeAllContentRuleLists()
+        if let scripts = Self.scriptRules { controller.add(scripts) }
         if let strict = Self.strictRules { controller.add(strict) }
         if !loadRemote, let all = Self.blockAllRules { controller.add(all) }
     }
 
     private func loadHTML(_ html: String) {
+        #if DEBUG
+            if let path = ProcessInfo.processInfo.environment["MMJ_DUMP_HTML"] {
+                try? html.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        #endif
         webView.loadHTMLString(html, baseURL: nil)
     }
 
@@ -275,6 +306,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             strictRules = try await store?.compileContentRuleList(
                 forIdentifier: "mmj-block-strict",
                 encodedContentRuleList: RemoteContentRules.contentRuleListJSON(RemoteContentRules.strictPatterns))
+            scriptRules = try await store?.compileContentRuleList(
+                forIdentifier: "mmj-block-scripts",
+                encodedContentRuleList: #"[{"trigger":{"url-filter":".*","resource-type":["script"]},"action":{"type":"block"}}]"#)
         } catch {
             NSLog("MailMateJ: could not compile remote-content rules: \(error)")
         }
@@ -286,12 +320,15 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
     ) {
-        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-            return
+        guard let url = navigationAction.request.url else { return decisionHandler(.cancel) }
+        // Clicked links open in the browser (only web and mail links).
+        if navigationAction.navigationType == .linkActivated {
+            if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
+            return decisionHandler(.cancel)
         }
-        decisionHandler(.allow)
+        // The view only ever shows the page we load (about:blank). Anything else, such as a meta refresh
+        // to a remote page where our CSP would no longer apply, is refused.
+        decisionHandler(url.scheme == "about" ? .allow : .cancel)
     }
 
     // MARK: HTML
@@ -303,10 +340,28 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     /// Wraps message content in a page whose Content-Security-Policy is a second line of defense
     /// behind the content rules: only embedded parts and data: URLs, plus https when `remote`.
+    /// In an app's WebKit process, `font-family: Helvetica` at bold weight doesn't find Helvetica's
+    /// bold face and WebKit fakes bold by thickening the regular face, which looks heavy and rough
+    /// (about 6% wider than MailMate on a 1x display). Naming the faces explicitly avoids that.
+    static let helveticaFaces: String = {
+        let faces: [(weight: String, style: String, names: [String])] = [
+            ("100 399", "normal", ["Helvetica-Light", "Helvetica Light"]),
+            ("400 599", "normal", ["Helvetica", "Helvetica Regular"]),
+            ("600 900", "normal", ["Helvetica-Bold", "Helvetica Bold"]),
+            ("100 399", "italic", ["Helvetica-LightOblique", "Helvetica Light Oblique"]),
+            ("400 599", "italic", ["Helvetica-Oblique", "Helvetica Oblique"]),
+            ("600 900", "italic", ["Helvetica-BoldOblique", "Helvetica Bold Oblique"]),
+        ]
+        return faces.map { f in
+            let src = f.names.map { "local(\"\($0)\")" }.joined(separator: ", ")
+            return "\n  @font-face { font-family: \"Helvetica\"; font-weight: \(f.weight); font-style: \(f.style); src: \(src); }"
+        }.joined()
+    }()
+
     static func page(body: String, plain: Bool, remote: Bool = false) -> String {
         let https = remote ? " https:" : ""
-        let csp = "default-src 'none'; style-src 'unsafe-inline'\(https); img-src data: \(MessageHTML.cidScheme):\(https); "
-            + "font-src data:\(https); media-src \(MessageHTML.cidScheme):"
+        let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
+            + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
         if plain {
             return """
                 <!doctype html><html><head><meta charset="utf-8">
@@ -322,7 +377,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         return """
             <!doctype html><html><head><meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="\(csp)">
-            <style>.status { font: 13px -apple-system, sans-serif; color: GrayText; margin: 14px; }</style>
+            <style>\(Self.helveticaFaces)
+              /* Defaults for emails that don't set their own, like Mac mail apps: Helvetica, not Times. */
+              body { font-family: Helvetica, Arial, sans-serif; font-size: 14px; margin: 14px; overflow-wrap: break-word; }
+              /* Placeholders for blocked images fill the image's box, whatever object-fit the email sets. */
+              img[data-mmj-blocked] { object-fit: fill !important; }
+              .status { font: 13px -apple-system, sans-serif; color: GrayText; }
+            </style>
             </head><body>\(body)</body></html>
             """
     }

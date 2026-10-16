@@ -221,8 +221,26 @@ def rich(name):
             f"Message-ID: {make_msgid(domain='seed.mmj.test')}", "MIME-Version: 1.0",
             "Content-Type: text/html; charset=utf-8", "", html, ""])
 
+    job_alert_html = (
+        "<style>td, span {font-family: Arial, sans-serif !important;} a {text-decoration: none;font-weight: bold;}</style>"
+        '<table style="width:600px;margin:0 auto"><tr><td><img alt="" src="https://cdn.example.com/brand-logo.png" '
+        'width="60" height="150"></td></tr>'
+        '<tr><td style="color:#555;font-size:13px">Remote .net web developer jobs — <a href="https://example.com">edit settings</a></td></tr>'
+        '<tr><td style="font-size:22px;font-weight:700;padding:20px 0">Your Job Alerts for Thursday, October 15</td></tr>'
+        '<tr><td><a href="https://example.com/job/1" style="text-decoration:none"><table><tr>'
+        '<td rowspan=2 style="padding:0 8px 0 4px"><img alt="LE" src="https://cdn.example.com/logo.webp" width="32" height="32" '
+        'style="width:32px;height:32px;display:block;object-fit:contain;background-color:#fff;"></td>'
+        '<td style="color:#393939;font-weight:700;font-size:16px;padding:0">Guidehouse</td></tr>'
+        '<tr><td style="padding:4px 0px 0px 0px;color:#0682E0;font-weight:700;font-size:16px"> Remote Developer - .NET </td></tr>'
+        "</table></a></td></tr></table>")
+    job_alert = "\r\n".join([
+        "From: Job Alerts <jobs@alerts.example>", f"To: {me}", "Subject: Job alert layout test",
+        f"Date: {format_datetime(now - timedelta(minutes=4))}", f"Message-ID: {make_msgid(domain='seed.mmj.test')}",
+        "MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8", "", job_alert_html, ""])
+
     items = [
         (embedded, [inbox], {}, now - timedelta(minutes=1)),
+        (job_alert, [inbox], {}, now - timedelta(minutes=4)),
         (newsletter("Shop News <news@shop.example>", "Remote images test", 2), [inbox], {}, now - timedelta(minutes=2)),
         (newsletter("Shop Deals <deals@shop.example>", "Remote images test (same domain)", 3), [inbox], {},
          now - timedelta(minutes=3)),

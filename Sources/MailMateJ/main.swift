@@ -45,6 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
+                if let file = ProcessInfo.processInfo.environment["MMJ_RENDER_HTML_FILE"],
+                    let html = try? String(contentsOfFile: file, encoding: .utf8)
+                {
+                    windowController?.debugRender(html: html)
+                    try? await Task.sleep(for: .seconds(2))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_LOAD_REMOTE"] != nil {
                     try? await Task.sleep(for: .seconds(1))
                     windowController?.debugLoadRemote()
@@ -68,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     target = target?.attachedSheet
                 }
                 writeSnapshot(of: target, to: path)
+                await windowController?.debugSnapshotWeb(to: path.replacingOccurrences(of: ".png", with: "-web.png"))
             }
         }
 

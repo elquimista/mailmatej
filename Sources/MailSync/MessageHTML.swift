@@ -57,13 +57,67 @@ public enum MessageHTML {
     /// Embedded parts are served as `mmj-cid://<messageId>/<content-id>`.
     public static let cidScheme = "mmj-cid"
 
-    public static func prepare(_ html: String, messageId: Int64) -> PreparedHTML {
-        var strict = Set<String>()
-        var output = neutralizeTrackingPixels(html, strict: &strict)
-        output = rewriteCIDs(output, messageId: messageId)
-        let remote = remoteURLs(in: output).union(strict)
-        strict.formUnion(remote.filter(RemoteContentRules.isStrict))
-        return PreparedHTML(html: output, remoteCount: remote.count, strictCount: strict.count)
+    /// - Parameter blockRemote: whether remote images will be blocked. Blocked images are replaced by
+    ///   a crossed placeholder box at their declared size; strictly blocked ones always are.
+    public static func prepare(_ html: String, messageId: Int64, blockRemote: Bool = true) -> PreparedHTML {
+        let withCIDs = rewriteCIDs(pinGenericSansSerif(html), messageId: messageId)
+        let remote = remoteURLs(in: withCIDs)
+        var pixels = Set<String>()
+        let output = replaceRemoteImages(withCIDs, blockRemote: blockRemote, pixels: &pixels)
+        let all = remote.union(pixels)
+        let strict = pixels.union(all.filter(RemoteContentRules.isStrict))
+        return PreparedHTML(html: output, remoteCount: all.count, strictCount: strict.count)
+    }
+
+    /// A yellow outlined box with an X (as MailMate draws blocked images), with the image's alt text
+    /// in the corner. The SVG has no viewBox, so the box fills whatever size the `<img>` has while
+    /// the text keeps its normal size.
+    public static func blockedImagePlaceholder(alt: String) -> String {
+        let text = alt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = text.isEmpty ? "" : """
+            <text x="4" y="13" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#5C4B00" \
+            stroke="#FFFFFF" stroke-width="3" stroke-linejoin="round" paint-order="stroke">\(xmlEscape(text))</text>
+            """
+        let svg = """
+            <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">\
+            <g fill="none" stroke="#F5C400"><rect x="0" y="0" width="100%" height="100%" stroke-width="2"/>\
+            <line x1="0" y1="0" x2="100%" y2="100%" stroke-width="1.5"/>\
+            <line x1="100%" y1="0" x2="0" y2="100%" stroke-width="1.5"/></g>\(label)</svg>
+            """
+        return "data:image/svg+xml;base64," + Data(svg.utf8).base64EncodedString()
+    }
+
+    /// The size given to a blocked image that doesn't declare one: room for its alt text, or 40×40.
+    static func placeholderSize(alt: String) -> (width: Int, height: Int) {
+        let text = alt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return (40, 40) }
+        return (min(300, max(40, Int(Double(text.count) * 6.5) + 10)), 20)
+    }
+
+    static func xmlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    /// Decodes the few entities common in attribute values.
+    static func htmlUnescape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&quot;", with: "\"").replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&nbsp;", with: " ").replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    // MARK: Fonts
+
+    /// Puts `Helvetica` in front of the generic `sans-serif` in CSS (style attributes, `<style>` blocks,
+    /// `<font face>`). In WebKit inside an app, bold `sans-serif` falls back to a synthesized bold that
+    /// looks heavy; the message page maps `Helvetica` to its real faces, so this keeps bold text crisp.
+    static func pinGenericSansSerif(_ html: String) -> String {
+        func pin(_ css: String) -> String {
+            replace(#"(?i)(?<![\w-])sans-serif(?![\w-])"#, in: css) { _ in "Helvetica, sans-serif" }
+        }
+        var out = replace(#"(?is)(<style\b[^>]*>)(.*?)(</style>)"#, in: html) { m in m[1] + pin(m[2]) + m[3] }
+        out = replace(#"(?i)(\s(?:style|face)\s*=\s*)("[^"]*"|'[^']*')"#, in: out) { m in m[1] + pin(m[2]) }
+        return out
     }
 
     // MARK: Embedded images
@@ -100,19 +154,37 @@ public enum MessageHTML {
         return urls
     }
 
-    /// Replaces the `src` of remote images that are 0–1 px or hidden (classic open-tracking pixels)
-    /// with an empty image, recording their URLs as strictly blocked.
-    static func neutralizeTrackingPixels(_ html: String, strict: inout Set<String>) -> String {
+    /// Rewrites remote `<img>` sources. Hidden or 0–1 px images (classic open-tracking pixels) get an
+    /// empty image and are recorded in `pixels`. Other remote images get the placeholder box when
+    /// blocked (always, if strictly blocked), with the original URL as a tooltip.
+    static func replaceRemoteImages(_ html: String, blockRemote: Bool, pixels: inout Set<String>) -> String {
         var found = Set<String>()
         let result = replace(#"(?i)<img\b[^>]*>"#, in: html) { match in
-            let tag = match[0]
-            guard isTrackingPixel(tag),
-                let src = matches(#"(?i)\bsrc\s*=\s*["']?\s*((?:https?|ftp):[^"'\s>]+)"#, in: tag).first?[1]
-            else { return tag }
-            found.insert(src)
-            return tag.replacingOccurrences(of: src, with: "data:,")
+            var tag = match[0]
+            guard let src = matches(#"(?i)\bsrc\s*=\s*["']?\s*((?:https?|ftp):[^"'\s>]+)"#, in: tag).first?[1] else {
+                return tag
+            }
+            if isTrackingPixel(tag) {
+                found.insert(src)
+                return tag.replacingOccurrences(of: src, with: "data:,")
+            }
+            guard blockRemote || RemoteContentRules.isStrict(src) else { return tag }
+            let alt = htmlUnescape(matches(#"(?i)\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#, in: tag).first
+                .map { $0[1] + $0[2] + $0[3] } ?? "")
+            tag = replace(#"(?i)\s+srcset\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#, in: tag) { _ in "" }
+            tag = tag.replacingOccurrences(of: src, with: blockedImagePlaceholder(alt: alt))
+            var extra = "data-mmj-blocked title=\"Blocked: \(src.replacingOccurrences(of: "\"", with: "&quot;"))\""
+            let style = matches(#"(?i)\bstyle\s*=\s*["']([^"']*)["']"#, in: tag).first?[1] ?? ""
+            let size = placeholderSize(alt: alt)
+            if matches(#"(?i)\swidth\s*="#, in: tag).isEmpty && matches(#"(?i)(^|[;\s])width\s*:"#, in: style).isEmpty {
+                extra += " width=\"\(size.width)\""
+            }
+            if matches(#"(?i)\sheight\s*="#, in: tag).isEmpty && matches(#"(?i)(^|[;\s])height\s*:"#, in: style).isEmpty {
+                extra += " height=\"\(size.height)\""
+            }
+            return tag.replacingOccurrences(of: #"(?i)^<img\b"#, with: "<img \(extra)", options: .regularExpression)
         }
-        strict.formUnion(found)
+        pixels.formUnion(found)
         return result
     }
 

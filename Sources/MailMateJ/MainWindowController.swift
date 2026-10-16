@@ -248,6 +248,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
 
         func debugLoadRemote() { messageView.debugLoadRemote() }
 
+        func debugRender(html: String) { messageView.debugRender(html: html) }
+
+        func debugSnapshotWeb(to path: String) async { await messageView.debugSnapshotWeb(to: path) }
+
         func debugScrollList(by points: CGFloat) {
             guard let scrollView = list.tableView.enclosingScrollView else { return }
             let clip = scrollView.contentView
