@@ -71,6 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectSidebar(key: "unified.inbox")
                     try? await Task.sleep(for: .seconds(1))
                 }
+                // MMJ_SNAPSHOT_SETTLE=<seconds>: wait after the scripted actions (e.g. for mail to arrive).
+                if let settle = Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTLE"] ?? "") {
+                    try? await Task.sleep(for: .seconds(settle))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_FOCUS_SIDEBAR"] != nil {
                     windowController?.debugFocusSidebar()
                     try? await Task.sleep(for: .seconds(1))

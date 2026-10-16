@@ -148,6 +148,20 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case toMessage(Int64?)
     }
 
+    /// Whether the message's row is entirely in view (not cut off or under the column header).
+    func isFullyVisible(_ id: Int64?) -> Bool {
+        guard let id, let row = ids.firstIndex(of: id), let clip = tableView.enclosingScrollView?.contentView else {
+            return false
+        }
+        var visible = tableView.convert(clip.documentVisibleRect, from: clip)
+        let header = tableView.headerView?.frame.height ?? 0
+        if clip.contentInsets.top < header {  // The header floats over the content.
+            visible.origin.y += header - clip.contentInsets.top
+            visible.size.height -= header - clip.contentInsets.top
+        }
+        return visible.contains(tableView.rect(ofRow: row).insetBy(dx: 0, dy: 1))
+    }
+
     var scrollAnchor: ScrollAnchor? {
         guard let clip = tableView.enclosingScrollView?.contentView, !ids.isEmpty else { return nil }
         let top = clip.bounds.minY

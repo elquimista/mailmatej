@@ -17,6 +17,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
     private var scopeTitle = "Inbox"
     private var search = ""
     private var loadGeneration = 0
+    /// The newest message as of the last load, to tell whether the user is "following" new mail.
+    private var lastNewestID: Int64?
     private var correspondent: String?
     private var correspondenceTask: Task<Void, Never>?
     /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
@@ -195,9 +197,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSWindo
                 list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newest) : .toSelection)
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
+                // When sorted by date and the newest message was in view, follow new mail to the
+                // top (or bottom); if the user scrolled away from it, keep their position.
                 let wasEmpty = list.ids.isEmpty
-                list.setIDs(ids, scroll: wasEmpty ? .toMessage(newest) : .keepPosition)
+                let following = sort.key == .receivedAt && list.isFullyVisible(lastNewestID)
+                list.setIDs(ids, scroll: wasEmpty || (following && newest != lastNewestID) ? .toMessage(newest) : .keepPosition)
             }
+            lastNewestID = newest
 
             if list.selectedIDs != before || reason == .scopeChanged {
                 messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
