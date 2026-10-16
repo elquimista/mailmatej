@@ -1,0 +1,117 @@
+import Foundation
+
+// Typed models for the subset of RFC 8621 (JMAP Mail) the client uses.
+
+public struct Mailbox: Decodable, Sendable {
+    public let id: String
+    public let name: String
+    public let parentId: String?
+    public let role: String?
+    public let sortOrder: Int?
+    public let totalEmails: Int?
+    public let unreadEmails: Int?
+    public let isSubscribed: Bool?
+}
+
+public struct EmailAddress: Codable, Sendable, Hashable {
+    public let name: String?
+    public let email: String?
+
+    public init(name: String?, email: String?) {
+        self.name = name
+        self.email = email
+    }
+}
+
+public struct Email: Decodable, Sendable {
+    public let id: String
+    public let blobId: String
+    public let threadId: String
+    public let mailboxIds: [String: Bool]
+    public let keywords: [String: Bool]
+    public let size: Int
+    public let receivedAt: Date
+    public let messageId: [String]?
+    public let inReplyTo: [String]?
+    public let sender: [EmailAddress]?
+    public let from: [EmailAddress]?
+    public let to: [EmailAddress]?
+    public let cc: [EmailAddress]?
+    public let bcc: [EmailAddress]?
+    public let replyTo: [EmailAddress]?
+    public let subject: String?
+    public let sentAt: Date?
+    public let hasAttachment: Bool
+    public let preview: String?
+
+    /// The properties to request so the response decodes into `Email`.
+    public static let properties: [String] = [
+        "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt",
+        "messageId", "inReplyTo", "sender", "from", "to", "cc", "bcc", "replyTo",
+        "subject", "sentAt", "hasAttachment", "preview",
+    ]
+}
+
+public struct EmailBodyPart: Decodable, Sendable {
+    public let partId: String?
+    public let blobId: String?
+    public let size: Int?
+    public let type: String
+    public let charset: String?
+    public let name: String?
+    public let disposition: String?
+    public let cid: String?
+}
+
+public struct EmailBodyValue: Decodable, Sendable {
+    public let value: String
+    public let isEncodingProblem: Bool?
+    public let isTruncated: Bool?
+}
+
+/// The body-related properties of an Email, fetched lazily when a message is opened.
+public struct EmailBody: Decodable, Sendable {
+    public let id: String
+    public let textBody: [EmailBodyPart]
+    public let htmlBody: [EmailBodyPart]
+    public let attachments: [EmailBodyPart]
+    public let bodyValues: [String: EmailBodyValue]
+
+    public static let properties = ["id", "textBody", "htmlBody", "attachments", "bodyValues"]
+}
+
+public struct Identity: Decodable, Sendable {
+    public let id: String
+    public let name: String
+    public let email: String
+}
+
+public struct GetResponse<T: Decodable & Sendable>: Decodable, Sendable {
+    public let accountId: String
+    public let state: String
+    public let list: [T]
+    public let notFound: [String]?
+}
+
+public struct ChangesResponse: Decodable, Sendable {
+    public let accountId: String
+    public let oldState: String
+    public let newState: String
+    public let hasMoreChanges: Bool
+    public let created: [String]
+    public let updated: [String]
+    public let destroyed: [String]
+}
+
+public struct QueryResponse: Decodable, Sendable {
+    public let accountId: String
+    public let queryState: String
+    public let ids: [String]
+    public let position: Int
+    public let total: Int?
+}
+
+/// A push StateChange (RFC 8620 §7.1): accountId → (type → new state).
+public struct StateChange: Decodable, Sendable {
+    public let changed: [String: [String: String]]
+}

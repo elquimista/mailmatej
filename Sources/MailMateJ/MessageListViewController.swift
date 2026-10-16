@@ -1,0 +1,288 @@
+import AppKit
+import MailStore
+
+/// A virtualized message list. It holds only the ordered IDs; rows are fetched in blocks
+/// around what is visible and kept in a small cache, so memory stays flat for any list size.
+@MainActor
+final class MessageListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    enum Column: String {
+        case unread, flag, attachment, from, subject, date, source
+
+        var title: String {
+            switch self {
+            case .unread, .flag, .attachment: ""
+            case .from: "From"
+            case .subject: "Subject"
+            case .date: "Date Received"
+            case .source: "Source Mailbox"
+            }
+        }
+
+        var sortKey: MessageSort.Key? {
+            switch self {
+            case .from: .from
+            case .subject: .subject
+            case .date: .receivedAt
+            default: nil
+            }
+        }
+    }
+
+    var onSelectionChange: ((Int64?) -> Void)?
+    var onSortChange: ((MessageSort) -> Void)?
+
+    private let store: MailStore
+    private let columns: [Column]
+    private let autosaveName: String
+    private let widths: [Column: CGFloat]
+    private(set) var ids: [Int64] = []
+    private var cache: [Int64: MessageRow] = [:]
+    private var suppressSelection = false
+    private(set) var tableView = NSTableView()
+
+    private static let blockSize = 150
+    private static let cacheLimit = 3000
+
+    init(store: MailStore, columns: [Column], autosaveName: String, widths: [Column: CGFloat] = [:]) {
+        self.store = store
+        self.columns = columns
+        self.autosaveName = autosaveName
+        self.widths = widths
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let table = tableView
+        table.style = .fullWidth
+        table.usesAlternatingRowBackgroundColors = true
+        table.allowsMultipleSelection = true
+        table.allowsColumnReordering = true
+        table.rowHeight = 20
+        table.intercellSpacing = NSSize(width: 6, height: 0)
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        table.gridStyleMask = []
+
+        for column in columns {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
+            c.title = column.title
+            switch column {
+            case .unread, .flag, .attachment:
+                c.width = 16
+                c.minWidth = 16
+                c.maxWidth = 16
+                c.resizingMask = []
+                let symbol = column == .flag ? "flag.fill" : column == .attachment ? "paperclip" : "circle.fill"
+                c.headerCell.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                    .withSymbolConfiguration(.init(pointSize: 9, weight: .regular))
+            case .from:
+                c.width = 220
+                c.minWidth = 80
+                c.resizingMask = [.userResizingMask, .autoresizingMask]
+            case .subject:
+                c.width = 460
+                c.minWidth = 120
+                c.resizingMask = [.userResizingMask, .autoresizingMask]
+            case .date:
+                c.width = 140
+                c.minWidth = 90
+                c.resizingMask = .userResizingMask
+            case .source:
+                c.width = 170
+                c.minWidth = 80
+                c.resizingMask = [.userResizingMask, .autoresizingMask]
+            }
+            if let width = widths[column] { c.width = width }
+            if let key = column.sortKey {
+                c.sortDescriptorPrototype = NSSortDescriptor(key: key.rawValue, ascending: key != .receivedAt)
+            }
+            table.addTableColumn(c)
+        }
+        table.autosaveName = autosaveName
+        table.autosaveTableColumns = true
+        table.dataSource = self
+        table.delegate = self
+
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        view = scroll
+    }
+
+    // MARK: Data
+
+    var selectedIDs: [Int64] {
+        tableView.selectedRowIndexes.compactMap { $0 < ids.count ? ids[$0] : nil }
+    }
+
+    var selectedID: Int64? { selectedIDs.count == 1 ? selectedIDs[0] : nil }
+
+    /// Replaces the list. Keeps the current selection (or selects `select`) without firing `onSelectionChange`.
+    func setIDs(_ newIDs: [Int64], select: Int64? = nil, scrollToSelection: Bool = false) {
+        let wanted = select.map { [$0] } ?? selectedIDs
+        let firstVisible = firstVisibleID()
+
+        ids = newIDs
+        cache.removeAll(keepingCapacity: true)
+        suppressSelection = true
+        tableView.reloadData()
+        let indexes = IndexSet(wanted.compactMap { newIDs.firstIndex(of: $0) })
+        tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+        suppressSelection = false
+
+        if scrollToSelection, let row = indexes.first {
+            tableView.scrollRowToVisible(row)
+        } else if let firstVisible, let row = newIDs.firstIndex(of: firstVisible) {
+            tableView.scroll(NSPoint(x: 0, y: tableView.rect(ofRow: row).minY - tableView.headerView!.frame.height))
+        }
+    }
+
+    /// Selects the first row, firing `onSelectionChange`.
+    func selectFirstIfNeeded() {
+        guard tableView.selectedRow < 0, !ids.isEmpty else { return }
+        tableView.selectRowIndexes([0], byExtendingSelection: false)
+    }
+
+    private func firstVisibleID() -> Int64? {
+        let row = tableView.rows(in: tableView.visibleRect).location
+        return row >= 0 && row < ids.count && tableView.visibleRect.minY > 0 ? ids[row] : nil
+    }
+
+    private func row(at index: Int) -> MessageRow? {
+        guard index < ids.count else { return nil }
+        if let row = cache[ids[index]] { return row }
+        if cache.count > Self.cacheLimit { cache.removeAll(keepingCapacity: true) }
+        let lower = max(0, index - Self.blockSize / 3)
+        let upper = min(ids.count, lower + Self.blockSize)
+        for row in (try? store.rows(ids: Array(ids[lower..<upper]))) ?? [] {
+            cache[row.id] = row
+        }
+        return cache[ids[index]]
+    }
+
+    // MARK: NSTableViewDataSource / Delegate
+
+    func numberOfRows(in tableView: NSTableView) -> Int { ids.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row index: Int) -> NSView? {
+        guard let tableColumn, let column = Column(rawValue: tableColumn.identifier.rawValue),
+            let row = row(at: index)
+        else { return nil }
+
+        switch column {
+        case .unread:
+            return iconCell(tableView, column, symbol: row.isSeen ? nil : "circle.fill", tint: .controlAccentColor, size: 7)
+        case .flag:
+            return iconCell(tableView, column, symbol: row.isFlagged ? "flag.fill" : nil, tint: .systemRed, size: 10)
+        case .attachment:
+            return iconCell(tableView, column, symbol: row.hasAttachment ? "paperclip" : nil, tint: .secondaryLabelColor, size: 10)
+        case .from:
+            return textCell(tableView, column, row.fromDisplay, bold: !row.isSeen)
+        case .subject:
+            return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: !row.isSeen)
+        case .date:
+            return textCell(tableView, column, Formatters.listDate(row.receivedAt), bold: !row.isSeen, monospacedDigits: true)
+        case .source:
+            return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: false, secondary: true)
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !suppressSelection else { return }
+        onSelectionChange?(selectedID)
+    }
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard let first = tableView.sortDescriptors.first, let key = first.key.flatMap(MessageSort.Key.init) else { return }
+        onSortChange?(MessageSort(key: key, ascending: first.ascending))
+    }
+
+    // MARK: Cells
+
+    private func textCell(
+        _ tableView: NSTableView, _ column: Column, _ text: String, bold: Bool, secondary: Bool = false,
+        monospacedDigits: Bool = false
+    ) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("text")
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
+            let cell = NSTableCellView()
+            cell.identifier = id
+            let field = NSTextField(labelWithString: "")
+            field.lineBreakMode = .byTruncatingTail
+            field.cell?.truncatesLastVisibleLine = true
+            field.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(field)
+            cell.textField = field
+            NSLayoutConstraint.activate([
+                field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+                field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
+        }()
+        let size = NSFont.systemFontSize(for: .small) + 1
+        var font = NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        if monospacedDigits { font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: bold ? .semibold : .regular) }
+        cell.textField?.font = font
+        cell.textField?.stringValue = text
+        cell.textField?.textColor = secondary ? .secondaryLabelColor : .labelColor
+        cell.textField?.alignment = column == .date ? .right : .natural
+        return cell
+    }
+
+    private func iconCell(_ tableView: NSTableView, _ column: Column, symbol: String?, tint: NSColor, size: CGFloat) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("icon")
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
+            let cell = NSTableCellView()
+            cell.identifier = id
+            let image = NSImageView()
+            image.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(image)
+            cell.imageView = image
+            NSLayoutConstraint.activate([
+                image.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
+                image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
+        }()
+        cell.imageView?.image = symbol.flatMap {
+            NSImage(systemSymbolName: $0, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: size, weight: .regular))
+        }
+        cell.imageView?.contentTintColor = tint
+        return cell
+    }
+}
+
+@MainActor
+enum Formatters {
+    private static let time: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let dateTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let full: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .full
+        f.timeStyle = .short
+        return f
+    }()
+
+    static func listDate(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date) ? "Today " + time.string(from: date) : dateTime.string(from: date)
+    }
+
+    static func fullDate(_ date: Date) -> String { full.string(from: date) }
+}

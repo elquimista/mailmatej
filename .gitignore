@@ -1,0 +1,7 @@
+.build/
+build/
+.swiftpm/
+*.xcodeproj/
+dev/stalwart/data/
+*.sqlite*
+.DS_Store

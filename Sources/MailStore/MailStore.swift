@@ -1,0 +1,429 @@
+import Foundation
+import GRDB
+
+/// The local source of truth. Sync engines write here; the UI only reads from here.
+public final class MailStore: Sendable {
+    public let dbPool: DatabasePool
+    public let blobs: BlobStore
+
+    public static var defaultDirectory: URL {
+        URL.applicationSupportDirectory.appendingPathComponent("MailMateJ", isDirectory: true)
+    }
+
+    public init(directory: URL = MailStore.defaultDirectory) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var config = Configuration()
+        config.label = "MailStore"
+        dbPool = try DatabasePool(path: directory.appendingPathComponent("mail.sqlite").path, configuration: config)
+        try Schema.migrator.migrate(dbPool)
+        blobs = BlobStore(root: directory.appendingPathComponent("Messages", isDirectory: true))
+    }
+
+    // MARK: Accounts
+
+    public func accounts() throws -> [AccountRecord] {
+        try dbPool.read { db in try AccountRecord.order(Column("sortOrder"), Column("name")).fetchAll(db) }
+    }
+
+    public func account(id: String) throws -> AccountRecord? {
+        try dbPool.read { db in try AccountRecord.fetchOne(db, key: id) }
+    }
+
+    public func save(_ account: AccountRecord) throws {
+        try dbPool.write { db in try account.save(db) }
+    }
+
+    /// Removes an account and, through cascades, all of its local data.
+    public func deleteAccount(id: String) throws {
+        try dbPool.write { db in _ = try AccountRecord.deleteOne(db, key: id) }
+        blobs.removeAll(accountId: id)
+    }
+
+    // MARK: Sync state
+
+    public func syncState(accountId: String, type: String) throws -> String? {
+        try dbPool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT state FROM syncState WHERE accountId = ? AND objectType = ?",
+                arguments: [accountId, type])
+        }
+    }
+
+    public func setSyncState(_ state: String?, accountId: String, type: String) throws {
+        try dbPool.write { db in
+            if let state {
+                try db.execute(
+                    sql: "INSERT OR REPLACE INTO syncState (accountId, objectType, state) VALUES (?, ?, ?)",
+                    arguments: [accountId, type, state])
+            } else {
+                try db.execute(
+                    sql: "DELETE FROM syncState WHERE accountId = ? AND objectType = ?", arguments: [accountId, type])
+            }
+        }
+    }
+
+    // MARK: Identities
+
+    public func replaceIdentities(accountId: String, _ identities: [(remoteId: String, name: String, email: String)])
+        throws
+    {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM identity WHERE accountId = ?", arguments: [accountId])
+            for i in identities {
+                try db.execute(
+                    sql: "INSERT OR REPLACE INTO identity (accountId, remoteId, name, email) VALUES (?, ?, ?, ?)",
+                    arguments: [accountId, i.remoteId, i.name, i.email.lowercased()])
+            }
+        }
+    }
+
+    /// All of the user's own addresses, across accounts.
+    public func myAddresses() throws -> Set<String> {
+        try dbPool.read { db in
+            var set = Set(try String.fetchAll(db, sql: "SELECT email FROM identity"))
+            for name in try String.fetchAll(db, sql: "SELECT username FROM account") where name.contains("@") {
+                set.insert(name.lowercased())
+            }
+            return set
+        }
+    }
+
+    // MARK: Mailboxes
+
+    public func mailboxes() throws -> [MailboxRecord] {
+        try dbPool.read { db in
+            try MailboxRecord.fetchAll(db, sql: "SELECT * FROM mailbox ORDER BY accountId, sortOrder, name")
+        }
+    }
+
+    /// Upserts and deletes mailboxes. With `replaceAll`, mailboxes not in `upserts` are removed.
+    public func applyMailboxes(accountId: String, upserts: [IncomingMailbox], destroyed: [String], replaceAll: Bool)
+        throws
+    {
+        try dbPool.write { db in
+            let stmt = try db.cachedStatement(sql: """
+                INSERT INTO mailbox (accountId, remoteId, parentRemoteId, name, role, sortOrder, totalEmails, unreadEmails)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (accountId, remoteId) DO UPDATE SET
+                    parentRemoteId = excluded.parentRemoteId, name = excluded.name, role = excluded.role,
+                    sortOrder = excluded.sortOrder, totalEmails = excluded.totalEmails,
+                    unreadEmails = excluded.unreadEmails
+                """)
+            for m in upserts {
+                try stmt.execute(arguments: [
+                    accountId, m.remoteId, m.parentRemoteId, m.name, m.role, m.sortOrder, m.totalEmails,
+                    m.unreadEmails,
+                ])
+            }
+            if replaceAll {
+                let keep = Set(upserts.map(\.remoteId))
+                let existing = try String.fetchAll(
+                    db, sql: "SELECT remoteId FROM mailbox WHERE accountId = ?", arguments: [accountId])
+                for remoteId in existing where !keep.contains(remoteId) {
+                    try db.execute(
+                        sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
+                }
+            }
+            for remoteId in destroyed {
+                try db.execute(
+                    sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
+            }
+        }
+    }
+
+    // MARK: Messages (writes)
+
+    /// Inserts or updates messages in a single transaction.
+    public func upsertMessages(accountId: String, _ messages: [IncomingMessage]) throws {
+        guard !messages.isEmpty else { return }
+        try dbPool.write { db in
+            var mailboxIds: [String: Int64] = [:]
+            for row in try Row.fetchAll(
+                db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId])
+            {
+                mailboxIds[row["remoteId"]] = row["id"]
+            }
+
+            let upsert = try db.cachedStatement(sql: """
+                INSERT INTO message (accountId, remoteId, threadId, blobId, messageIdHeader, inReplyTo, subject,
+                    sortSubject, fromDisplay, fromEmail, preview, size, receivedAt, sentAt, hasAttachment,
+                    isSeen, isFlagged, isAnswered, isDraft)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (accountId, remoteId) DO UPDATE SET
+                    threadId = excluded.threadId, blobId = excluded.blobId,
+                    messageIdHeader = excluded.messageIdHeader, inReplyTo = excluded.inReplyTo,
+                    subject = excluded.subject, sortSubject = excluded.sortSubject,
+                    fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
+                    size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
+                    hasAttachment = excluded.hasAttachment, isSeen = excluded.isSeen,
+                    isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft
+                RETURNING id
+                """)
+            let clearMailboxes = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
+            let clearKeywords = try db.cachedStatement(sql: "DELETE FROM message_keyword WHERE messageId = ?")
+            let clearAddresses = try db.cachedStatement(sql: "DELETE FROM address WHERE messageId = ?")
+            let clearFTS = try db.cachedStatement(sql: "DELETE FROM message_fts WHERE rowid = ?")
+            let addMailbox = try db.cachedStatement(
+                sql: "INSERT OR IGNORE INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)")
+            let addKeyword = try db.cachedStatement(
+                sql: "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)")
+            let addAddress = try db.cachedStatement(
+                sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, ?)")
+            let addFTS = try db.cachedStatement(
+                sql: "INSERT INTO message_fts (rowid, subject, addresses, body) VALUES (?, ?, ?, ?)")
+
+            for m in messages {
+                let keywords = Set(m.keywords.map { $0.lowercased() })
+                let from = m.addresses.first { $0.role == .from }
+                let fromDisplay = from.map { ($0.name?.isEmpty == false ? $0.name! : $0.email) } ?? ""
+                let args: [(any DatabaseValueConvertible)?] = [
+                    accountId, m.remoteId, m.threadId, m.blobId, m.messageIdHeader, m.inReplyTo, m.subject,
+                    Self.sortSubject(m.subject), fromDisplay, from?.email.lowercased() ?? "", m.preview, m.size,
+                    m.receivedAt.timeIntervalSince1970, m.sentAt?.timeIntervalSince1970, m.hasAttachment,
+                    keywords.contains("$seen"), keywords.contains("$flagged"), keywords.contains("$answered"),
+                    keywords.contains("$draft"),
+                ]
+                guard let id = try Int64.fetchOne(upsert, arguments: StatementArguments(args)) else { continue }
+
+                try clearMailboxes.execute(arguments: [id])
+                try clearKeywords.execute(arguments: [id])
+                try clearAddresses.execute(arguments: [id])
+                try clearFTS.execute(arguments: [id])
+
+                for remote in m.mailboxRemoteIds {
+                    if let mailboxId = mailboxIds[remote] { try addMailbox.execute(arguments: [id, mailboxId]) }
+                }
+                for k in keywords { try addKeyword.execute(arguments: [id, k]) }
+                var positions: [AddressRole: Int] = [:]
+                for a in m.addresses {
+                    let pos = positions[a.role, default: 0]
+                    positions[a.role] = pos + 1
+                    try addAddress.execute(arguments: [id, a.role.rawValue, pos, a.name, a.email.lowercased()])
+                }
+                let addressText = m.addresses.map { [$0.name, $0.email].compactMap { $0 }.joined(separator: " ") }
+                    .joined(separator: " ")
+                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview])
+            }
+        }
+    }
+
+    public func deleteMessages(accountId: String, remoteIds: [String]) throws {
+        guard !remoteIds.isEmpty else { return }
+        try dbPool.write { db in
+            for chunk in remoteIds.chunked(500) {
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                try db.execute(
+                    sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))",
+                    arguments: StatementArguments([accountId] + chunk))
+            }
+        }
+    }
+
+    public func saveBody(messageId: Int64, _ body: MessageBody) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, ?, ?)",
+                arguments: [messageId, body.html, body.text, Date().timeIntervalSince1970])
+            if let text = body.text {
+                try db.execute(
+                    sql: "UPDATE message_fts SET body = ? WHERE rowid = ?", arguments: [String(text.prefix(100_000)), messageId])
+            }
+        }
+    }
+
+    // MARK: Messages (reads)
+
+    /// Ordered IDs for a list. Cheap even for a million messages; rows are fetched separately.
+    public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil) throws
+        -> [Int64]
+    {
+        var clauses: [String] = []
+        var args: [(any DatabaseValueConvertible)?] = []
+
+        switch scope {
+        case .allMessages:
+            clauses.append("""
+                NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                            WHERE mm.messageId = m.id AND b.role IN ('trash', 'junk'))
+                """)
+        case .role(let role):
+            clauses.append("""
+                m.id IN (SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                         WHERE b.role = ?)
+                """)
+            args.append(role)
+        case .flagged:
+            clauses.append("m.isFlagged")
+        case .mailbox(let id):
+            clauses.append("m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId = ?)")
+            args.append(id)
+        case .account(let id):
+            clauses.append("m.accountId = ?")
+            args.append(id)
+        }
+
+        if let query = search.flatMap(Self.ftsQuery) {
+            clauses.append("m.id IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)")
+            args.append(query)
+        }
+
+        let direction = sort.ascending ? "ASC" : "DESC"
+        let order: String =
+            switch sort.key {
+            case .receivedAt: "m.receivedAt \(direction), m.id \(direction)"
+            case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
+            case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
+            case .size: "m.size \(direction), m.receivedAt DESC"
+            }
+
+        let sql = "SELECT m.id FROM message m WHERE \(clauses.joined(separator: " AND ")) ORDER BY \(order)"
+        return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: StatementArguments(args)) }
+    }
+
+    public func rows(ids: [Int64]) throws -> [MessageRow] {
+        guard !ids.isEmpty else { return [] }
+        let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        return try dbPool.read { db in
+            try MessageRow.fetchAll(
+                db,
+                sql: """
+                    SELECT m.id, m.accountId, m.fromDisplay, m.fromEmail, m.subject, m.receivedAt, m.isSeen,
+                           m.isFlagged, m.isAnswered, m.hasAttachment, m.size, a.name AS accountName,
+                           (SELECT b.name FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                            WHERE mm.messageId = m.id ORDER BY b.role IS NULL, b.name LIMIT 1) AS mailboxName
+                    FROM message m JOIN account a ON a.id = m.accountId
+                    WHERE m.id IN (\(marks))
+                    """,
+                arguments: StatementArguments(ids))
+        }
+    }
+
+    public func detail(id: Int64) throws -> MessageDetail? {
+        try dbPool.read { db in
+            guard
+                let row = try Row.fetchOne(
+                    db, sql: "SELECT accountId, remoteId, blobId, subject, receivedAt, sentAt FROM message WHERE id = ?",
+                    arguments: [id])
+            else { return nil }
+            let addresses = try Row.fetchAll(
+                db, sql: "SELECT role, name, email FROM address WHERE messageId = ? ORDER BY role, position",
+                arguments: [id]
+            ).compactMap { r -> IncomingMessage.Address? in
+                guard let role = AddressRole(rawValue: r["role"]) else { return nil }
+                return IncomingMessage.Address(role: role, name: r["name"], email: r["email"])
+            }
+            let sentAt: Double? = row["sentAt"]
+            return MessageDetail(
+                id: id, accountId: row["accountId"], remoteId: row["remoteId"], blobId: row["blobId"],
+                subject: row["subject"], receivedAt: Date(timeIntervalSince1970: row["receivedAt"]),
+                sentAt: sentAt.map(Date.init(timeIntervalSince1970:)), addresses: addresses)
+        }
+    }
+
+    public func body(messageId: Int64) throws -> MessageBody? {
+        try dbPool.read { db in
+            try Row.fetchOne(db, sql: "SELECT html, text FROM message_body WHERE messageId = ?", arguments: [messageId])
+                .map { MessageBody(html: $0["html"], text: $0["text"]) }
+        }
+    }
+
+    // MARK: Correspondence
+
+    /// The other party of a message: the sender, unless the user sent it, then the first recipient.
+    public func correspondent(messageId: Int64, myAddresses: Set<String>) throws -> String? {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(
+                db, sql: "SELECT role, email FROM address WHERE messageId = ? ORDER BY role, position",
+                arguments: [messageId])
+            let pairs = rows.map { (role: $0["role"] as Int, email: $0["email"] as String) }
+            let from = pairs.first { $0.role == AddressRole.from.rawValue }?.email
+            if let from, !myAddresses.contains(from) { return from }
+            let recipientRoles = [AddressRole.to.rawValue, AddressRole.cc.rawValue, AddressRole.bcc.rawValue]
+            return pairs.first { recipientRoles.contains($0.role) && !myAddresses.contains($0.email) }?.email ?? from
+        }
+    }
+
+    /// Messages from or to `email`, across all accounts and mailboxes, newest first.
+    public func correspondenceIDs(email: String, limit: Int = 2000) throws -> [Int64] {
+        try dbPool.read { db in
+            try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT m.id FROM message m
+                    WHERE m.id IN (SELECT messageId FROM address WHERE email = ?)
+                    ORDER BY m.receivedAt DESC LIMIT ?
+                    """,
+                arguments: [email.lowercased(), limit])
+        }
+    }
+
+    // MARK: Counts
+
+    public struct Counts: Sendable {
+        public var unreadByRole: [String: Int] = [:]
+        public var flagged = 0
+        public var unreadByAccount: [String: Int] = [:]
+
+        public init() {}
+    }
+
+    public func counts() throws -> Counts {
+        try dbPool.read { db in
+            var c = Counts()
+            for row in try Row.fetchAll(
+                db, sql: "SELECT role, SUM(unreadEmails) AS n FROM mailbox WHERE role IS NOT NULL GROUP BY role")
+            {
+                c.unreadByRole[row["role"]] = row["n"]
+            }
+            for row in try Row.fetchAll(
+                db, sql: "SELECT accountId, SUM(unreadEmails) AS n FROM mailbox WHERE role = 'inbox' GROUP BY accountId")
+            {
+                c.unreadByAccount[row["accountId"]] = row["n"]
+            }
+            c.flagged = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message WHERE isFlagged") ?? 0
+            return c
+        }
+    }
+
+    // MARK: Observation
+
+    /// Calls `onChange` after every committed transaction that touches messages, mailboxes or accounts.
+    /// Called on a background queue; the caller is expected to debounce and hop to the main thread.
+    public func observeChanges(_ onChange: @escaping @Sendable () -> Void) -> StoreObservation {
+        let observation = DatabaseRegionObservation(
+            tracking: Table("message"), Table("message_mailbox"), Table("mailbox"), Table("account"))
+        let cancellable = observation.start(in: dbPool, onError: { _ in }, onChange: { _ in onChange() })
+        return StoreObservation(cancellable)
+    }
+
+    // MARK: Helpers
+
+    static func sortSubject(_ subject: String) -> String {
+        var s = Substring(subject)
+        let pattern = /^\s*(?i:re|fwd?|aw|sv|wg|tr)\s*(\[\d+\])?\s*:\s*/
+        while let match = s.prefixMatch(of: pattern) { s = s[match.range.upperBound...] }
+        return s.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    /// Turns free text into an FTS5 query: every word must match, as a prefix.
+    static func ftsQuery(_ text: String) -> String? {
+        let tokens = text.split(whereSeparator: \.isWhitespace).map {
+            "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"*"
+        }
+        return tokens.isEmpty ? nil : tokens.joined(separator: " ")
+    }
+}
+
+public final class StoreObservation: @unchecked Sendable {
+    private let cancellable: AnyDatabaseCancellable
+
+    init(_ cancellable: AnyDatabaseCancellable) { self.cancellable = cancellable }
+
+    public func cancel() { cancellable.cancel() }
+}
+
+extension Array {
+    func chunked(_ size: Int) -> [ArraySlice<Element>] {
+        stride(from: 0, to: count, by: size).map { self[$0..<Swift.min($0 + size, count)] }
+    }
+}
