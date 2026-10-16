@@ -53,7 +53,7 @@ final class CounterSettings: ObservableObject {
     }
 }
 
-/// The Dock icon: the app icon plus a badge for each enabled counter, laid out like MailMate's:
+/// The Dock icon: the app icon plus a badge for each enabled, non-zero counter, laid out like MailMate's:
 /// about a third of the tile tall, in the tile's corners, one color per corner.
 final class DockTileView: NSView {
     var values: [Corner: Int] = [:]
@@ -67,8 +67,8 @@ final class DockTileView: NSView {
         NSApp.applicationIconImage?.draw(in: bounds)
         // Bottom row first, then top-left, then top-right on top (as MailMate overlaps them).
         for corner in [Corner.bottomLeft, .bottomRight, .topLeft, .topRight] {
-            guard let value = values[corner] else { continue }
-            drawBadge(value, at: corner, sharesRow: values[corner.rowPartner] != nil)
+            guard let value = values[corner], value > 0 else { continue }  // Zero counts aren't shown.
+            drawBadge(value, at: corner, sharesRow: (values[corner.rowPartner] ?? 0) > 0)
         }
     }
 
@@ -183,7 +183,7 @@ final class DockCounters {
         #endif
         let tile = NSApp.dockTile
         tile.badgeLabel = nil
-        if !values.isEmpty {  // Enabled counters show even at zero, as in MailMate.
+        if values.values.contains(where: { $0 > 0 }) {
             view.values = values
             if tile.contentView !== view { tile.contentView = view }
         } else {
