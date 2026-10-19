@@ -149,6 +149,14 @@ public actor SyncCoordinator {
         try await engine.update(remoteIds: remoteIds, patch: patch)
     }
 
+    /// See `JMAPAccountSync.ensureIdentities`.
+    public func ensureIdentities(accountId: String, addresses: [String], name: String) async throws
+        -> [(email: String, reason: String)]
+    {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        return try await engine.ensureIdentities(addresses, name: name)
+    }
+
     public func destroy(accountId: String, remoteIds: [String]) async throws {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         defer { requestSync(accountId) }

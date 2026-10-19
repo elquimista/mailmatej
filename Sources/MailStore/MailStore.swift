@@ -78,7 +78,38 @@ public final class MailStore: Sendable {
     }
 
     /// The sending identities of every account, in account order.
+    /// The From choices, per account in account order. Where an account lists its addresses (Email
+    /// Address(es)), those, in that order, as MailMate shows them: with the server's identity for the
+    /// address if it has one, else sent through the account's own identity (the server checks only the
+    /// envelope sender, as an SMTP server would). Otherwise the server's identities.
     public func identities() throws -> [IdentityRecord] {
+        let accounts = try accounts()
+        let byAccount = Dictionary(grouping: try allIdentities(), by: \.accountId)
+        var result: [IdentityRecord] = []
+        for account in accounts where account.isEnabled {
+            let server = byAccount[account.id] ?? []
+            let listed = AccountRecord.namedAddresses(in: account.emailAddresses)
+            guard !listed.isEmpty, let main = server.first(where: { $0.email == account.username.lowercased() }) ?? server.first
+            else {
+                result += server
+                continue
+            }
+            for (name, email) in listed {
+                if var identity = server.first(where: { $0.email == email }) {
+                    if let name { identity.name = name }
+                    result.append(identity)
+                } else {
+                    result.append(IdentityRecord(
+                        accountId: account.id, remoteId: main.remoteId,
+                        name: name ?? (account.fullName.isEmpty ? main.name : account.fullName), email: email,
+                        envelopeEmail: main.email))
+                }
+            }
+        }
+        return result
+    }
+
+    private func allIdentities() throws -> [IdentityRecord] {
         try dbPool.read { db in
             try Row.fetchAll(
                 db,
@@ -99,10 +130,7 @@ public final class MailStore: Sendable {
                 set.insert(name.lowercased())
             }
             for list in try String.fetchAll(db, sql: "SELECT emailAddresses FROM account") {
-                for address in list.split(separator: ",") {
-                    let a = address.trimmingCharacters(in: .whitespaces).lowercased()
-                    if a.contains("@") { set.insert(a) }
-                }
+                set.formUnion(AccountRecord.addresses(in: list))
             }
             return set
         }

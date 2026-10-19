@@ -33,6 +33,8 @@ final class SidebarNode: NSObject {
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
     var onSelect: ((SidebarNode) -> Void)?
+    /// Edit an account's settings (a double-click on it, or Edit Account… in its menu).
+    var onEditAccount: ((String) -> Void)?
 
     private let model: AppModel
     private let outline = NSOutlineView()
@@ -436,6 +438,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 item.isEnabled = false
             }
             menu.addItem(.separator())
+            let edit = menu.addItem(withTitle: "Edit Account…", action: #selector(editAccountClicked(_:)), keyEquivalent: "")
+            edit.representedObject = accountId
+            edit.target = self
             let remove = menu.addItem(withTitle: "Remove Account…", action: #selector(removeClicked(_:)), keyEquivalent: "")
             remove.representedObject = node
             remove.target = self
@@ -447,10 +452,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         editMailbox(node)
     }
 
-    /// A double-click on a unified mailbox edits it, as in MailMate.
+    /// A double-click on a unified mailbox edits it, on an account its settings, as in MailMate.
     @objc private func rowDoubleClicked(_ sender: NSOutlineView) {
         guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
+        if node.kind == .account, let id = node.accountId { return onEditAccount?(id) ?? () }
         editMailbox(node)
+    }
+
+    @objc private func editAccountClicked(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { onEditAccount?(id) }
     }
 
     private func editMailbox(_ node: SidebarNode) {

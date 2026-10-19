@@ -148,6 +148,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1))
                     target = SettingsWindowController.shared.window
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDIT_ACCOUNT"] {
+                    // "accountId|new description|password" (empty password keeps it).
+                    let p = spec.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                    windowController?.editAccount(id: p[0])
+                    try? await Task.sleep(for: .milliseconds(500))
+                    windowController?.accountSettings?.debugEdit(
+                        description: p[1], password: p[2], emails: p.count > 3 ? p[3] : nil)
+                    try? await Task.sleep(for: .seconds(5))
+                    let record = try? AppModel.shared.store.account(id: p[0])
+                    NSLog("MMJ edit result: open=\(windowController?.accountSettings != nil) name=\(record?.name ?? "nil") url=\(record?.sessionURL ?? "") emails=\(record?.emailAddresses ?? "")")
+                    let sheet = windowController?.accountSettings?.window?.attachedSheet
+                    NSLog("MMJ edit alert: \((sheet?.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []).joined(separator: " | "))")
+                    NSLog("MMJ edit identities: \(((try? AppModel.shared.store.identities()) ?? []).filter { $0.accountId == p[0] }.map { "\($0.name) <\($0.email)>" })")
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_ADD_ACCOUNT"] {
                     // Adds an account through the window, checks it, then removes it again.
                     windowController?.addAccount(nil)

@@ -12,6 +12,8 @@ import MailStore
 final class AccountSettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let model: AppModel
     private let onClose: () -> Void
+    /// The account being edited; nil when adding one.
+    let editing: AccountRecord?
 
     private let descriptionField = NSTextField()
     private let fullNameField = NSTextField()
@@ -27,8 +29,9 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
     private let progress = NSProgressIndicator()
     private var isAdding = false
 
-    init(model: AppModel, onClose: @escaping () -> Void) {
+    init(model: AppModel, editing: AccountRecord? = nil, onClose: @escaping () -> Void) {
         self.model = model
+        self.editing = editing
         self.onClose = onClose
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 470, height: 260), styleMask: [.titled, .closable],
@@ -39,6 +42,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         window.delegate = self
         window.contentView = buildContent()
         window.initialFirstResponder = descriptionField
+        if let editing { fill(from: editing) }
         // The fields are placed by frame, so let the window order Tab by position: row by row, left to right.
         window.autorecalculatesKeyViewLoop = true
         updateAddButton()
@@ -140,6 +144,16 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
     }
 
     #if DEBUG
+        /// Edits the open account as a user would: a new description and, if given, a password; then Save.
+        func debugEdit(description: String, password: String, emails: String? = nil) {
+            if let emails { emailField.stringValue = emails }
+            NSLog("MMJ edit window: server=\(serverField.stringValue) port=\(portCheckbox.state == .on ? portField.stringValue : "-") ssl=\(sslCheckbox.state == .on) user=\(userField.stringValue) desc=\(descriptionField.stringValue) button=\(addButton.title) enabled=\(addButton.isEnabled)")
+            descriptionField.stringValue = description
+            passwordField.stringValue = password
+            updateAddButton()
+            add(nil)
+        }
+
         /// Fills the form as a user would ("server|port|user|password|email"; empty port = none) and adds.
         func debugAdd(_ spec: String) {
             let p = spec.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
@@ -169,6 +183,27 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         }
     #endif
 
+    /// Shows an account's settings. The password stays empty: it's kept unless one is typed.
+    private func fill(from account: AccountRecord) {
+        descriptionField.stringValue = account.name
+        fullNameField.stringValue = account.fullName
+        emailField.stringValue = account.emailAddresses
+        if let url = URLComponents(string: account.sessionURL) {
+            let path = url.path == "/.well-known/jmap" ? "" : url.path
+            serverField.stringValue = (url.host ?? "") + path
+            sslCheckbox.state = url.scheme == "http" ? .off : .on
+            if let port = url.port {
+                portCheckbox.state = .on
+                portField.isEnabled = true
+                portField.stringValue = String(port)
+            }
+        }
+        userField.stringValue = account.authKind == .basic ? account.username : ""
+        passwordField.placeholderString = "Unchanged"
+        addButton.title = "Save"
+        updateAddButton()
+    }
+
     // MARK: Actions
 
     @objc private func portToggled(_ sender: NSButton) {
@@ -188,7 +223,8 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         let server = !serverField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty
         let user = isFastmail || !userName.isEmpty
         let port = portCheckbox.state == .off || Int(portField.stringValue).map { (1...65535).contains($0) } == true
-        addButton.isEnabled = server && user && port && !passwordField.stringValue.isEmpty && !isAdding
+        let password = editing != nil || !passwordField.stringValue.isEmpty  // Editing keeps the saved one.
+        addButton.isEnabled = server && user && port && password && !isAdding
     }
 
     /// The user name, or (left empty) the first email address, as servers usually expect it.
@@ -197,10 +233,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         return typed.isEmpty ? emailAddresses.first ?? "" : typed
     }
 
-    private var emailAddresses: [String] {
-        emailField.stringValue.split(whereSeparator: { $0 == "," || $0 == " " })
-            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.contains("@") }
-    }
+    private var emailAddresses: [String] { AccountRecord.addresses(in: emailField.stringValue) }
 
     /// The server's JMAP session URL: Fastmail's fixed one, else the server's `.well-known/jmap`,
     /// with the scheme from Require SSL and the port if one is set.
@@ -226,7 +259,12 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
             username: isFastmail ? "" : userName, authKind: isFastmail ? .bearer : .basic,
             secret: passwordField.stringValue.trimmingCharacters(in: isFastmail ? .whitespacesAndNewlines : []),
             fullName: fullNameField.stringValue.trimmingCharacters(in: .whitespaces),
-            emailAddresses: emailAddresses.joined(separator: ", "))
+            emailAddresses: AccountRecord.namedAddresses(in: emailField.stringValue).map { entry in
+                // Kept as typed: "Name <address>" or the address, so names show in From.
+                guard let name = entry.name else { return entry.email }
+                let quoted = name.contains(",") || name.contains(";") ? "\"\(name)\"" : name
+                return "\(quoted) <\(entry.email)>"
+            }.joined(separator: ", "))
         isAdding = true
         progress.startAnimation(nil)
         updateAddButton()
@@ -237,7 +275,16 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
                 updateAddButton()
             }
             do {
-                try await model.addAccount(draft)
+                let accountId: String
+                if let editing {
+                    try await model.updateAccount(editing, with: draft)
+                    accountId = editing.id
+                } else {
+                    accountId = try await model.addAccount(draft).id
+                }
+                // Give listed addresses identities of their own where the server allows; the others are
+                // sent through the account's own identity (see MailStore.identities), so a refusal is fine.
+                _ = await model.ensureIdentities(accountId: accountId)
                 close()
             } catch {
                 showError(AppModel.describe(error))
@@ -250,7 +297,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
     private func showError(_ text: String) {
         guard let window else { return }
         let alert = NSAlert()
-        alert.messageText = "Couldn’t add the account."
+        alert.messageText = editing == nil ? "Couldn’t add the account." : "Couldn’t save the account."
         alert.informativeText = text
         alert.beginSheetModal(for: window, completionHandler: nil)
     }

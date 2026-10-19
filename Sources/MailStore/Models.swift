@@ -39,6 +39,51 @@ public struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendab
     }
 }
 
+extension AccountRecord {
+    /// The addresses in an Email Address(es) field with their names, each once, in order. Takes plain
+    /// addresses, `<address>` and `Name <address>` (as MailMate does), separated by commas or semicolons;
+    /// plain addresses may also be separated by spaces. Addresses are lowercased.
+    public static func namedAddresses(in text: String) -> [(name: String?, email: String)] {
+        let pattern = #"[A-Za-z0-9._%+'\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        var seen = Set<String>()
+        var result: [(name: String?, email: String)] = []
+        // Split at commas and semicolons outside quotes ("Sales, EU" <s@x.com> is one entry).
+        var pieces: [String] = [], current = "", quoted = false
+        for ch in text {
+            if ch == "\"" { quoted.toggle() }
+            if !quoted && (ch == "," || ch == ";") {
+                pieces.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        pieces.append(current)
+        for piece in pieces {
+            let matches = regex.matches(in: piece, range: NSRange(piece.startIndex..., in: piece))
+            for match in matches {
+                guard let range = Range(match.range, in: piece) else { continue }
+                let email = piece[range].lowercased()
+                guard seen.insert(email).inserted else { continue }
+                // "Name <address>": the text before "<", unquoted.
+                var name: String?
+                if matches.count == 1, let open = piece.firstIndex(of: "<"), open <= range.lowerBound {
+                    let before = piece[..<open].trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: "\"")))
+                    name = before.isEmpty ? nil : before
+                }
+                result.append((name, email))
+            }
+        }
+        return result
+    }
+
+    public static func addresses(in text: String) -> [String] { namedAddresses(in: text).map(\.email) }
+
+    /// This account's own addresses from its settings.
+    public var addressList: [String] { Self.addresses(in: emailAddresses) }
+}
+
 public struct MailboxRecord: Codable, FetchableRecord, Sendable, Hashable {
     public var id: Int64
     public var accountId: String
@@ -170,12 +215,16 @@ public struct IdentityRecord: Sendable, Hashable {
     public var name: String
     /// Lowercased.
     public var email: String
+    /// For an address from the account's Email Address(es) the server has no identity for: the identity
+    /// (`remoteId`) whose address the server sends as (the envelope sender), while `email` is the From.
+    public var envelopeEmail: String?
 
-    public init(accountId: String, remoteId: String, name: String, email: String) {
+    public init(accountId: String, remoteId: String, name: String, email: String, envelopeEmail: String? = nil) {
         self.accountId = accountId
         self.remoteId = remoteId
         self.name = name
         self.email = email
+        self.envelopeEmail = envelopeEmail
     }
 }
 

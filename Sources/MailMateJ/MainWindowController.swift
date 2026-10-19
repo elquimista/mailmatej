@@ -184,6 +184,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private func wireUp() {
+        sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
             remembered[self.scope] = SavedView(
@@ -441,7 +442,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?
 
+    /// Opens an account's settings for editing (one settings window at a time).
+    func editAccount(id: String) {
+        guard let account = try? model.store.account(id: id) else { return }
+        if let open = accountSettings, open.editing?.id != id {
+            open.close()
+        }
+        if accountSettings == nil {
+            accountSettings = AccountSettingsWindowController(model: model, editing: account) { [weak self] in
+                self?.accountSettings = nil
+            }
+        }
+        accountSettings?.show(over: window)
+    }
+
     @objc func addAccount(_ sender: Any?) {
+        if let open = accountSettings, open.editing != nil { open.close() }
         if accountSettings == nil {
             accountSettings = AccountSettingsWindowController(model: model) { [weak self] in
                 self?.accountSettings = nil

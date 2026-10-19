@@ -36,6 +36,8 @@ public struct OutgoingMessage: Sendable {
     public var files: [OutgoingFile] = []
     public var inReplyTo: [String]
     public var references: [String]
+    /// The envelope sender, when it isn't the From address (see `IdentityRecord.envelopeEmail`).
+    public var mailFrom: String?
 
     public init(
         identityId: String, from: EmailAddress, to: [EmailAddress], cc: [EmailAddress], bcc: [EmailAddress],

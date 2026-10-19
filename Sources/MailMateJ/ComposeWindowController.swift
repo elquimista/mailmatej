@@ -377,13 +377,25 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     private func fill() {
-        // "Name <address>", as MailMate lists identities.
+        // "Name <address>", as MailMate lists identities. An account with several addresses gets its name
+        // as a heading over them; one with a single address is listed plainly (when there are several accounts).
+        let names = Dictionary(uniqueKeysWithValues: ((try? model.store.accounts()) ?? []).map { ($0.id, $0.name) })
+        let perAccount = Dictionary(grouping: setup.identities, by: \.accountId)
+        let grouped = perAccount.count > 1
+        var lastAccount: String?
         for identity in setup.identities {
+            let nested = grouped && (perAccount[identity.accountId]?.count ?? 0) > 1
+            if nested, identity.accountId != lastAccount {
+                fromPopup.menu?.addItem(.sectionHeader(title: names[identity.accountId] ?? ""))
+            }
+            lastAccount = identity.accountId
             fromPopup.addItem(withTitle: Compose.format(EmailAddress(name: identity.name, email: identity.email)))
             fromPopup.lastItem?.representedObject = identity
+            if nested { fromPopup.lastItem?.indentationLevel = 1 }
         }
-        if let identity = setup.identity, let index = setup.identities.firstIndex(of: identity) {
-            fromPopup.selectItem(at: index)
+        if let identity = setup.identity {
+            let index = fromPopup.indexOfItem(withRepresentedObject: identity)
+            if index >= 0 { fromPopup.selectItem(at: index) }
         }
         toField.addresses = setup.draft.to
         ccField.addresses = setup.draft.cc
@@ -575,6 +587,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue, text: textView.string,
             attachments: setup.attachments, inReplyTo: setup.inReplyTo, references: setup.references)
         message.replyTo = replyTo
+        message.mailFrom = identity.envelopeEmail
         do {
             message.files = try files.map { url in
                 OutgoingFile(
@@ -657,9 +670,9 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 return NSLog("MMJ compose: no compose window")
             }
             if let from = env["MMJ_DEBUG_FROM"],
-                let index = c.setup.identities.firstIndex(where: { $0.email == from.lowercased() })
+                let identity = c.setup.identities.first(where: { $0.email == from.lowercased() })
             {
-                c.fromPopup.selectItem(at: index)
+                c.fromPopup.selectItem(at: c.fromPopup.indexOfItem(withRepresentedObject: identity))
             }
             if let to = env["MMJ_DEBUG_TO"] { c.toField.addresses = Compose.parseAddresses(to) }
             if let bcc = env["MMJ_DEBUG_BCC"] {

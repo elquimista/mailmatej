@@ -73,6 +73,29 @@ import Testing
         #expect(oldestFirst == thread.reversed())
     }
 
+    @Test func addressFieldParsing() {
+        #expect(AccountRecord.addresses(in: "a@x.com, <B@Y.org>; Name <c@z.co.uk>, a@x.com d@w.io junk") == ["a@x.com", "b@y.org", "c@z.co.uk", "d@w.io"])
+        let named = AccountRecord.namedAddresses(in: #""Sales, EU" <s@x.com>, eScreenly Support <support@x.com>, <p@x.com>"#)
+        #expect(named.map(\.email) == ["s@x.com", "support@x.com", "p@x.com"])
+        #expect(named.map(\.name) == ["Sales, EU", "eScreenly Support", nil])
+        #expect(AccountRecord.addresses(in: "").isEmpty)
+    }
+
+    @Test func identitiesFollowTheAddressField() throws {
+        try store.replaceIdentities(accountId: "acc", [("1", "", "abuse@x.com"), ("2", "", "me@example.com"), ("3", "", "pm@x.com")])
+        #expect(try store.identities().map(\.email) == ["abuse@x.com", "me@example.com", "pm@x.com"])  // none listed: all
+        var listed = account
+        listed.emailAddresses = "pm@x.com, <me@example.com>, eScreenly Support <support@other.com>"
+        listed.fullName = "Postmaster"
+        try store.save(listed)
+        let ids = try store.identities()
+        #expect(ids.map(\.email) == ["pm@x.com", "me@example.com", "support@other.com"])  // listed, in order
+        #expect(ids[0].name == "Postmaster" && ids[0].remoteId == "3" && ids[0].envelopeEmail == nil)
+        // No server identity: sent through the login's own one (its username), with the field's name.
+        #expect(ids[2].name == "eScreenly Support" && ids[2].remoteId == "2" && ids[2].envelopeEmail == "me@example.com")
+        #expect(try store.myAddresses().contains("support@other.com"))
+    }
+
     @Test func submailboxScopes() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100, keywords: ["$flagged"]),

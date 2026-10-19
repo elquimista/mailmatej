@@ -83,7 +83,8 @@ final class AppModel {
 
     // MARK: Accounts
 
-    func addAccount(_ draft: AccountDraft) async throws {
+    @discardableResult
+    func addAccount(_ draft: AccountDraft) async throws -> AccountRecord {
         let credentials: Credentials =
             switch draft.authKind {
             case .basic: .basic(username: draft.username, password: draft.secret)
@@ -103,6 +104,77 @@ final class AppModel {
         try Keychain.set(draft.secret, account: record.id)
         try store.save(record)
         await coordinator.addAccount(record)
+        return record
+    }
+
+    /// Makes sure the server has a sending identity for each address in the account's Email
+    /// Address(es) (named with its Full Name). Returns the ones it refused and why.
+    func ensureIdentities(accountId: String) async -> [(email: String, reason: String)] {
+        guard let account = try? store.account(id: accountId), !account.addressList.isEmpty else {
+            #if DEBUG
+                NSLog("MMJ ensureIdentities: nothing listed for \(accountId)")
+            #endif
+            return []
+        }
+        do {
+            let refused = try await coordinator.ensureIdentities(
+                accountId: accountId, addresses: account.addressList, name: account.fullName)
+            #if DEBUG
+                NSLog("MMJ ensureIdentities \(account.addressList): refused \(refused)")
+            #endif
+            return refused
+        } catch {
+            return account.addressList.map { ($0, Self.describe(error)) }
+        }
+    }
+
+    /// Saves edits to an account. If the server, user name, sign-in kind or password (`draft.secret`,
+    /// empty to keep it) changed, they're checked against the server first, and the account reconnects
+    /// with them; its messages stay. A server answering for a different account is refused.
+    func updateAccount(_ old: AccountRecord, with draft: AccountDraft) async throws {
+        var record = old
+        record.name = draft.name.isEmpty ? old.name : draft.name
+        record.fullName = draft.fullName
+        record.emailAddresses = draft.emailAddresses
+        record.sessionURL = draft.sessionURL.absoluteString
+        record.authKind = draft.authKind
+        if draft.authKind == .basic { record.username = draft.username }
+        let reconnect = record.sessionURL != old.sessionURL || record.username != old.username
+            || record.authKind != old.authKind || !draft.secret.isEmpty
+
+        if reconnect {
+            var secret = draft.secret
+            if secret.isEmpty {  // Keep the saved one (or a Dev account's derived one).
+                switch try Self.credentials(for: old) {
+                case .basic(_, let password): secret = password
+                case .bearer(let token): secret = token
+                }
+            }
+            let credentials: Credentials =
+                switch record.authKind {
+                case .basic: .basic(username: record.username, password: secret)
+                case .bearer: .bearer(token: secret)
+                }
+            let session = try await JMAPClient(sessionURL: draft.sessionURL, credentials: credentials).fetchSession()
+            guard let mailAccountId = session.primaryMailAccountId else { throw JMAPError.missingCapability(Capability.mail) }
+            if let known = old.remoteAccountId, known != mailAccountId { throw AccountEditError.differentAccount }
+            if record.authKind == .bearer { record.username = session.username }
+            record.remoteAccountId = mailAccountId
+            if !draft.secret.isEmpty { try Keychain.set(draft.secret, account: record.id) }
+        }
+        try store.save(record)
+        if reconnect {
+            await coordinator.removeAccount(id: record.id)
+            statuses.removeValue(forKey: record.id)
+            await coordinator.addAccount(record)
+        }
+    }
+
+    enum AccountEditError: LocalizedError {
+        case differentAccount
+        var errorDescription: String? {
+            "Those details sign in to a different account on the server. Add it as a new account instead."
+        }
     }
 
     func removeAccount(id: String) {
@@ -449,11 +521,14 @@ final class AppModel {
         private func addDevAccountsIfRequested() {
             guard let names = ProcessInfo.processInfo.environment["MMJ_DEV_ACCOUNTS"] else { return }
             for (i, name) in names.split(separator: ",").enumerated() {
+                let existing = try? store.account(id: "dev-\(name)")
                 let record = AccountRecord(
                     id: "dev-\(name)", name: "\(name.capitalized) (local)",
                     sessionURL: "http://localhost:\(ProcessInfo.processInfo.environment["MMJ_DEV_PORT"] ?? "18080")/.well-known/jmap",
                     username: "\(name)@mmj.test",
-                    authKind: .basic, sortOrder: 1000 + i)
+                    authKind: .basic, sortOrder: 1000 + i,
+                    // Keep what was set in the account window.
+                    fullName: existing?.fullName ?? "", emailAddresses: existing?.emailAddresses ?? "")
                 try? store.save(record)  // Upsert, so a changed dev server URL is picked up.
             }
         }

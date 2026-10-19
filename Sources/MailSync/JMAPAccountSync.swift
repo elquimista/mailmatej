@@ -260,6 +260,36 @@ public actor JMAPAccountSync {
 
     // MARK: Identities
 
+    /// Asks the server for a sending identity for each address it doesn't have one for yet
+    /// (Identity/set create), then stores the server's identities. Returns the addresses the server
+    /// refused, with its reason (servers usually only allow addresses that belong to the login).
+    public func ensureIdentities(_ addresses: [String], name: String) async throws -> [(email: String, reason: String)] {
+        let session = try await client.currentSession()
+        guard session.supports(Capability.submission) else { throw JMAPError.missingCapability(Capability.submission) }
+        let accountId = try remoteAccountId(session)
+        var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
+        let get = request.call("Identity/get", ["accountId": .string(accountId), "ids": .null])
+        let existing = Set(try await client.send(request).decode(GetResponse<Identity>.self, get).list.map { $0.email.lowercased() })
+        let missing = addresses.map { $0.lowercased() }.filter { !existing.contains($0) }
+        var refused: [(String, String)] = []
+        if !missing.isEmpty {
+            var create = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
+            let set = create.call("Identity/set", [
+                "accountId": .string(accountId),
+                "create": .object(Dictionary(uniqueKeysWithValues: missing.enumerated().map { index, email in
+                    ("i\(index)", JSONValue.object(["email": .string(email), "name": .string(name)]))
+                })),
+            ])
+            let result = try await client.send(create).arguments(set)
+            for (index, email) in missing.enumerated() {
+                if let error = result["notCreated"]?["i\(index)"] { refused.append((email, Self.setErrorText(error))) }
+            }
+        }
+        try await syncIdentities(accountId)
+        lastIdentitySync = Date()
+        return refused
+    }
+
     private func syncIdentities(_ accountId: String) async throws {
         var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
         let get = request.call("Identity/get", ["accountId": .string(accountId), "ids": .null])
@@ -467,7 +497,7 @@ public actor JMAPAccountSync {
                     "identityId": .string(message.identityId),
                     "emailId": "#draft",
                     "envelope": [
-                        "mailFrom": ["email": .string(message.from.email ?? "")],
+                        "mailFrom": ["email": .string(message.mailFrom ?? message.from.email ?? "")],
                         "rcptTo": .array(message.recipients.map { ["email": .string($0)] }),
                     ],
                 ]
