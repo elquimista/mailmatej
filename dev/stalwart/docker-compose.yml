@@ -6,10 +6,12 @@ services:
   stalwart:
     image: stalwartlabs/stalwart:v0.16
     container_name: mmj-stalwart
+    # Loopback only: the admin and test passwords are in this repo, so nothing else on the network
+    # may reach this server.
     ports:
-      - "18080:8080"  # 18080 on the Mac: 8080 is commonly taken by other dev servers
-      - "1143:143"
-      - "1025:25"
+      - "127.0.0.1:18080:8080"  # 18080 on the Mac: 8080 is commonly taken by other dev servers
+      - "127.0.0.1:1143:143"
+      - "127.0.0.1:1025:25"
     volumes:
       - ./data/etc:/etc/stalwart
       - ./data/lib:/var/lib/stalwart
