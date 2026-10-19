@@ -296,12 +296,18 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         tableView.reloadData(forRowIndexes: IndexSet(integersIn: rows.location..<NSMaxRange(rows)), columnIndexes: [column])
     }
 
-    @objc private func dayChanged() {
-        DispatchQueue.main.async { [self] in
-            let column = tableView.column(withIdentifier: NSUserInterfaceItemIdentifier(Column.date.rawValue))
-            guard column >= 0, tableView.numberOfRows > 0 else { return }
-            tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: [column])
+    /// Foundation posts NSCalendarDayChanged on a background queue, so this must be nonisolated:
+    /// a main-actor @objc method traps on Swift 6's executor check before its body runs.
+    @objc nonisolated private func dayChanged() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.redrawDates() }
         }
+    }
+
+    private func redrawDates() {
+        let column = tableView.column(withIdentifier: NSUserInterfaceItemIdentifier(Column.date.rawValue))
+        guard column >= 0, tableView.numberOfRows > 0 else { return }
+        tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: [column])
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
