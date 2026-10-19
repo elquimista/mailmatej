@@ -8,8 +8,16 @@ extension Notification.Name {
 /// MailMate's Submailboxes settings for a unified mailbox (Inbox, Sent Messages, ...): a child in the
 /// sidebar for each account's mailbox of that kind.
 struct SubmailboxSettings: Codable, Equatable {
-    /// "Submailbox for each unique value of Source".
+    /// What "Submailbox for each unique value of" splits by.
+    enum Value: String, Codable, CaseIterable {
+        case account, source
+        var title: String { self == .account ? "Account" : "Source" }
+    }
+
+    /// "Submailbox for each unique value of …".
     var bySource = false
+    /// … of Account (one child per account) or of Source (one per mailbox).
+    var value = Value.account
     /// "Unless only one submailbox will be created".
     var unlessOnlyOne = true
     /// "Mailbox name format"; empty means the default, `${#source.#name}`.
@@ -21,16 +29,38 @@ struct SubmailboxSettings: Codable, Equatable {
 
     private static let defaultsKey = "SubmailboxSettings"
 
-    /// The settings of a unified mailbox (by its sidebar key). As in MailMate, they start split: by
-    /// source, except All Messages, by account (by source it would list every folder).
+    init(bySource: Bool = false, value: Value = .account, unlessOnlyOne: Bool = true, nameFormat: String = "", byAccount: Bool = false) {
+        self.bySource = bySource
+        self.value = value
+        self.unlessOnlyOne = unlessOnlyOne
+        self.nameFormat = nameFormat
+        self.byAccount = byAccount
+    }
+
+    // Settings saved before the value pop-up had Account read as Account.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bySource = try c.decodeIfPresent(Bool.self, forKey: .bySource) ?? false
+        value = try c.decodeIfPresent(Value.self, forKey: .value) ?? .account
+        unlessOnlyOne = try c.decodeIfPresent(Bool.self, forKey: .unlessOnlyOne) ?? true
+        nameFormat = try c.decodeIfPresent(String.self, forKey: .nameFormat) ?? ""
+        byAccount = try c.decodeIfPresent(Bool.self, forKey: .byAccount) ?? false
+    }
+
+    /// The settings of a unified mailbox (by its sidebar key). They start split by account.
     static func settings(for key: String) -> SubmailboxSettings {
         if let data = UserDefaults.standard.dictionary(forKey: defaultsKey)?[key] as? Data,
             let saved = try? JSONDecoder().decode(SubmailboxSettings.self, from: data)
         {
             return saved
         }
-        return key == "unified.all" ? SubmailboxSettings(byAccount: true) : SubmailboxSettings(bySource: true)
+        return SubmailboxSettings(bySource: true)
     }
+
+    /// Top-level children per account (the pop-up's Account, or "each account").
+    var splitsByAccount: Bool { byAccount || (bySource && value == .account) }
+    /// Children (or grandchildren under accounts) per source mailbox.
+    var splitsBySource: Bool { bySource && value == .source }
 
     static func save(_ settings: SubmailboxSettings, for key: String) {
         var all = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
@@ -109,7 +139,12 @@ final class SubmailboxSettingsWindowController: NSWindowController, NSTextFieldD
         // Rows centered at 28, 55 and 82 pt; separator at 100; last row at 117 (MailMate's pane).
         bySource.sizeToFit()
         place(bySource, NSRect(x: 18, y: 19, width: bySource.frame.width, height: 18))
-        valuePopup.addItem(withTitle: "Source")
+        for value in SubmailboxSettings.Value.allCases {
+            valuePopup.addItem(withTitle: value.title)
+            valuePopup.lastItem?.representedObject = value.rawValue
+        }
+        valuePopup.target = self
+        valuePopup.action = #selector(changed(_:))
         valuePopup.controlSize = .regular
         place(valuePopup, NSRect(x: 269, y: 15, width: 154, height: 25))  // Shows 150 pt at 271.
         unlessOne.sizeToFit()
@@ -137,6 +172,7 @@ final class SubmailboxSettingsWindowController: NSWindowController, NSTextFieldD
         unlessOne.state = settings.unlessOnlyOne ? .on : .off
         byAccount.state = settings.byAccount ? .on : .off
         formatField.stringValue = settings.nameFormat
+        valuePopup.selectItem(withTitle: settings.value.title)
         let on = settings.splits
         valuePopup.isEnabled = settings.bySource
         unlessOne.isEnabled = on
@@ -144,8 +180,9 @@ final class SubmailboxSettingsWindowController: NSWindowController, NSTextFieldD
         formatField.isEnabled = on
     }
 
-    @objc private func changed(_ sender: NSButton) {
+    @objc private func changed(_ sender: Any) {
         settings.bySource = bySource.state == .on
+        settings.value = (valuePopup.selectedItem?.representedObject as? String).flatMap(SubmailboxSettings.Value.init) ?? .account
         settings.unlessOnlyOne = unlessOne.state == .on
         settings.byAccount = byAccount.state == .on
         save()

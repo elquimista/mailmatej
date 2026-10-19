@@ -248,8 +248,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// MailMate's submailboxes of a unified mailbox. For a role (Inbox, Sent, ...) one per account's
     /// mailbox of that role (one per account, so by source and by account agree), named after the account.
-    /// For Flagged and All Messages, by source: each mailbox holding such mail ("Inbox – Alice"); by
-    /// account: each account; both: accounts, each with its sources.
+    /// For Flagged and All Messages, by account: each account; by source: each mailbox holding such mail
+    /// ("Inbox – Alice"); Source with "each account": accounts, each with its sources.
     private static func submailboxes(
         of node: SidebarNode, mailboxes: [MailboxRecord], accounts: [String: AccountRecord], counts: MailStore.Counts
     ) -> [SidebarNode] {
@@ -288,14 +288,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                           accountId: box.accountId, badge: flagged ? counts.flaggedByMailbox[box.id] ?? 0 : 0, role: box.role)
                 }
             }
-            if settings.byAccount {
+            if settings.splitsByAccount {
                 let ids = Set(sources.map(\.accountId))
                 children = accounts.values.filter { ids.contains($0.id) }.sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) }
                     .map { account in
                         let node = child(
                             "acct.\(account.id)", account.name, flagged ? .flaggedInAccount(account.id) : .allInAccount(account.id),
                             accountId: account.id, badge: flagged ? counts.flaggedByAccount[account.id] ?? 0 : 0, role: nil)
-                        if settings.bySource { node.children = sourceNodes(sources.filter { $0.accountId == account.id }) }
+                        if settings.splitsBySource { node.children = sourceNodes(sources.filter { $0.accountId == account.id }) }
                         return node
                     }
             } else {
