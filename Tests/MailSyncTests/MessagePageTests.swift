@@ -43,4 +43,20 @@ import Testing
         #expect(MessagePage.action(from: URL(string: "mmj-action:T/bogus")!, token: "T") == nil)
         #expect(MessagePage.action(from: URL(string: "https://x.com/load")!, token: "T") == nil)
     }
+
+    @Test func plainTextQuotesBecomeNestedBlocksWithoutMarkers() {
+        let html = MessagePage.plainHTML("Yes!\n\nOn 19 Oct, A wrote:\n\n> This <is>\n>> older\n> back\nAfter")
+        #expect(html == "<mmj-line>Yes!</mmj-line><mmj-line><br></mmj-line><mmj-line>On 19 Oct, A wrote:</mmj-line>"
+            + "<mmj-line><br></mmj-line><mmj-quote><mmj-line>This &lt;is&gt;</mmj-line>"
+            + "<mmj-quote><mmj-line>older</mmj-line></mmj-quote><mmj-line>back</mmj-line></mmj-quote>"
+            + "<mmj-line>After</mmj-line>")
+    }
+
+    @Test func onlyHTMLWithoutColorsFollowsDarkMode() {
+        #expect(MessagePage.hasNoColors("<p>Hi Ellie,</p><p>&nbsp;</p>"))
+        #expect(!MessagePage.hasNoColors(##"<p style="color: #333">Hi</p>"##))
+        #expect(!MessagePage.hasNoColors(##"<td bgcolor="#fff">Hi</td>"##))
+        #expect(!MessagePage.hasNoColors("<style>body { background:#fff }</style>"))
+        #expect(!MessagePage.hasNoColors(#"<font color=red>Hi</font>"#))
+    }
 }

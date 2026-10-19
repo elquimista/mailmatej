@@ -83,15 +83,17 @@ public enum MessagePage {
         headers: [HeaderField], attachments: [Attachment] = [], attachmentButtons: [AttachmentButton] = [], bar: Bar?,
         content: String, plain: Bool, remote: Bool, token: String
     ) -> String {
+        // Plain text, and HTML that sets no colours of its own, follow dark mode as MailMate shows them.
+        let adaptive = plain || hasNoColors(content)
         let https = remote ? " https:" : ""
         let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
             + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
-        let colorScheme = plain ? #"<meta name="color-scheme" content="light dark">"# : ""
+        let colorScheme = adaptive ? #"<meta name="color-scheme" content="light dark">"# : ""
         return """
             <!doctype html><html><head><meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="\(csp)">\(colorScheme)
-            <style>\(helveticaFaces)\(chromeCSS)\(plain ? plainCSS : htmlCSS)</style>
-            </head><body><mmj-chrome>\(headersHTML(headers))\(attachmentsHTML(attachments, buttons: attachmentButtons, token: token))\(bar.map { barHTML($0, token: token) } ?? "")</mmj-chrome>\
+            <style>\(helveticaFaces)\(chromeCSS)\(plain ? plainCSS : htmlCSS)\(adaptive && !plain ? adaptiveCSS : "")</style>
+            </head><body><mmj-chrome>\(headersHTML(headers))\(attachments.isEmpty && bar == nil ? "<mmj-sep class=\"body\"></mmj-sep>" : "<mmj-sep></mmj-sep>")\(attachmentsHTML(attachments, buttons: attachmentButtons, token: token))\(bar.map { barHTML($0, token: token) } ?? "")</mmj-chrome>\
             <mmj-content>\(content)</mmj-content></body></html>
             """
     }
@@ -113,6 +115,41 @@ public enum MessagePage {
         let parts = url.absoluteString.dropFirst(actionScheme.count + 1).split(separator: "/", maxSplits: 1)
         guard parts.count == 2, parts[0] == token else { return nil }
         return Action(rawValue: String(parts[1]))
+    }
+
+    /// Whether HTML leaves all colours to the reader (no colour, background or bgcolor anywhere), so it can
+    /// be shown light-on-dark without losing anything.
+    static func hasNoColors(_ html: String) -> Bool {
+        html.range(of: #"(?i)(color|background)\s*[:=]|bgcolor|<body[^>]*\btext\s*="#, options: .regularExpression) == nil
+    }
+
+    /// A plain-text body as HTML: one block per line, and runs of quoted lines ("> ...") as quote blocks
+    /// with the markers removed, nested per level, as MailMate shows them.
+    public static func plainHTML(_ text: String) -> String {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        return plainBlocks(lines)
+    }
+
+    private static func plainBlocks(_ lines: [String]) -> String {
+        var html = ""
+        var index = 0
+        while index < lines.count {
+            if lines[index].hasPrefix(">") {
+                var quoted: [String] = []
+                while index < lines.count, lines[index].hasPrefix(">") {
+                    var line = lines[index].dropFirst()
+                    if line.hasPrefix(" ") { line = line.dropFirst() }
+                    quoted.append(String(line))
+                    index += 1
+                }
+                html += "<mmj-quote>" + plainBlocks(quoted) + "</mmj-quote>"
+            } else {
+                let line = lines[index]
+                html += "<mmj-line>" + (line.isEmpty ? "<br>" : escape(line)) + "</mmj-line>"
+                index += 1
+            }
+        }
+        return html
     }
 
     public static func escape(_ s: String) -> String {
@@ -146,7 +183,7 @@ public enum MessagePage {
                 + "<mmj-name title=\"\(escape(a.name))\">\(escape(a.name))</mmj-name><mmj-size>\(escape(a.size))</mmj-size>"
                 + buttonsHTML + "</mmj-att>"
         }
-        return "<mmj-sep></mmj-sep><mmj-attachments>" + items.joined() + "</mmj-attachments>"
+        return "<mmj-attachments>" + items.joined() + "</mmj-attachments>"
     }
 
     static func barHTML(_ bar: Bar, token: String) -> String {
@@ -179,6 +216,11 @@ public enum MessagePage {
         mmj-chrome { display: block !important; margin: 0 !important; padding: 0 !important; text-align: left !important;
           font: 13px/1.32 -apple-system, "Helvetica Neue", sans-serif !important; letter-spacing: normal !important;
           background: #F2F2F2 !important; color: #1D1D1F !important; border-bottom: 1px solid #D5D5D5 !important; }
+        /* Email CSS can't reach the chrome's text: rules like `* { font-family: ... }` (Glassdoor) match these
+           elements too. Each part inherits the chrome's font unless a more specific rule below sets its own. */
+        mmj-chrome * { font-family: inherit !important; font-size: inherit !important; line-height: inherit !important;
+          font-weight: inherit !important; font-style: inherit !important; letter-spacing: inherit !important;
+          word-spacing: normal !important; text-transform: none !important; }
         mmj-headers { display: grid !important; grid-template-columns: max-content 1fr !important;
           column-gap: 8px !important; row-gap: 1px !important; padding: 8px 14px !important; }
         mmj-label { display: block !important; text-align: right !important; color: #86868B !important; }
@@ -193,6 +235,11 @@ public enum MessagePage {
            and below it. */
         mmj-sep { display: block !important; height: 1px !important; margin: 0 0 8px !important;
           background: linear-gradient(to right, transparent, rgba(0,0,0,.25) 50%, transparent) !important; }
+        /* With nothing between headers and body the same line closes the headers, on every message (MailMate);
+           above attachments or the remote-content bar it keeps its 8 px gap. */
+        /* 12 px below the last header's baseline, body text 29 px below it. Padding, not margin: a margin
+           would collapse into the body's. */
+        mmj-sep.body { margin: -1px 0 0 !important; padding-bottom: 2px !important; background-clip: content-box !important; }
         mmj-attachments { display: block !important; padding: 5px 4px !important; background: rgba(0,0,0,.05) !important; }
         mmj-att { display: flex !important; align-items: center !important; height: 23px !important;
           padding: 0 14px 0 11px !important; border-radius: 4px !important; cursor: default !important;
@@ -242,18 +289,34 @@ public enum MessagePage {
         /* The chrome must run edge to edge: emails often give <body> a margin, padding or width. */
         html, body { margin: 0 !important; padding: 0 !important; border: 0 !important;
           width: auto !important; min-width: 0 !important; max-width: none !important; }
-        mmj-content { display: block; margin: 14px; font-family: Helvetica, Arial, sans-serif; font-size: 14px;
+        /* Emails that set no font get MailMate's: the system font at 13 px (measured: SF 13, 16 px lines). */
+        mmj-content { display: block; margin: 14px; font: 13px -apple-system, sans-serif;
           overflow-wrap: break-word; }
         img[data-mmj-blocked] { object-fit: fill !important; }
         .status { font: 13px -apple-system, sans-serif; color: GrayText; }
         """
 
+    /// Dark mode for HTML without colours: the plain-text page's background (see plainCSS).
+    static let adaptiveCSS = """
+
+        @media (prefers-color-scheme: dark) { html, body { background: #303234 !important; } }
+        """
+
     static let plainCSS = """
 
         html, body { margin: 0 !important; padding: 0 !important; }
-        mmj-content { display: block; margin: 14px; font: 13px -apple-system, sans-serif; white-space: pre-wrap;
-          overflow-wrap: anywhere; line-height: 1.45; }
+        mmj-content { display: block; margin: 14px; font: 13px/16px -apple-system, sans-serif; white-space: pre-wrap;
+          overflow-wrap: anywhere; }
+        mmj-line { display: block; }
+        /* MailMate: a 2 pt bar at the text's left edge, the quote 7 pt in, bar and text grey. */
+        mmj-quote { display: block; border-left: 2px solid #A0A0A0; padding-left: 5px; color: #808080; }
         .status { color: GrayText; }
+        /* Dark: MailMate shows plain text on the header grey (62,64,67 on screen), quotes and bar at 138
+           (CSS values that render as those; see chromeCSS). */
+        @media (prefers-color-scheme: dark) {
+          html, body { background: #303234 !important; }
+          mmj-quote { border-left-color: #787878; color: #787878; }
+        }
         """
 
     /// In an app's WebKit process, `font-family: Helvetica` at bold weight doesn't find Helvetica's

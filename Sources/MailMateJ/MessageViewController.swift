@@ -194,7 +194,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         attachments = currentID.map { Self.attachments(messageId: $0, html: body.html, store: model.store) } ?? []
         guard let html = body.html, let id = currentID else {
             applyRules(loadRemote: false)
-            loadPage(content: MessagePage.escape(body.text ?? ""), bar: nil, plain: true, remote: false)
+            loadPage(content: MessagePage.plainHTML(body.text ?? ""), bar: nil, plain: true, remote: false)
             return
         }
         let allowedBy = currentSender.flatMap { try? model.store.remoteContentAllowEntries(email: $0) } ?? []
