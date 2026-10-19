@@ -77,6 +77,19 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// The sending identities of every account, in account order.
+    public func identities() throws -> [IdentityRecord] {
+        try dbPool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT i.accountId, i.remoteId, i.name, i.email FROM identity i JOIN account a ON a.id = i.accountId
+                    WHERE a.isEnabled ORDER BY a.sortOrder, a.name, i.email
+                    """
+            ).map { IdentityRecord(accountId: $0["accountId"], remoteId: $0["remoteId"], name: $0["name"], email: $0["email"]) }
+        }
+    }
+
     /// All of the user's own addresses, across accounts.
     public func myAddresses() throws -> Set<String> {
         try dbPool.read { db in

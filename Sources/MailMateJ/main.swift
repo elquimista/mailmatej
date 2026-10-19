@@ -50,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectCorrespondence(row: row)
                     try? await Task.sleep(for: .milliseconds(600))
                 }
+                if let subject = ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT_SUBJECT"] {
+                    windowController?.debugSelect(subject: subject)
+                    try? await Task.sleep(for: .seconds(2))
+                }
                 if let file = ProcessInfo.processInfo.environment["MMJ_RENDER_HTML_FILE"],
                     let html = try? String(contentsOfFile: file, encoding: .utf8)
                 {
@@ -92,6 +96,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSLog("MMJ after \(name): selection \(windowController?.debugSelection ?? [])")
                     }
                 }
+                // MMJ_DEBUG_SEND=1 (with MMJ_DEBUG_ACTIONS opening a compose window): fill it from MMJ_DEBUG_*,
+                // send it (unless MMJ_DEBUG_NOSEND) and snapshot it to <snapshot>-compose.png.
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_SEND"] != nil {
+                    try? await Task.sleep(for: .seconds(2))
+                    ComposeWindowController.debugSendFrontmost(ProcessInfo.processInfo.environment)
+                    try? await Task.sleep(for: .milliseconds(500))
+                    writeSnapshot(of: ComposeWindowController.debugSnapshotFrontmost(), to: path.replacingOccurrences(of: ".png", with: "-compose.png"))
+                    // Also a real screen capture of just that window (what the display shows).
+                    if let number = ComposeWindowController.debugSnapshotFrontmost()?.windowNumber {
+                        NSApp.activate()
+                        ComposeWindowController.debugSnapshotFrontmost()?.makeKeyAndOrderFront(nil)
+                        try? await Task.sleep(for: .seconds(1))
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-screen.png")]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                    }
+                    try? await Task.sleep(for: .seconds(4))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENTS"] != nil {
                     await windowController?.debugCheckAttachments()
                     try? await Task.sleep(for: .seconds(2))
@@ -121,6 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     target = target?.attachedSheet
                 }
                 writeSnapshot(of: target, to: path)
+                // MMJ_SNAPSHOT_SCREEN: also a real screen capture of that window (<snapshot>-screen.png).
+                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCREEN"] != nil, let number = target?.windowNumber {
+                    NSApp.activate()
+                    target?.makeKeyAndOrderFront(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    let capture = Process()
+                    capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-screen.png")]
+                    try? capture.run()
+                    capture.waitUntilExit()
+                }
                 await windowController?.debugSnapshotWeb(to: path.replacingOccurrences(of: ".png", with: "-web.png"))
             }
         }
@@ -168,6 +203,7 @@ enum MainMenu {
         app.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = submenu(main, "File")
+        file.addItem(withTitle: "New Message", action: #selector(MainWindowController.newMessage(_:)), keyEquivalent: "n")
         file.addItem(withTitle: "Add Account…", action: #selector(MainWindowController.addAccount(_:)), keyEquivalent: "")
         file.addItem(.separator())
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -194,6 +230,12 @@ enum MainMenu {
         mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
 
         let message = submenu(main, "Message")
+        message.addItem(withTitle: "Send", action: #selector(ComposeWindowController.sendMessage(_:)), keyEquivalent: "D")
+        message.addItem(.separator())
+        message.addItem(withTitle: "Reply", action: #selector(MainWindowController.reply(_:)), keyEquivalent: "r")
+        message.addItem(withTitle: "Reply All", action: #selector(MainWindowController.replyAll(_:)), keyEquivalent: "")
+        message.addItem(withTitle: "Forward", action: #selector(MainWindowController.forward(_:)), keyEquivalent: "F")
+        message.addItem(.separator())
         message.addItem(withTitle: "Show in Finder", action: #selector(MainWindowController.showInFinder(_:)), keyEquivalent: "R")
             .keyEquivalentModifierMask = [.command, .shift]
 

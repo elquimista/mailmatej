@@ -77,6 +77,21 @@ public actor JMAPClient {
         return try await perform(authorized(URLRequest(url: url))).0
     }
 
+    /// Uploads a file (RFC 8620 §6.1) and returns its blob id.
+    public func upload(accountId: String, data: Data, type: String) async throws -> String {
+        let session = try await currentSession()
+        guard let url = session.uploadURL(accountId: accountId) else {
+            throw JMAPError.invalidResponse("bad uploadUrl template")
+        }
+        var request = authorized(URLRequest(url: url))
+        request.httpMethod = "POST"
+        request.setValue(type, forHTTPHeaderField: "Content-Type")
+        let (body, _) = try await urlSession.upload(for: request, from: data, delegate: RedirectAuthDelegate.shared)
+        let json = try JSONDecoder().decode(JSONValue.self, from: body)
+        guard let blobId = json["blobId"]?.stringValue else { throw JMAPError.invalidResponse("upload returned no blobId") }
+        return blobId
+    }
+
     // MARK: Push
 
     /// Streams push signals over EventSource (RFC 8620 §7.3) until cancelled or the connection drops.

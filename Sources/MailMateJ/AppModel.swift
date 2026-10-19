@@ -216,6 +216,77 @@ final class AppModel {
         }
     }
 
+    // MARK: Composing
+
+    /// Whether any account can send (its identities are known).
+    var canCompose: Bool { !((try? store.identities()) ?? []).isEmpty }
+
+    /// Opens a compose window: a new message (from the account of `messageId`, if given), or a reply to
+    /// or forward of `messageId`, quoting its text (downloaded first if it isn't stored yet).
+    func compose(_ kind: ComposeKind, messageId: Int64?, window: NSWindow?) {
+        Task {
+            do {
+                ComposeWindowController.show(model: self, setup: try await composeSetup(kind, messageId: messageId))
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t start the message."
+                alert.informativeText = Self.describe(error)
+                if let window { alert.beginSheetModal(for: window, completionHandler: nil) } else { alert.runModal() }
+            }
+        }
+    }
+
+    private func composeSetup(_ kind: ComposeKind, messageId: Int64?) async throws -> ComposeWindowController.Setup {
+        let identities = try store.identities()
+        guard !identities.isEmpty else { throw ComposeError.noIdentities }
+        let detail = try messageId.flatMap { try store.detail(id: $0) }
+        guard kind != .new else {
+            let identity = identities.first { $0.accountId == detail?.accountId } ?? identities.first
+            return ComposeWindowController.Setup(identities: identities, identity: identity)
+        }
+        guard let messageId, let detail else { throw CocoaError(.fileNoSuchFile) }
+
+        var body = try store.body(messageId: messageId)
+        if body?.text == nil { body = try await fetchBody(messageId: messageId, accountId: detail.accountId) }
+        var text = body?.text ?? ""
+        if text.isEmpty, let html = body?.html { text = Compose.plainText(fromHTML: html) }
+        let original = Compose.Original(detail, text: text)
+
+        var setup = ComposeWindowController.Setup(
+            identities: identities,
+            identity: Compose.identity(replyingTo: original, accountId: detail.accountId, identities: identities),
+            draft: Compose.draft(
+                kind, original: original, myAddresses: myAddresses,
+                accountAddresses: Set(identities.filter { $0.accountId == detail.accountId }.map(\.email))))
+        if kind == .forward {
+            setup.attachments = MessageViewController.attachments(messageId: messageId, html: body?.html, store: store)
+            setup.attachmentsAccountId = detail.accountId
+            setup.original = (messageId, "$forwarded")
+        } else {
+            (setup.inReplyTo, setup.references) = try await coordinator.replyHeaders(
+                accountId: detail.accountId, remoteId: detail.remoteId)
+            setup.original = (messageId, "$answered")
+        }
+        return setup
+    }
+
+    /// Sends, then marks the original answered (or forwarded), here and on the server.
+    func send(_ message: OutgoingMessage, accountId: String, original: (id: Int64, keyword: String)?) async throws {
+        try await coordinator.send(accountId: accountId, message)
+        guard let original, let ref = try store.refs(ids: [original.id]).first else { return }
+        try store.setKeyword(original.keyword, true, messageIds: [ref.id])
+        try? await coordinator.update(
+            accountId: ref.accountId, remoteIds: [ref.remoteId], patch: ["keywords/\(original.keyword)": true])
+    }
+
+    enum ComposeError: LocalizedError {
+        case noIdentities
+
+        var errorDescription: String? {
+            "No account can send mail yet. Sending addresses appear once an account has synced with a server that supports JMAP submission."
+        }
+    }
+
     /// The message's raw .eml file on disk, downloading it from the server first if needed.
     func rawMessageURL(messageId: Int64) async throws -> URL {
         guard let detail = try store.detail(id: messageId) else { throw CocoaError(.fileNoSuchFile) }

@@ -35,6 +35,11 @@ public enum JSONValue: Sendable, Hashable {
         return nil
     }
 
+    public var arrayValue: [JSONValue]? {
+        if case .array(let a) = self { return a }
+        return nil
+    }
+
     /// Decodes this value into a concrete `Decodable` type.
     public func decode<T: Decodable>(_ type: T.Type) throws -> T {
         let data = try JSONEncoder().encode(self)

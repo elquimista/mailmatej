@@ -72,6 +72,10 @@ public struct Session: Decodable, Sendable {
         ]))
     }
 
+    public func uploadURL(accountId: String) -> URL? {
+        URL(string: Self.expand(uploadUrl, ["accountId": accountId]))
+    }
+
     public func eventSourceURL(types: String = "*", closeAfter: String = "no", ping: Int = 30) -> URL? {
         URL(string: Self.expand(eventSourceUrl, [
             "types": types, "closeafter": closeAfter, "ping": String(ping),

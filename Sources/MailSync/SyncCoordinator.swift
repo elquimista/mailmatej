@@ -155,6 +155,18 @@ public actor SyncCoordinator {
         try await engine.destroy(remoteIds: remoteIds)
     }
 
+    /// Sends a message from the account (see `JMAPAccountSync.send`), then syncs so it shows in Sent.
+    public func send(accountId: String, _ message: OutgoingMessage) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        defer { requestSync(accountId) }
+        try await engine.send(message)
+    }
+
+    public func replyHeaders(accountId: String, remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        return try await engine.replyHeaders(remoteId: remoteId)
+    }
+
     // MARK: Private
 
     private func register(_ account: AccountRecord, push: Bool) {

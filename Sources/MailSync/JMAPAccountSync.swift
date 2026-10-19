@@ -409,6 +409,140 @@ public actor JMAPAccountSync {
         }
     }
 
+    // MARK: Sending
+
+    /// Sends a message (RFC 8621 §7): creates it in Drafts, submits it, and on success the server moves
+    /// it to Sent and clears `$draft`. Bcc recipients are only in the envelope, never in the message.
+    public func send(_ message: OutgoingMessage) async throws {
+        let session = try await client.currentSession()
+        guard session.supports(Capability.submission) else { throw JMAPError.missingCapability(Capability.submission) }
+        let accountId = try remoteAccountId(session)
+        guard let drafts = try store.mailbox(accountId: account.id, role: "drafts") else {
+            throw SendError.noMailbox(role: "drafts")
+        }
+        let sent = try store.mailbox(accountId: account.id, role: "sent")
+
+        var email: [String: JSONValue] = [
+            "mailboxIds": .object([drafts.remoteId: true]),
+            "keywords": ["$draft": true, "$seen": true],
+            "from": Self.json([message.from]),
+            "subject": .string(message.subject),
+            // As MailMate does: Outlook users can't send reactions, which arrive as stray emails elsewhere.
+            "header:X-MS-Reactions:asText": "disallow",
+            "sentAt": .string(ISO8601DateFormatter().string(from: Date())),
+            "bodyValues": ["text": ["value": .string(message.text)]],
+            "textBody": [["partId": "text", "type": "text/plain"]],
+        ]
+        if !message.to.isEmpty { email["to"] = Self.json(message.to) }
+        if !message.cc.isEmpty { email["cc"] = Self.json(message.cc) }
+        if !message.replyTo.isEmpty { email["replyTo"] = Self.json(message.replyTo) }
+        var parts = message.attachments
+        for file in message.files {
+            let blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
+            parts.append(MessagePart(blobId: blobId, cid: nil, type: file.type, name: file.name, size: file.data.count))
+        }
+        if !parts.isEmpty {
+            email["attachments"] = .array(parts.map { part in
+                var item: [String: JSONValue] = [
+                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": "attachment",
+                ]
+                if let name = part.name { item["name"] = .string(name) }
+                return .object(item)
+            })
+        }
+        if !message.inReplyTo.isEmpty { email["inReplyTo"] = .strings(message.inReplyTo) }
+        if !message.references.isEmpty { email["references"] = .strings(message.references) }
+
+        var afterSend: [String: JSONValue] = ["keywords/$draft": .null]
+        if let sent {
+            afterSend["mailboxIds/\(drafts.remoteId)"] = .null
+            afterSend["mailboxIds/\(sent.remoteId)"] = true
+        }
+        var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
+        let create = request.call("Email/set", ["accountId": .string(accountId), "create": ["draft": .object(email)]])
+        let submit = request.call("EmailSubmission/set", [
+            "accountId": .string(accountId),
+            "create": [
+                "send": [
+                    "identityId": .string(message.identityId),
+                    "emailId": "#draft",
+                    "envelope": [
+                        "mailFrom": ["email": .string(message.from.email ?? "")],
+                        "rcptTo": .array(message.recipients.map { ["email": .string($0)] }),
+                    ],
+                ]
+            ],
+            "onSuccessUpdateEmail": ["#send": .object(afterSend)],
+        ])
+        let response = try await client.send(request)
+        let created = try response.arguments(create)
+        if let error = created["notCreated"]?["draft"] {
+            throw SendError.rejected(Self.setErrorText(error))
+        }
+        let draftId = created["created"]?["draft"]?["id"]?.stringValue
+        let submitted: JSONValue
+        do {
+            submitted = try response.arguments(submit)
+        } catch {
+            try? await discardDraft(draftId, accountId)
+            throw error
+        }
+        if let error = submitted["notCreated"]?["send"] {
+            try? await discardDraft(draftId, accountId)
+            throw SendError.rejected(Self.setErrorText(error))
+        }
+    }
+
+    /// In-Reply-To and References for a reply to this message (see `Compose.references`).
+    public func replyHeaders(remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let get = request.call("Email/get", [
+            "accountId": .string(accountId), "ids": .strings([remoteId]),
+            "properties": ["messageId", "references", "inReplyTo"],
+        ])
+        func strings(_ value: JSONValue?) -> [String]? { value?.arrayValue?.compactMap(\.stringValue) }
+        guard let original = try await client.send(request).arguments(get)["list"]?.arrayValue?.first,
+            let messageId = strings(original["messageId"]), !messageId.isEmpty
+        else { return ([], []) }
+        return (messageId, Compose.references(
+            messageId: messageId, references: strings(original["references"]), inReplyTo: strings(original["inReplyTo"])))
+    }
+
+    /// Removes a draft whose submission failed, so a retry doesn't leave copies in Drafts.
+    private func discardDraft(_ id: String?, _ accountId: String) async throws {
+        guard let id else { return }
+        var request = JMAPRequest()
+        request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings([id])])
+        _ = try await client.send(request)
+    }
+
+    private static func json(_ addresses: [EmailAddress]) -> JSONValue {
+        .array(addresses.map { a in
+            var item: [String: JSONValue] = ["email": .string(a.email ?? "")]
+            if let name = a.name, !name.isEmpty, name.lowercased() != a.email?.lowercased() { item["name"] = .string(name) }
+            return .object(item)
+        })
+    }
+
+    /// A SetError's description, else its type ("forbiddenFrom", "tooManyRecipients", ...).
+    private static func setErrorText(_ error: JSONValue) -> String {
+        let type = error["type"]?.stringValue ?? "unknown"
+        return error["description"]?.stringValue.map { "\(type): \($0)" } ?? type
+    }
+
+    public enum SendError: Error, LocalizedError {
+        case noMailbox(role: String)
+        case rejected(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .noMailbox(let role): "This account has no \(role == "drafts" ? "Drafts" : role) mailbox."
+            case .rejected(let why): "The server didn’t send the message (\(why))."
+            }
+        }
+    }
+
     /// Stores the server's current copy of these emails (and forgets ones it no longer has).
     private func refetch(_ remoteIds: [String], _ accountId: String) async throws {
         var request = JMAPRequest()

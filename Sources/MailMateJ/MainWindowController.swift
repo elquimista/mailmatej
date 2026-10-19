@@ -1,5 +1,6 @@
 import AppKit
 import MailStore
+import MailSync
 import SwiftUI
 
 /// The Correspondence layout: sidebar | (message list over (correspondence | message)).
@@ -347,11 +348,24 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case "read": markRead(nil)
             case "unread": markUnread(nil)
             case "flag": toggleFlag(nil)
+            case "new": newMessage(nil)
+            case "reply": reply(nil)
+            case "replyAll": replyAll(nil)
+            case "forward": forward(nil)
             default: break
             }
         }
 
         var debugSelection: [Int64] { list.selectedIDs }
+
+        /// Selects the newest list row with this subject.
+        func debugSelect(subject: String) {
+            guard let row = list.ids.firstIndex(where: { (try? model.store.detail(id: $0))?.subject == subject }) else {
+                return NSLog("MMJ select: no message with subject \(subject)")
+            }
+            list.tableView.selectRowIndexes([row], byExtendingSelection: false)
+            NSLog("MMJ select: row \(row), message \(list.ids[row])")
+        }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
 
@@ -459,11 +473,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             ("Mark as Junk", "xmark.bin", #selector(junkMessages(_:))),
             ("Delete", "trash", #selector(deleteMessages(_:))),
         ]),
-        (.init("compose"), [("New Message", "square.and.pencil", #selector(composeMessage(_:)))]),
+        (.init("compose"), [("New Message", "square.and.pencil", #selector(newMessage(_:)))]),
         (.init("replyActions"), [
-            ("Reply", "arrowshape.turn.up.left", #selector(composeMessage(_:))),
-            ("Reply All", "arrowshape.turn.up.left.2", #selector(composeMessage(_:))),
-            ("Forward", "arrowshape.turn.up.right", #selector(composeMessage(_:))),
+            ("Reply", "arrowshape.turn.up.left", #selector(reply(_:))),
+            ("Reply All", "arrowshape.turn.up.left.2", #selector(replyAll(_:))),
+            ("Forward", "arrowshape.turn.up.right", #selector(forward(_:))),
         ]),
         (.init("readActions"), [
             ("Mark as Unread", "envelope.badge", #selector(markUnread(_:))),
@@ -553,7 +567,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 // As in MailMate, a mark button is off when it would change nothing.
                 case #selector(markRead(_:)): button.isEnabled = rows.contains { !$0.isSeen }
                 case #selector(markUnread(_:)): button.isEnabled = rows.contains(where: \.isSeen)
-                case #selector(composeMessage(_:)): button.isEnabled = false  // Composing isn't built yet.
+                case #selector(newMessage(_:)): button.isEnabled = model.canCompose
+                // Replying and forwarding act on one message.
+                case #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
+                    button.isEnabled = ids.count == 1 && model.canCompose
                 case #selector(toggleFlag(_:)):
                     let flagged = allFlagged(targetIDs)
                     button.toolTip = flagged ? "Unflag" : "Flag"
@@ -572,7 +589,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return rows.allSatisfy(\.isFlagged)
     }
 
-    @objc private func composeMessage(_ sender: Any?) {}
+    @objc func newMessage(_ sender: Any?) { model.compose(.new, messageId: targetIDs.first, window: window) }
+    @objc func reply(_ sender: Any?) { compose(.reply) }
+    @objc func replyAll(_ sender: Any?) { compose(.replyAll) }
+    @objc func forward(_ sender: Any?) { compose(.forward) }
+
+    private func compose(_ kind: ComposeKind) {
+        let ids = targetIDs
+        guard ids.count == 1 else { return NSSound.beep() }
+        model.compose(kind, messageId: ids[0], window: window)
+    }
 
     @objc private func archiveMessages(_ sender: Any?) { moveAway(.archive) }
     @objc private func junkMessages(_ sender: Any?) { moveAway(.junk) }

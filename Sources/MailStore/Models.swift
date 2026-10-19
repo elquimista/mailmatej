@@ -157,6 +157,22 @@ public struct MessageRow: FetchableRecord, Sendable {
 }
 
 /// Everything the message view needs besides the body.
+/// A sending identity (JMAP Identity) of an account.
+public struct IdentityRecord: Sendable, Hashable {
+    public var accountId: String
+    public var remoteId: String
+    public var name: String
+    /// Lowercased.
+    public var email: String
+
+    public init(accountId: String, remoteId: String, name: String, email: String) {
+        self.accountId = accountId
+        self.remoteId = remoteId
+        self.name = name
+        self.email = email
+    }
+}
+
 public struct MessageDetail: Sendable {
     public var id: Int64
     public var accountId: String
