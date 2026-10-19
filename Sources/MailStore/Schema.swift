@@ -203,6 +203,14 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v7-account-identity") { db in
+            // Full Name and Email Address(es) from the account settings window.
+            try db.execute(sql: """
+                ALTER TABLE account ADD COLUMN fullName TEXT NOT NULL DEFAULT '';
+                ALTER TABLE account ADD COLUMN emailAddresses TEXT NOT NULL DEFAULT '';
+                """)
+        }
+
         return m
     }
 }

@@ -139,10 +139,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1))
                     target = SettingsWindowController.shared.window
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_ADD_ACCOUNT"] {
+                    // Adds an account through the window, checks it, then removes it again.
+                    windowController?.addAccount(nil)
+                    windowController?.accountSettings?.debugAdd(spec)
+                    try? await Task.sleep(for: .seconds(6))
+                    let added = (try? AppModel.shared.store.accounts())?.first { $0.name == "Dave (window test)" }
+                    NSLog("MMJ account window: open=\(windowController?.accountSettings != nil) added=\(added.map { "\($0.sessionURL) user=\($0.username) fullName=\($0.fullName) emails=\($0.emailAddresses)" } ?? "no")")
+                    NSLog("MMJ account window: my addresses include dave=\((try? AppModel.shared.store.myAddresses())?.contains("dave@mmj.test") ?? false)")
+                    if let added { AppModel.shared.removeAccount(id: added.id) }
+                    try? await Task.sleep(for: .seconds(2))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SHEET"] != nil {
                     windowController?.addAccount(nil)
                     try? await Task.sleep(for: .seconds(1.5))
-                    target = target?.attachedSheet
+                    target = windowController?.accountSettings?.window
                 }
                 writeSnapshot(of: target, to: path)
                 // MMJ_SNAPSHOT_SCREEN: also a real screen capture of that window (<snapshot>-screen.png).

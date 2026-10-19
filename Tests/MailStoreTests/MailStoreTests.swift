@@ -73,6 +73,22 @@ import Testing
         #expect(oldestFirst == thread.reversed())
     }
 
+    @Test func correspondenceStaysWithTheAddressUsed() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "ada@x.com", to: "me@example.com", at: 100),
+            message("2", from: "ada@x.com", to: "alias@example.com", at: 200),
+            message("3", from: "me@example.com", to: "ada@x.com", box: "se", at: 300),
+        ])
+        let me: Set = ["me@example.com", "alias@example.com"]
+        let ids = try store.messageIDs(scope: .allMessages, sort: MessageSort(key: .receivedAt, ascending: true))
+        #expect(try store.myAddress(in: ids[0], myAddresses: me) == "me@example.com")
+        #expect(try store.myAddress(in: ids[1], myAddresses: me) == "alias@example.com")
+        #expect(try store.myAddress(in: ids[2], myAddresses: me) == "me@example.com")
+        #expect(Set(try store.correspondenceIDs(email: "ada@x.com", via: "me@example.com")) == [ids[0], ids[2]])
+        #expect(try store.correspondenceIDs(email: "ada@x.com", via: "alias@example.com") == [ids[1]])
+        #expect(try store.correspondenceIDs(email: "ada@x.com").count == 3)  // none of mine: everything
+    }
+
     @Test func partsAndRemoteAllowList() throws {
         try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
         let id = try #require(store.messageIDs(scope: .allMessages).first)

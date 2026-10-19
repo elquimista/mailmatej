@@ -17,6 +17,8 @@ struct AccountDraft {
     var username: String
     var authKind: AccountRecord.AuthKind
     var secret: String
+    var fullName = ""
+    var emailAddresses = ""
 }
 
 /// App-wide state shared by windows: the store, the sync coordinator and sync statuses.
@@ -96,7 +98,8 @@ final class AppModel {
             sessionURL: draft.sessionURL.absoluteString,
             username: draft.authKind == .basic ? draft.username : session.username,
             authKind: draft.authKind, remoteAccountId: mailAccountId,
-            sortOrder: (try store.accounts().map(\.sortOrder).max() ?? -1) + 1)
+            sortOrder: (try store.accounts().map(\.sortOrder).max() ?? -1) + 1,
+            fullName: draft.fullName, emailAddresses: draft.emailAddresses)
         try Keychain.set(draft.secret, account: record.id)
         try store.save(record)
         await coordinator.addAccount(record)

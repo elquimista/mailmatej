@@ -291,7 +291,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return
         }
         correspondent = email
-        let ids = (try? model.store.correspondenceIDs(email: email, sort: correspondence.sort)) ?? []
+        // Only mail with this person through the address of mine this message used.
+        let mine = try? model.store.myAddress(in: id, myAddresses: model.myAddresses)
+        let ids = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort)) ?? []
         if let pending = pendingCorrespondence, pending.mainID == id {
             pendingCorrespondence = nil
             let kept = pending.saved.correspondenceSelection.filter(ids.contains)
@@ -435,17 +437,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.syncAll()
     }
 
+    /// The open JMAP Account Settings window, if any (one at a time).
+    private(set) var accountSettings: AccountSettingsWindowController?
+
     @objc func addAccount(_ sender: Any?) {
-        guard let window else { return }
-        let sheet = SheetHolder()
-        let view = AddAccountView(
-            onAdd: { [weak self] draft in
-                try await self?.model.addAccount(draft)
-                sheet.end(from: window)
-            },
-            onCancel: { sheet.end(from: window) })
-        sheet.window = NSWindow(contentViewController: NSHostingController(rootView: view))
-        window.beginSheet(sheet.window!)
+        if accountSettings == nil {
+            accountSettings = AccountSettingsWindowController(model: model) { [weak self] in
+                self?.accountSettings = nil
+            }
+        }
+        accountSettings?.show(over: window)
     }
 
     @objc func focusSearch(_ sender: Any?) {
@@ -653,15 +654,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         item.action = action
         item.isBordered = true
         return item
-    }
-}
-
-@MainActor
-private final class SheetHolder {
-    var window: NSWindow?
-
-    func end(from parent: NSWindow) {
-        if let window { parent.endSheet(window) }
     }
 }
 

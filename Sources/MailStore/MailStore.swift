@@ -83,7 +83,8 @@ public final class MailStore: Sendable {
             try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT i.accountId, i.remoteId, i.name, i.email FROM identity i JOIN account a ON a.id = i.accountId
+                    SELECT i.accountId, i.remoteId, CASE WHEN i.name = '' THEN a.fullName ELSE i.name END AS name, i.email
+                    FROM identity i JOIN account a ON a.id = i.accountId
                     WHERE a.isEnabled ORDER BY a.sortOrder, a.name, i.email
                     """
             ).map { IdentityRecord(accountId: $0["accountId"], remoteId: $0["remoteId"], name: $0["name"], email: $0["email"]) }
@@ -96,6 +97,12 @@ public final class MailStore: Sendable {
             var set = Set(try String.fetchAll(db, sql: "SELECT email FROM identity"))
             for name in try String.fetchAll(db, sql: "SELECT username FROM account") where name.contains("@") {
                 set.insert(name.lowercased())
+            }
+            for list in try String.fetchAll(db, sql: "SELECT emailAddresses FROM account") {
+                for address in list.split(separator: ",") {
+                    let a = address.trimmingCharacters(in: .whitespaces).lowercased()
+                    if a.contains("@") { set.insert(a) }
+                }
             }
             return set
         }
@@ -604,20 +611,38 @@ public final class MailStore: Sendable {
         }
     }
 
-    /// Messages from or to `email`, across all accounts and mailboxes: the newest `limit`, in `sort` order.
-    public func correspondenceIDs(email: String, sort: MessageSort = .newestFirst, limit: Int = 2000) throws -> [Int64] {
+    /// Which of my addresses a message used: its sender if I sent it, else the first of mine among
+    /// its recipients. Nil when none of mine appear (Bcc, mailing lists).
+    public func myAddress(in messageId: Int64, myAddresses: Set<String>) throws -> String? {
         try dbPool.read { db in
-            try Int64.fetchAll(
+            try String.fetchAll(
+                db, sql: "SELECT email FROM address WHERE messageId = ? ORDER BY role, position", arguments: [messageId]
+            ).first(where: myAddresses.contains)
+        }
+    }
+
+    /// Messages from or to `email`, across all accounts and mailboxes: the newest `limit`, in `sort` order.
+    /// With `mine`, only the ones that also involve that address of mine, so mail with the same person
+    /// through my other addresses stays out.
+    public func correspondenceIDs(
+        email: String, via mine: String? = nil, sort: MessageSort = .newestFirst, limit: Int = 2000
+    ) throws -> [Int64] {
+        try dbPool.read { db in
+            let viaMine = mine == nil ? "" : " AND id IN (SELECT messageId FROM address WHERE email = ?)"
+            var arguments: [any DatabaseValueConvertible] = [email.lowercased()]
+            if let mine { arguments.append(mine.lowercased()) }
+            arguments.append(limit)
+            return try Int64.fetchAll(
                 db,
                 sql: """
                     SELECT m.id FROM (
                         SELECT id, receivedAt, fromDisplay, sortSubject, size FROM message
-                        WHERE id IN (SELECT messageId FROM address WHERE email = ?)
+                        WHERE id IN (SELECT messageId FROM address WHERE email = ?)\(viaMine)
                         ORDER BY receivedAt DESC LIMIT ?
                     ) m
                     ORDER BY \(Self.orderBy(sort))
                     """,
-                arguments: [email.lowercased(), limit])
+                arguments: StatementArguments(arguments))
         }
     }
 

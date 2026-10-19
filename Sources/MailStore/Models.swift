@@ -15,12 +15,18 @@ public struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendab
     public var remoteAccountId: String?
     public var sortOrder: Int
     public var isEnabled: Bool
+    /// The sender name for this account's mail, where the server's identity has none.
+    public var fullName: String
+    /// The user's own addresses on this account, comma-separated (besides the server's identities).
+    public var emailAddresses: String
 
     public init(
         id: String = UUID().uuidString, name: String, kind: String = "jmap", sessionURL: String,
         username: String, authKind: AuthKind, remoteAccountId: String? = nil, sortOrder: Int = 0,
-        isEnabled: Bool = true
+        isEnabled: Bool = true, fullName: String = "", emailAddresses: String = ""
     ) {
+        self.fullName = fullName
+        self.emailAddresses = emailAddresses
         self.id = id
         self.name = name
         self.kind = kind
