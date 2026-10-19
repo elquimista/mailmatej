@@ -73,6 +73,21 @@ import Testing
         #expect(oldestFirst == thread.reversed())
     }
 
+    @Test func submailboxScopes() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "a@x.com", at: 100, keywords: ["$flagged"]),
+            message("2", from: "b@x.com", box: "tr", at: 200, keywords: ["$flagged"]),
+            message("3", from: "c@x.com", at: 300),
+        ])
+        let inbox = try #require(try store.mailboxes().first { $0.role == "inbox" })
+        #expect(try store.messageIDs(scope: .flaggedInMailbox(inbox.id)).count == 1)
+        #expect(try store.messageIDs(scope: .flaggedInAccount("acc")).count == 2)
+        #expect(try store.messageIDs(scope: .allInAccount("acc")).count == 2)  // not the one in Trash
+        let counts = try store.counts()
+        #expect(counts.flaggedByMailbox[inbox.id] == 1)
+        #expect(counts.flaggedByAccount["acc"] == 2)
+    }
+
     @Test func correspondenceStaysWithTheAddressUsed() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "ada@x.com", to: "me@example.com", at: 100),
@@ -157,7 +172,8 @@ import Testing
         #expect(try store.count(scope: .account("acc"), counting: .all) == 3)
         #expect(try store.count(scope: .role("inbox"), counting: .flagged) == 0)
         #expect(try store.count(scope: .role("inbox"), counting: .unreplied) == 2)
-        for scope in [MessageScope.allMessages, .flagged, .role("inbox"), .mailbox(42), .account("A:B")] {
+        for scope in [MessageScope.allMessages, .flagged, .role("inbox"), .mailbox(42), .account("A:B"),
+                      .flaggedInMailbox(7), .flaggedInAccount("A:B"), .allInAccount("acc")] {
             #expect(MessageScope(key: scope.key) == scope)
         }
         #expect(MessageScope(key: "mailbox:x") == nil)

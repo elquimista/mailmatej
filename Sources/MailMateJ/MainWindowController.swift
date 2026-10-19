@@ -370,6 +370,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+        func debugExpandSidebar(key: String) { sidebar.debugExpand(key: key) }
 
         /// Selects a row of the Correspondence pane, as a click would.
         func debugSelectCorrespondence(row: Int) {

@@ -538,6 +538,18 @@ public final class MailStore: Sendable {
         case .account(let id):
             clauses.append("m.accountId = ?")
             args.append(id)
+        case .flaggedInMailbox(let id):
+            clauses.append("m.isFlagged AND m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId = ?)")
+            args.append(id)
+        case .flaggedInAccount(let id):
+            clauses.append("m.isFlagged AND m.accountId = ?")
+            args.append(id)
+        case .allInAccount(let id):
+            clauses.append("""
+                m.accountId = ? AND NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                                                WHERE mm.messageId = m.id AND b.role IN ('trash', 'junk'))
+                """)
+            args.append(id)
         }
 
         if let query = search.flatMap(Self.ftsQuery) {
@@ -652,6 +664,10 @@ public final class MailStore: Sendable {
         public var unreadByRole: [String: Int] = [:]
         public var flagged = 0
         public var unreadByAccount: [String: Int] = [:]
+        public var flaggedByMailbox: [Int64: Int] = [:]
+        public var flaggedByAccount: [String: Int] = [:]
+        /// Mailboxes holding mail outside Trash and Junk (sources for All Messages).
+        public var mailboxesWithMail: Set<Int64> = []
 
         public init() {}
     }
@@ -670,6 +686,20 @@ public final class MailStore: Sendable {
                 c.unreadByAccount[row["accountId"]] = row["n"]
             }
             c.flagged = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message WHERE isFlagged") ?? 0
+            for row in try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT mm.mailboxId, COUNT(*) AS n FROM message m JOIN message_mailbox mm ON mm.messageId = m.id
+                    WHERE m.isFlagged GROUP BY mm.mailboxId
+                    """)
+            {
+                c.flaggedByMailbox[row["mailboxId"]] = row["n"]
+            }
+            for row in try Row.fetchAll(db, sql: "SELECT accountId, COUNT(*) AS n FROM message WHERE isFlagged GROUP BY accountId") {
+                c.flaggedByAccount[row["accountId"]] = row["n"]
+            }
+            c.mailboxesWithMail = Set(try Int64.fetchAll(
+                db, sql: "SELECT id FROM mailbox WHERE totalEmails > 0 AND (role IS NULL OR role NOT IN ('trash', 'junk'))"))
             return c
         }
     }

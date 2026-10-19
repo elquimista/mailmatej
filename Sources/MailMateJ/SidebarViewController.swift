@@ -47,6 +47,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         self.model = model
         expandedKeys = Set(UserDefaults.standard.stringArray(forKey: Self.expandedDefaultsKey) ?? [])
         super.init(nibName: nil, bundle: nil)
+        NotificationCenter.default.addObserver(
+            forName: .submailboxSettingsDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reload() }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -68,6 +73,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let menu = NSMenu()
         menu.delegate = self
         outline.menu = menu
+        outline.target = self
+        outline.doubleAction = #selector(rowDoubleClicked(_:))
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -117,6 +124,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             case .allMessages?: node.isBusy = !busyIDs.isEmpty
             default: node.isBusy = false
             }
+            func markSubmailboxes(_ nodes: [SidebarNode]) {
+                for child in nodes {
+                    child.isBusy = selfBusy(child)
+                    markSubmailboxes(child.children)
+                }
+            }
+            markSubmailboxes(node.children)
         }
         reconfigureVisibleRows()
     }
@@ -155,6 +169,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func debugFocus() { view.window?.makeFirstResponder(outline) }
 
         /// Selects the item with `key` as a click would (fires `onSelect`).
+        func debugExpand(key: String) {
+            if let node = find(key, in: roots) { outline.expandItem(node) }
+        }
+
         func debugSelect(key: String) {
             guard let node = find(key, in: roots) else { return }
             let row = outline.row(forItem: node)
@@ -196,18 +214,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             ("inbox", "Inbox", "tray"), ("drafts", "Drafts", "doc"), ("sent", "Sent Messages", "paperplane"),
             ("archive", "Archive", "archivebox"), ("junk", "Junk", "xmark.bin"), ("trash", "Deleted Messages", "trash"),
         ]
+        let accountsByID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
         for (role, title, symbol) in unifiedItems where role == "inbox" || roles.contains(role) {
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
             if role == "inbox" || role == "junk" { node.badge = counts.unreadByRole[role] ?? 0 }
+            node.children = submailboxes(of: node, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
             unified.children.append(node)
             if role == "inbox" {
                 let flagged = SidebarNode(key: "unified.flagged", kind: .unified, title: "Flagged", symbol: "flag", scope: .flagged)
                 flagged.badge = counts.flagged
+                flagged.children = submailboxes(of: flagged, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
                 unified.children.append(flagged)
             }
         }
-        unified.children.append(
-            SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "tray.full", scope: .allMessages))
+        let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "tray.full", scope: .allMessages)
+        all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+        unified.children.append(all)
 
         let sources = SidebarNode(key: "header.sources", kind: .header, title: "Sources")
         let byAccount = Dictionary(grouping: mailboxes, by: \.accountId)
@@ -222,6 +244,67 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             sources.children.append(node)
         }
         return [unified, sources]
+    }
+
+    /// MailMate's submailboxes of a unified mailbox. For a role (Inbox, Sent, ...) one per account's
+    /// mailbox of that role (one per account, so by source and by account agree), named after the account.
+    /// For Flagged and All Messages, by source: each mailbox holding such mail ("Inbox – Alice"); by
+    /// account: each account; both: accounts, each with its sources.
+    private static func submailboxes(
+        of node: SidebarNode, mailboxes: [MailboxRecord], accounts: [String: AccountRecord], counts: MailStore.Counts
+    ) -> [SidebarNode] {
+        let settings = SubmailboxSettings.settings(for: node.key)
+        guard settings.splits, let scope = node.scope else { return [] }
+        let order: (MailboxRecord, MailboxRecord) -> Bool = { a, b in
+            let x = accounts[a.accountId]!, y = accounts[b.accountId]!
+            return (x.sortOrder, x.name, a.name.lowercased()) < (y.sortOrder, y.name, b.name.lowercased())
+        }
+        let known = mailboxes.filter { accounts[$0.accountId] != nil }
+        func child(_ key: String, _ title: String, _ scope: MessageScope, accountId: String, badge: Int, role: String?) -> SidebarNode {
+            let child = SidebarNode(
+                key: "\(node.key).\(key)", kind: .mailbox, title: settings.name(source: title), symbol: node.symbol,
+                scope: scope, accountId: accountId)
+            child.role = role
+            child.badge = badge
+            return child
+        }
+        func source(_ box: MailboxRecord) -> String { "\(box.name) – \(accounts[box.accountId]!.name)" }
+
+        var children: [SidebarNode]
+        switch scope {
+        case .role(let role):
+            children = known.filter { $0.role == role }.sorted(by: order).map { box in
+                child(box.accountId, accounts[box.accountId]!.name, .mailbox(box.id), accountId: box.accountId,
+                      badge: role == "inbox" || role == "junk" ? box.unreadEmails : 0, role: role)
+            }
+        case .flagged, .allMessages:
+            let flagged = scope == .flagged
+            let sources = known.filter {
+                flagged ? (counts.flaggedByMailbox[$0.id] ?? 0) > 0 : counts.mailboxesWithMail.contains($0.id)
+            }.sorted(by: order)
+            func sourceNodes(_ boxes: [MailboxRecord]) -> [SidebarNode] {
+                boxes.map { box in
+                    child("src.\(box.id)", source(box), flagged ? .flaggedInMailbox(box.id) : .mailbox(box.id),
+                          accountId: box.accountId, badge: flagged ? counts.flaggedByMailbox[box.id] ?? 0 : 0, role: box.role)
+                }
+            }
+            if settings.byAccount {
+                let ids = Set(sources.map(\.accountId))
+                children = accounts.values.filter { ids.contains($0.id) }.sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) }
+                    .map { account in
+                        let node = child(
+                            "acct.\(account.id)", account.name, flagged ? .flaggedInAccount(account.id) : .allInAccount(account.id),
+                            accountId: account.id, badge: flagged ? counts.flaggedByAccount[account.id] ?? 0 : 0, role: nil)
+                        if settings.bySource { node.children = sourceNodes(sources.filter { $0.accountId == account.id }) }
+                        return node
+                    }
+            } else {
+                children = sourceNodes(sources)
+            }
+        default:
+            children = []
+        }
+        return settings.unlessOnlyOne && children.count < 2 ? [] : children
     }
 
     private static func mailboxTree(_ boxes: [MailboxRecord], accountId: String) -> [SidebarNode] {
@@ -334,7 +417,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode, let accountId = node.accountId else { return }
+        guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
+        if node.kind == .unified {
+            let edit = menu.addItem(withTitle: "Edit Mailbox…", action: #selector(editMailboxClicked(_:)), keyEquivalent: "")
+            edit.representedObject = node
+            edit.target = self
+            return
+        }
+        guard let accountId = node.accountId else { return }
         let sync = menu.addItem(withTitle: "Sync Now", action: #selector(syncClicked(_:)), keyEquivalent: "")
         sync.representedObject = accountId
         sync.target = self
@@ -350,6 +440,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             remove.representedObject = node
             remove.target = self
         }
+    }
+
+    @objc private func editMailboxClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        editMailbox(node)
+    }
+
+    /// A double-click on a unified mailbox edits it, as in MailMate.
+    @objc private func rowDoubleClicked(_ sender: NSOutlineView) {
+        guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
+        editMailbox(node)
+    }
+
+    private func editMailbox(_ node: SidebarNode) {
+        guard node.kind == .unified else { return }
+        SubmailboxSettingsWindowController.show(key: node.key, title: node.title, over: view.window)
     }
 
     @objc private func syncClicked(_ sender: NSMenuItem) {

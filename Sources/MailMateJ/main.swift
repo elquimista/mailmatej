@@ -133,7 +133,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         to: path.replacingOccurrences(of: ".png", with: "-long.png"),
                         values: [.topLeft: 12_345, .topRight: 123_456, .bottomLeft: 7, .bottomRight: 2_345_678])
                 }
+                if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_EXPAND"] {
+                    for key in keys.split(separator: ",") { windowController?.debugExpandSidebar(key: String(key)) }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
                 var target = windowController?.window
+                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SUBMAILBOXES"] != nil {
+                    SubmailboxSettingsWindowController.show(key: "unified.inbox", title: "Inbox", over: target)
+                    try? await Task.sleep(for: .seconds(1))
+                    target = NSApp.windows.first { $0.title == "Inbox" && $0.subtitle == "Submailboxes" }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTINGS"] != nil {
                     SettingsWindowController.shared.show()
                     try? await Task.sleep(for: .seconds(1))

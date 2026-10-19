@@ -274,7 +274,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .unread:
             return iconCell(tableView, column, image: row.isSeen ? nil : Self.unreadDot, tint: .controlAccentColor)
         case .flag:
-            return iconCell(tableView, column, image: row.isFlagged ? Self.symbol("flag.fill") : nil, tint: .systemRed)
+            return iconCell(tableView, column, image: row.isFlagged ? Self.rowFlag : nil, tint: .systemRed)
         case .attachment:
             return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
         case .from:
@@ -448,6 +448,24 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return image
     }()
 
+    /// The flag in rows, as MailMate draws it (measured at 1x): about 12 × 13 px, from 4 px below the
+    /// row's top to its bottom, on whole pixels.
+    private static let rowFlag: NSImage? = {
+        guard let symbol = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: "Flagged")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        else { return nil }
+        let ink = inkBounds(of: symbol, integral: false)
+        let size = NSSize(width: 16, height: 17)  // The flag column's cell.
+        let shift = NSPoint(
+            x: ((size.width - ink.width) / 2 - ink.minX).rounded(), y: (size.height - 4 - ink.maxY).rounded())
+        let image = NSImage(size: size, flipped: false) { _ in
+            symbol.draw(at: shift, from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     /// The paperclip as MailMate draws it in rows (measured at 1x): 14 px, 2 px below the row's top,
     /// on whole pixels in a cell-sized image so centering can't blur it.
     private static let rowPaperclip: NSImage? = {
@@ -467,11 +485,6 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         image.isTemplate = true
         return image
     }()
-
-    private static func symbol(_ name: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
-    }
 
     private func iconCell(_ tableView: NSTableView, _ column: Column, image: NSImage?, tint: NSColor) -> NSView {
         let id = NSUserInterfaceItemIdentifier("icon")

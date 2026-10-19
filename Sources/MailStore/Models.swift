@@ -233,8 +233,14 @@ public enum MessageScope: Hashable, Sendable {
     case flagged
     case mailbox(Int64)
     case account(String)
+    /// Submailboxes of Flagged and All Messages: flagged mail in one mailbox or account, and one
+    /// account's mail outside Trash and Junk.
+    case flaggedInMailbox(Int64)
+    case flaggedInAccount(String)
+    case allInAccount(String)
 
-    /// A stable string form, for settings: "all", "flagged", "role:inbox", "mailbox:42", "account:<id>".
+    /// A stable string form, for settings: "all", "flagged", "role:inbox", "mailbox:42", "account:<id>",
+    /// "flagged:mailbox:42", "flagged:account:<id>", "all:account:<id>".
     public var key: String {
         switch self {
         case .allMessages: "all"
@@ -242,6 +248,9 @@ public enum MessageScope: Hashable, Sendable {
         case .role(let role): "role:\(role)"
         case .mailbox(let id): "mailbox:\(id)"
         case .account(let id): "account:\(id)"
+        case .flaggedInMailbox(let id): "flagged:mailbox:\(id)"
+        case .flaggedInAccount(let id): "flagged:account:\(id)"
+        case .allInAccount(let id): "all:account:\(id)"
         }
     }
 
@@ -253,6 +262,15 @@ public enum MessageScope: Hashable, Sendable {
         case ("role", 2): self = .role(parts[1])
         case ("mailbox", 2): if let id = Int64(parts[1]) { self = .mailbox(id) } else { return nil }
         case ("account", 2): self = .account(parts[1])
+        case ("flagged", 2), ("all", 2):
+            let rest = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
+            guard rest.count == 2 else { return nil }
+            switch (parts[0], rest[0]) {
+            case ("flagged", "mailbox"): if let id = Int64(rest[1]) { self = .flaggedInMailbox(id) } else { return nil }
+            case ("flagged", "account"): self = .flaggedInAccount(rest[1])
+            case ("all", "account"): self = .allInAccount(rest[1])
+            default: return nil
+            }
         default: return nil
         }
     }
