@@ -141,8 +141,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     for key in keys.split(separator: ",") { windowController?.debugExpandSidebar(key: String(key)) }
                     try? await Task.sleep(for: .milliseconds(500))
                 }
-                if ProcessInfo.processInfo.environment["MMJ_DEBUG_COLLAPSE"] != nil {
-                    windowController?.debugCollapseFirstThread()
+                NSLog("MMJ correspondence \(windowController?.debugCorrespondenceThreads ?? "")")
+                if let mode = ProcessInfo.processInfo.environment["MMJ_DEBUG_COLLAPSE"] {
+                    windowController?.debugCollapseFirstThread(expand: mode != "collapse")
+                    if mode == "fold" {
+                        try? await Task.sleep(for: .seconds(1))
+                        windowController?.debugOpenFirstBranch()
+                        try? await Task.sleep(for: .seconds(1))
+                        if ProcessInfo.processInfo.environment["MMJ_DEBUG_LEFT"] != nil {
+                            await windowController?.debugLeftArrows(fromRow: 2, times: 3)
+                        }
+                    }
                     try? await Task.sleep(for: .seconds(1))
                 }
                 var target = windowController?.window

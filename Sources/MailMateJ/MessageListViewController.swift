@@ -53,10 +53,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     var showsThreads = false {
         didSet { if showsThreads != oldValue { updateFromHeader() } }
     }
-    /// Threads whose replies are hidden.
-    var collapsedThreads: Set<String> = []
-    /// Collapse or expand a thread (its chevron, or ← and → on its row).
-    var onToggleThread: ((String, Bool) -> Void)?
+    /// Threads whose replies show; the others are collapsed (threads start collapsed, as in MailMate).
+    var expandedThreads: Set<String> = []
+    /// Messages inside open threads whose replies show (branches start folded, as threads do).
+    var openedMessages: Set<Int64> = []
+    /// Fold or open a row's replies (its chevron, or ← and → on it): the whole thread on its first row.
+    var onToggleThread: ((MailStore.ThreadedRow, Bool) -> Void)?
+
+    private func isFolded(_ row: MailStore.ThreadedRow) -> Bool {
+        row.depth == 0 ? !expandedThreads.contains(row.thread) : !openedMessages.contains(row.id)
+    }
 
     private static let blockSize = 150
     private static let cacheLimit = 3000
@@ -216,6 +222,34 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     /// Replaces the list without firing `onSelectionChange`. `selecting: nil` keeps the current
     /// selection (where those messages still exist); `[]` clears it.
+    /// Shows the replies under `id` opening or closing, with the rows sliding in or out as MailMate
+    /// animates its threads. Returns false if the new list differs in any other way (reload instead).
+    func animateBranch(of id: Int64, to newIDs: [Int64], selecting: [Int64]) -> Bool {
+        guard let row = ids.firstIndex(of: id), newIDs.firstIndex(of: id) == row else { return false }
+        let start = row + 1, delta = newIDs.count - ids.count
+        let (longer, shorter) = delta >= 0 ? (newIDs, ids) : (ids, newIDs)
+        let count = abs(delta)
+        guard longer[..<start] == shorter[..<start], longer[(start + count)...] == shorter[start...] else { return false }
+        #if DEBUG
+            NSLog("MMJ animateBranch: \(delta > 0 ? "insert" : "remove") \(count) row(s) after row \(row)")
+        #endif
+        suppressSelection = true
+        ids = newIDs
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            if delta > 0 {
+                tableView.insertRows(at: IndexSet(start..<(start + count)), withAnimation: .slideDown)
+            } else if delta < 0 {
+                tableView.removeRows(at: IndexSet(start..<(start + count)), withAnimation: .slideUp)
+            }
+        }
+        // The toggled row's chevron turns.
+        tableView.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        tableView.selectRowIndexes(IndexSet(selecting.compactMap { newIDs.firstIndex(of: $0) }), byExtendingSelection: false)
+        suppressSelection = false
+        return true
+    }
+
     func setIDs(_ newIDs: [Int64], selecting: [Int64]? = nil, scroll: Scroll = .keepPosition) {
         let wanted = selecting ?? selectedIDs
         let anchor = scrollAnchor
@@ -285,15 +319,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .unread:
             // A collapsed thread is unread if any of its messages is; read and replied shows the arrow.
             let thread = threadRows[row.id]
-            let unread = !row.isSeen || (thread.map { $0.anyUnread && collapsedThreads.contains($0.thread) } ?? false)
+            let unread = !row.isSeen || (thread.map { $0.anyUnread && !expandedThreads.contains($0.thread) } ?? false)
             if unread { return iconCell(tableView, column, image: Self.unreadDot, tint: .controlAccentColor) }
             return iconCell(tableView, column, image: row.isAnswered ? Self.repliedArrow : nil, tint: .labelColor)
         case .flag:
             return iconCell(tableView, column, image: row.isFlagged ? Self.rowFlag : nil, tint: .systemRed)
         case .attachment:
             return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
-        case .from where showsThreads:
-            return fromCell(tableView, row, thread: threadRows[row.id])
+        case threadColumn where showsThreads:
+            let text = column == .from ? row.fromDisplay : (row.subject.isEmpty ? "(no subject)" : row.subject)
+            return threadCell(tableView, row, text: text, thread: threadRows[row.id])
         case .from:
             return textCell(tableView, column, row.fromDisplay, bold: !row.isSeen)
         case .subject:
@@ -492,33 +527,37 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     // MARK: Threads
 
+    /// The column with the chevrons and indents: From, or Subject in a list without From (Correspondence).
+    private var threadColumn: Column { columns.contains(.from) ? .from : .subject }
+
     /// In a threaded list MailMate lines the From header up with the senders, past the chevrons.
     private func updateFromHeader() {
-        guard let column = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(Column.from.rawValue)) else {
+        guard let column = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(threadColumn.rawValue)) else {
             return
         }
         let style = NSMutableParagraphStyle()
         style.firstLineHeadIndent = showsThreads ? 12 : 0
         style.lineBreakMode = .byTruncatingTail
-        column.headerCell.attributedStringValue = NSAttributedString(string: Column.from.title, attributes: [
+        column.headerCell.attributedStringValue = NSAttributedString(string: threadColumn.title, attributes: [
             .paragraphStyle: style, .font: column.headerCell.font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
         ])
         tableView.headerView?.needsDisplay = true
     }
 
-    /// MailMate's From cell in a threaded list (measured at 1x): text 20 px past the column's left edge
-    /// on every row, replies 8 px further, and an 8 × 5 px chevron 4 px in on a thread's first row.
-    private func fromCell(_ tableView: NSTableView, _ row: MessageRow, thread: MailStore.ThreadedRow?) -> NSView {
-        let id = NSUserInterfaceItemIdentifier("from")
+    /// MailMate's From cell in a threaded list (measured at 1x): text 20 px past the column's left edge,
+    /// 8 px further per level of replies, and an 8 × 5 px chevron 16 px before the text on every message
+    /// with replies.
+    private func threadCell(_ tableView: NSTableView, _ row: MessageRow, text: String, thread: MailStore.ThreadedRow?) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("thread")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? ThreadFromCell ?? ThreadFromCell(identifier: id)
         cell.textField?.font = Self.font(bold: !row.isSeen)
-        cell.textField?.stringValue = row.fromDisplay
+        cell.textField?.stringValue = text
         cell.depth = thread?.depth ?? 0
-        if let thread, thread.size > 1 {
-            let collapsed = collapsedThreads.contains(thread.thread)
+        if let thread, thread.hasReplies {
+            let collapsed = isFolded(thread)
             cell.chevron.isHidden = false
             cell.chevron.image = collapsed ? Self.chevronRight : Self.chevronDown
-            cell.onToggle = { [weak self] in self?.onToggleThread?(thread.thread, collapsed) }
+            cell.onToggle = { [weak self] in self?.onToggleThread?(thread, !collapsed) }
         } else {
             cell.chevron.isHidden = true
             cell.onToggle = nil
@@ -529,12 +568,20 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private static let chevronDown = cellSymbol("chevron.down", pointSize: 9, weight: .semibold, top: 7, width: 14)
     private static let chevronRight = cellSymbol("chevron.right", pointSize: 9, weight: .semibold, top: 5, width: 14)
 
-    /// ← collapses the selected row's thread, → expands it (as in MailMate). Returns whether it acted.
+    /// As in MailMate's outline: → opens the selected message's replies; ← folds them, or, on a message
+    /// with none showing, selects the message it replies to (so a second ← folds that one). Returns
+    /// whether it acted.
     private func arrowKey(expand: Bool) -> Bool {
         guard showsThreads, let id = selectedID, let thread = threadRows[id] else { return false }
-        let isOpen = !collapsedThreads.contains(thread.thread)
-        guard thread.size > 1 || thread.depth > 0, isOpen != expand else { return false }
-        onToggleThread?(thread.thread, !expand)
+        if thread.hasReplies, isFolded(thread) == expand {
+            onToggleThread?(thread, !expand)
+            return true
+        }
+        guard !expand, thread.depth > 0, let row = ids.firstIndex(of: id),
+            let parent = ids[..<row].lastIndex(where: { threadRows[$0]?.depth == thread.depth - 1 })
+        else { return false }
+        tableView.selectRowIndexes([parent], byExtendingSelection: false)
+        tableView.scrollRowToVisible(parent)
         return true
     }
 
@@ -726,9 +773,13 @@ final class ThreadFromCell: NSTableCellView {
     let chevron = NSButton()
     var onToggle: (() -> Void)?
     private var leading: NSLayoutConstraint!
+    private var chevronLeading: NSLayoutConstraint!
 
     var depth = 0 {
-        didSet { leading.constant = 15 + CGFloat(depth) * 8 }
+        didSet {
+            leading.constant = 15 + CGFloat(depth) * 8  // 8 px a level, as deep as the thread goes
+            chevronLeading.constant = -3 + CGFloat(depth) * 8
+        }
     }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -747,11 +798,12 @@ final class ThreadFromCell: NSTableCellView {
         addSubview(chevron)
         textField = field
         leading = field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 15)
+        chevronLeading = chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -3)
         NSLayoutConstraint.activate([
             leading,
+            chevronLeading,
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
-            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -3),
             chevron.topAnchor.constraint(equalTo: topAnchor),
             chevron.widthAnchor.constraint(equalToConstant: 14),
             chevron.heightAnchor.constraint(equalToConstant: 17),

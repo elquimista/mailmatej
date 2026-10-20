@@ -43,10 +43,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged, threadsChanged }
     /// The main list groups conversations (View → Show Threads), remembered across launches.
     private var showsThreads = UserDefaults.standard.object(forKey: "ShowThreads") as? Bool ?? true
-    /// Threads collapsed in the main list (for this run of the app).
-    private var collapsedThreads: Set<String> = []
+    /// Threads opened in the lists, for this run of the app (threads start collapsed, as in MailMate).
+    private var expandedThreads: Set<String> = []
+    /// Messages inside open threads whose replies show, for this run of the app (all levels start folded).
+    private var openedMessages: Set<Int64> = []
     /// The selection to restore after threads were collapsed, expanded or switched on or off.
     private var selectAfterThreads: [Int64]?
+    /// The row whose replies were just opened or closed, so the change can animate.
+    private var toggledRow: Int64?
+    private var toggledCorrespondenceRow: Int64?
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
 
     init(model: AppModel) {
@@ -190,7 +195,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private func wireUp() {
-        list.onToggleThread = { [weak self] thread, collapse in self?.setThread(thread, collapsed: collapse) }
+        list.onToggleThread = { [weak self] row, collapse in self?.toggle(row, collapse: collapse) }
+        correspondence.onToggleThread = { [weak self] row, collapse in
+            self?.toggle(row, collapse: collapse, inCorrespondence: true)
+        }
         sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
@@ -232,20 +240,28 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let generation = loadGeneration
         let (store, scope, sort) = (model.store, scope, list.sort)
         let search: String? = search.isEmpty ? nil : search
-        let (threaded, collapsed) = (showsThreads, collapsedThreads)
+        let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
         Task {
             let (rows, newest) = await Task.detached(priority: .userInitiated) {
-                (threaded
-                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, collapsed: collapsed)) ?? []
+                let rows = threaded
+                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened)) ?? []
                     : ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
                         MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
-                    },
-                 try? store.newestMessageID(scope: scope, search: search))
+                    }
+                var newest = try? store.newestMessageID(scope: scope, search: search)
+                // New mail inside a collapsed thread is followed to the thread's row.
+                if threaded, let id = newest, !rows.contains(where: { $0.id == id }),
+                    let thread = (try? store.threadInfo(ids: [id]))?.first?.thread
+                {
+                    newest = rows.first { $0.thread == thread }?.id ?? id
+                }
+                return (rows, newest)
             }.value
             guard generation == loadGeneration else { return }
             let ids = rows.map(\.id)
             list.showsThreads = threaded
-            list.collapsedThreads = collapsed
+            list.expandedThreads = expanded
+            list.openedMessages = opened
             list.threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
             let before = list.selectedIDs
             var restoredDisplay: Int64?
@@ -264,7 +280,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .threadsChanged:
                 let wanted = (selectAfterThreads ?? before).filter(ids.contains)
                 selectAfterThreads = nil
-                list.setIDs(ids, selecting: wanted, scroll: .keepPosition)
+                let toggled = toggledRow
+                toggledRow = nil
+                if toggled.map({ list.animateBranch(of: $0, to: ids, selecting: wanted) }) != true {
+                    list.setIDs(ids, selecting: wanted, scroll: .keepPosition)
+                }
             case .searchChanged, .sortChanged:
                 // Keep the selection if it is still in the list; otherwise show the newest message.
                 let kept = before.filter(ids.contains)
@@ -314,7 +334,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         correspondent = email
         // Only mail with this person through the address of mine this message used.
         let mine = try? model.store.myAddress(in: id, myAddresses: model.myAddresses)
-        let ids = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort)) ?? []
+        let flat = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort)) ?? []
+        let ids = threadCorrespondence(flat)
+        // A message inside a collapsed thread is selected through its thread's first row.
+        let selectable: (Int64) -> Int64 = { [correspondence] id in
+            if correspondence.threadRows.isEmpty || flat.isEmpty { return id }
+            guard !ids.contains(id), let thread = self.correspondenceThreadOf[id] else { return id }
+            return ids.first { correspondence.threadRows[$0]?.thread == thread } ?? id
+        }
         if let pending = pendingCorrespondence, pending.mainID == id {
             pendingCorrespondence = nil
             let kept = pending.saved.correspondenceSelection.filter(ids.contains)
@@ -324,11 +351,37 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             }
         }
         if keepSelection {
-            let kept = correspondence.selectedIDs.filter(ids.contains)
-            correspondence.setIDs(ids, selecting: kept.isEmpty ? [id] : kept, scroll: .keepPosition)
+            let kept = (selectAfterCorrespondenceThreads ?? correspondence.selectedIDs).map(selectable).filter(ids.contains)
+            selectAfterCorrespondenceThreads = nil
+            let selecting = kept.isEmpty ? [selectable(id)] : kept
+            let toggled = toggledCorrespondenceRow
+            toggledCorrespondenceRow = nil
+            if toggled.map({ correspondence.animateBranch(of: $0, to: ids, selecting: selecting) }) != true {
+                correspondence.setIDs(ids, selecting: selecting, scroll: .keepPosition)
+            }
         } else {
-            correspondence.setIDs(ids, selecting: [id], scroll: .toSelection)
+            correspondence.setIDs(ids, selecting: [selectable(id)], scroll: .toSelection)
         }
+    }
+
+    /// Thread of each message in the Correspondence pane (collapsed ones included).
+    private var correspondenceThreadOf: [Int64: String] = [:]
+    private var selectAfterCorrespondenceThreads: [Int64]?
+
+    /// The Correspondence pane's rows, grouped into threads when threads are shown (as in the main list).
+    private func threadCorrespondence(_ flat: [Int64]) -> [Int64] {
+        correspondence.showsThreads = showsThreads
+        correspondence.expandedThreads = expandedThreads
+        correspondence.openedMessages = openedMessages
+        guard showsThreads, let info = try? model.store.threadInfo(ids: flat) else {
+            correspondence.threadRows = [:]
+            correspondenceThreadOf = [:]
+            return flat
+        }
+        correspondenceThreadOf = Dictionary(info.map { ($0.id, $0.thread) }, uniquingKeysWith: { a, _ in a })
+        let rows = MailStore.thread(info, expanded: expandedThreads, opened: openedMessages)
+        correspondence.threadRows = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return rows.map(\.id)
     }
 
     private func storeDidChange() {
@@ -392,10 +445,45 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
 
-        /// Collapses the first thread of the main list, as its chevron would.
-        func debugCollapseFirstThread() {
+        var debugCorrespondenceThreads: String {
+            let multi = correspondence.ids.compactMap { correspondence.threadRows[$0] }.filter { $0.size > 1 }
+            return "rows=\(correspondence.ids.count) threads(size>1)=\(multi.map(\.size)) expanded=\(expandedThreads.count)"
+        }
+
+        /// Collapses (or expands) the first thread of the main list, as its chevron would.
+        func debugCollapseFirstThread(expand: Bool = false) {
             guard let root = list.ids.compactMap({ list.threadRows[$0] }).first(where: { $0.size > 1 }) else { return }
-            setThread(root.thread, collapsed: true)
+            setThread(root.thread, collapsed: !expand)
+        }
+
+        /// Selects row `index` of the main list and presses ← `times` times, logging each step.
+        func debugLeftArrows(fromRow index: Int, times: Int) async {
+            list.tableView.selectRowIndexes([index], byExtendingSelection: false)
+            window?.makeFirstResponder(list.tableView)
+            for step in 1...times {
+                guard let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window?.windowNumber ?? 0,
+                    context: nil, characters: String(UnicodeScalar(NSLeftArrowFunctionKey)!), charactersIgnoringModifiers:
+                        String(UnicodeScalar(NSLeftArrowFunctionKey)!), isARepeat: false, keyCode: 123)
+                else { return }
+                list.tableView.keyDown(with: event)
+                try? await Task.sleep(for: .milliseconds(600))
+                let sel = list.selectedID
+                NSLog("MMJ ← \(step): selected row \(list.tableView.selectedRow) depth \(sel.flatMap { list.threadRows[$0]?.depth } ?? -1), rows \(list.ids.count)")
+            }
+        }
+
+        /// Opens the first folded branch below a thread's first row, as its chevron would (animated).
+        func debugOpenFirstBranch() {
+            guard let row = list.ids.compactMap({ list.threadRows[$0] }).first(where: { $0.depth > 0 && $0.hasReplies }) else {
+                return NSLog("MMJ branch: none")
+            }
+            let before = list.ids.count
+            toggle(row, collapse: false)
+            Task {
+                try? await Task.sleep(for: .milliseconds(600))
+                NSLog("MMJ branch opened: rows \(before) -> \(list.ids.count), depths \(list.ids.prefix(4).compactMap { list.threadRows[$0]?.depth })")
+            }
         }
         func debugExpandSidebar(key: String) { sidebar.debugExpand(key: key) }
 
@@ -472,18 +560,56 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// Collapses or expands a thread of the main list. A reply hidden by collapsing hands the selection
     /// to its thread's first message.
-    private func setThread(_ thread: String, collapsed: Bool) {
+    /// Folds or opens a row's replies: the whole thread on its first row, else the branch under it.
+    private func toggle(_ row: MailStore.ThreadedRow, collapse: Bool, inCorrespondence: Bool = false) {
+        if inCorrespondence { toggledCorrespondenceRow = row.id } else { toggledRow = row.id }
+        if row.depth == 0 { return setThread(row.thread, collapsed: collapse, inCorrespondence: inCorrespondence) }
+        if collapse { openedMessages.remove(row.id) } else { openedMessages.insert(row.id) }
+        let source = inCorrespondence ? correspondence : list
+        // A selected message inside the folded branch hands the selection to the folded message.
+        if collapse, source.selectedIDs.contains(where: { isInside($0, branchOf: row.id, rows: source) }) {
+            let kept = source.selectedIDs.filter { !isInside($0, branchOf: row.id, rows: source) } + [row.id]
+            if inCorrespondence { selectAfterCorrespondenceThreads = kept } else { selectAfterThreads = kept }
+        }
+        if inCorrespondence {
+            if selectAfterCorrespondenceThreads == nil { selectAfterCorrespondenceThreads = correspondence.selectedIDs }
+            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
+        } else {
+            reloadList(.threadsChanged)
+            if correspondent != nil { reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true) }
+        }
+    }
+
+    /// Whether `id` is listed after `parent` and deeper, before the list returns to its level.
+    private func isInside(_ id: Int64, branchOf parent: Int64, rows: MessageListViewController) -> Bool {
+        guard let start = rows.ids.firstIndex(of: parent), let depth = rows.threadRows[parent]?.depth else { return false }
+        for other in rows.ids[(start + 1)...] {
+            guard let d = rows.threadRows[other]?.depth, d > depth else { return false }
+            if other == id { return true }
+        }
+        return false
+    }
+
+    /// Collapses or expands a thread in both lists (they share which threads are collapsed).
+    private func setThread(_ thread: String, collapsed: Bool, inCorrespondence: Bool = false) {
         if collapsed {
-            collapsedThreads.insert(thread)
+            expandedThreads.remove(thread)
             let root = list.threadRows.values.first { $0.thread == thread && $0.depth == 0 }?.id
             let selected = list.selectedIDs
             if let root, selected.contains(where: { list.threadRows[$0]?.thread == thread && list.threadRows[$0]?.depth == 1 }) {
                 selectAfterThreads = Array(Set(selected.filter { list.threadRows[$0]?.thread != thread } + [root]))
             }
         } else {
-            collapsedThreads.remove(thread)
+            expandedThreads.insert(thread)
         }
-        reloadList(.threadsChanged)
+        if inCorrespondence {
+            // Only the pane: the main list follows on its next reload, keeping the user's place there.
+            selectAfterCorrespondenceThreads = correspondence.selectedIDs
+            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
+        } else {
+            reloadList(.threadsChanged)
+            if correspondent != nil { reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true) }
+        }
     }
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -495,6 +621,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         showsThreads.toggle()
         UserDefaults.standard.set(showsThreads, forKey: "ShowThreads")
         reloadList(.threadsChanged)
+        if correspondent != nil { reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true) }
     }
 
     /// Opens an account's settings for editing (one settings window at a time).

@@ -111,17 +111,44 @@ import Testing
     }
 
     @Test func threadsGroupConversations() {
+        typealias T = MailStore.ThreadInput
         // Sorted newest first: c2 (t2), b2 (t1, reply), c1 (t2's first), a (t1's first), d (alone).
-        let rows: [(id: Int64, thread: String, at: Double, seen: Bool)] = [
-            (5, "t2", 50, true), (4, "t1", 40, false), (3, "t2", 30, true), (2, "t1", 20, true), (1, "t3", 10, true),
+        let rows = [
+            T(id: 5, thread: "t2", at: 50, seen: true), T(id: 4, thread: "t1", at: 40, seen: false),
+            T(id: 3, thread: "t2", at: 30, seen: true), T(id: 2, thread: "t1", at: 20, seen: true),
+            T(id: 1, thread: "t3", at: 10, seen: true),
         ]
-        let open = MailStore.thread(rows, collapsed: [])
+        let open = MailStore.thread(rows, expanded: ["t1", "t2", "t3"])
         #expect(open.map(\.id) == [3, 5, 2, 4, 1])  // each thread where it first sorts, oldest message first
-        #expect(open.map(\.depth) == [0, 1, 0, 1, 0])
+        #expect(open.map(\.depth) == [0, 1, 0, 1, 0])  // no In-Reply-To: replies under the first
         #expect(open.map(\.size) == [2, 1, 2, 1, 1])
         #expect(open.first { $0.id == 2 }?.anyUnread == true)  // its reply is unread
-        let folded = MailStore.thread(rows, collapsed: ["t1"])
-        #expect(folded.map(\.id) == [3, 5, 2, 1])
+        #expect(MailStore.thread(rows, expanded: ["t2"]).map(\.id) == [3, 5, 2, 1])
+        #expect(MailStore.thread(rows, expanded: []).map(\.id) == [3, 2, 1])  // threads start collapsed
+    }
+
+    @Test func threadsNestReplies() {
+        typealias T = MailStore.ThreadInput
+        // a ← b ← d, a ← c, and e replying to a message not in the list.
+        let rows = [
+            T(id: 1, thread: "t", at: 10, seen: true, messageId: "a"),
+            T(id: 2, thread: "t", at: 20, seen: true, messageId: "b", inReplyTo: "a"),
+            T(id: 3, thread: "t", at: 30, seen: true, messageId: "c", inReplyTo: "a"),
+            T(id: 4, thread: "t", at: 40, seen: true, messageId: "d", inReplyTo: "b"),
+            T(id: 5, thread: "t", at: 50, seen: true, messageId: "e", inReplyTo: "missing"),
+        ]
+        let tree = MailStore.thread(rows.reversed(), expanded: ["t"], opened: [2])
+        #expect(tree.map(\.id) == [1, 2, 4, 3, 5])
+        #expect(tree.map(\.depth) == [0, 1, 2, 1, 1])
+        #expect(tree.map(\.hasReplies) == [true, true, false, false, false])  // chevrons on 1 and 2
+        // Branches start folded too: without opening 2, its reply (4) is hidden, not its siblings.
+        #expect(MailStore.thread(rows, expanded: ["t"]).map(\.id) == [1, 2, 3, 5])
+        // A loop of In-Reply-To headers still lists every message once.
+        let loop = [
+            T(id: 1, thread: "l", at: 10, seen: true, messageId: "x", inReplyTo: "y"),
+            T(id: 2, thread: "l", at: 20, seen: true, messageId: "y", inReplyTo: "x"),
+        ]
+        #expect(Set(MailStore.thread(loop, expanded: ["l"]).map(\.id)) == [1, 2])
     }
 
     @Test func submailboxScopes() throws {

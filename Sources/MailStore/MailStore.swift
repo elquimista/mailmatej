@@ -544,55 +544,131 @@ public final class MailStore: Sendable {
         public var size: Int
         /// Whether any message of the thread is unread (on its first row).
         public var anyUnread: Bool
+        /// Whether replies hang under this message (it gets a chevron).
+        public var hasReplies: Bool
 
-        public init(id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool) {
+        public init(id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, hasReplies: Bool = false) {
             self.id = id
             self.thread = thread
             self.depth = depth
             self.size = size
             self.anyUnread = anyUnread
+            self.hasReplies = hasReplies
         }
     }
+
+    /// What threading needs to know of a message.
+    public struct ThreadInput: Sendable {
+        public var id: Int64
+        public var thread: String
+        public var at: Double
+        public var seen: Bool
+        /// Its Message-ID and the Message-ID it replies to, which place it in the reply tree.
+        public var messageId: String?
+        public var inReplyTo: String?
+
+        public init(id: Int64, thread: String, at: Double, seen: Bool, messageId: String? = nil, inReplyTo: String? = nil) {
+            self.id = id
+            self.thread = thread
+            self.at = at
+            self.seen = seen
+            self.messageId = messageId
+            self.inReplyTo = inReplyTo
+        }
+
+        init(_ row: Row) {
+            self.init(
+                id: row["id"], thread: row["thread"], at: row["receivedAt"], seen: row["isSeen"],
+                messageId: row["messageIdHeader"], inReplyTo: row["inReplyTo"])
+        }
+    }
+
+    private static let threadColumns =
+        "m.id, m.accountId || ':' || m.threadId AS thread, m.receivedAt, m.isSeen, m.messageIdHeader, m.inReplyTo"
 
     /// A list's messages grouped into conversations, as MailMate shows threads: each thread where its
-    /// first message in `sort` order would be, its oldest message first and the replies after it (oldest
-    /// first, one level in). Replies of threads in `collapsed` are left out.
+    /// first message in `sort` order would be, as a reply tree (see `thread`). Threads start collapsed,
+    /// as in MailMate, at every level: replies show only for threads in `expanded`, and replies to a
+    /// reply only under messages in `opened`.
     public func threadedMessages(
-        scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, collapsed: Set<String> = []
+        scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, expanded: Set<String> = [],
+        opened: Set<Int64> = []
     ) throws -> [ThreadedRow] {
         let (filter, args) = Self.filter(scope: scope, search: search)
-        let sql = """
-            SELECT m.id, m.accountId || ':' || m.threadId AS thread, m.receivedAt, m.isSeen FROM message m
-            WHERE \(filter) ORDER BY \(Self.orderBy(sort))
-            """
-        let rows = try dbPool.read { db in
-            try Row.fetchAll(db, sql: sql, arguments: args).map {
-                (id: $0["id"] as Int64, thread: $0["thread"] as String, at: $0["receivedAt"] as Double, seen: $0["isSeen"] as Bool)
-            }
-        }
-        return Self.thread(rows, collapsed: collapsed)
+        let sql = "SELECT \(Self.threadColumns) FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
+        let rows = try dbPool.read { db in try Row.fetchAll(db, sql: sql, arguments: args).map(ThreadInput.init) }
+        return Self.thread(rows, expanded: expanded, opened: opened)
     }
 
-    static func thread(
-        _ rows: [(id: Int64, thread: String, at: Double, seen: Bool)], collapsed: Set<String>
-    ) -> [ThreadedRow] {
+    /// What threading needs to know of these messages, in the given order (missing ones left out).
+    public func threadInfo(ids: [Int64]) throws -> [ThreadInput] {
+        guard !ids.isEmpty else { return [] }
+        let found = try dbPool.read { db in
+            try Row.fetchAll(
+                db, sql: "SELECT \(Self.threadColumns) FROM message m WHERE m.id IN (\(Self.placeholders(ids.count)))",
+                arguments: StatementArguments(ids)
+            ).map(ThreadInput.init)
+        }
+        let byID = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// Groups rows (in list order) into threads. Each thread goes where its first row is, as a reply
+    /// tree: every message under the one it replies to (In-Reply-To), one level deeper, siblings oldest
+    /// first. The oldest message without a parent in the list heads the thread; other parentless ones
+    /// (their parent isn't in this list) hang directly under it.
+    public static func thread(_ rows: [ThreadInput], expanded: Set<String>, opened: Set<Int64> = []) -> [ThreadedRow] {
         var order: [String] = []
-        var members: [String: [(id: Int64, at: Double, seen: Bool)]] = [:]
+        var members: [String: [ThreadInput]] = [:]
         for row in rows {
             if members[row.thread] == nil { order.append(row.thread) }
-            members[row.thread, default: []].append((row.id, row.at, row.seen))
+            members[row.thread, default: []].append(row)
         }
         var result: [ThreadedRow] = []
         result.reserveCapacity(rows.count)
         for thread in order {
             let messages = members[thread]!.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
             let anyUnread = messages.contains { !$0.seen }
-            for (index, message) in messages.enumerated() {
-                if index > 0 && collapsed.contains(thread) { break }
-                result.append(ThreadedRow(
-                    id: message.id, thread: thread, depth: index == 0 ? 0 : 1,
-                    size: index == 0 ? messages.count : 1, anyUnread: index == 0 && anyUnread))
+            let size = messages.count
+            guard size > 1 else {
+                result.append(ThreadedRow(id: messages[0].id, thread: thread, depth: 0, size: 1, anyUnread: anyUnread))
+                continue
             }
+            var byMessageId: [String: Int64] = [:]
+            for m in messages { if let mid = m.messageId, byMessageId[mid] == nil { byMessageId[mid] = m.id } }
+            var children: [Int64: [ThreadInput]] = [:]
+            var roots: [ThreadInput] = []
+            for m in messages {
+                if let parent = m.inReplyTo.flatMap({ byMessageId[$0] }), parent != m.id {
+                    children[parent, default: []].append(m)
+                } else {
+                    roots.append(m)
+                }
+            }
+            let top = roots.first ?? messages[0]
+            children[top.id, default: []].append(contentsOf: roots.dropFirst())
+            children[top.id]?.sort { ($0.at, $0.id) < ($1.at, $1.id) }
+
+            // Replies caught in a loop of In-Reply-To headers aren't reachable from the top; they go under it.
+            var reachable: Set<Int64> = [top.id]
+            var queue = [top.id]
+            while let id = queue.popLast() {
+                for child in children[id] ?? [] where reachable.insert(child.id).inserted { queue.append(child.id) }
+            }
+            children[top.id, default: []].append(contentsOf: messages.filter { !reachable.contains($0.id) })
+
+            result.append(ThreadedRow(id: top.id, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true))
+            guard expanded.contains(thread) else { continue }
+            var placed: Set<Int64> = [top.id]
+            func walk(_ id: Int64, depth: Int) {
+                for child in children[id] ?? [] where placed.insert(child.id).inserted {
+                    let replies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
+                    result.append(ThreadedRow(
+                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, hasReplies: replies))
+                    if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
+                }
+            }
+            walk(top.id, depth: 1)
         }
         return result
     }
