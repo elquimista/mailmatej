@@ -382,8 +382,23 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: [column])
     }
 
+    /// A click changes the selection on mouse-down but reports it only on mouse-up; reporting it while
+    /// it's changing shows (and marks read) the message at once, as the arrow keys do.
+    private var reportedWhileChanging: [Int64]?
+
+    func tableViewSelectionIsChanging(_ notification: Notification) {
+        // Only for the mouse: for the arrow keys this comes before the selection moves.
+        guard !suppressSelection, [.leftMouseDown, .leftMouseDragged].contains(NSApp.currentEvent?.type) else { return }
+        let selection = selectedIDs
+        guard selection != reportedWhileChanging else { return }
+        reportedWhileChanging = selection
+        onSelectionChange?(selectedID)
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelection else { return }
+        defer { reportedWhileChanging = nil }
+        if reportedWhileChanging == selectedIDs { return }  // Already reported on mouse-down.
         onSelectionChange?(selectedID)
     }
 

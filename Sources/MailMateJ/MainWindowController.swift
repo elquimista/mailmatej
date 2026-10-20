@@ -231,6 +231,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
+            #if DEBUG
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: selection reported \(id ?? -1)") }
+            #endif
             pendingCorrespondence = nil  // A new main selection starts the Correspondence pane fresh.
             messageView.show(messageID: id, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: id)
@@ -484,6 +487,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         var debugSelection: [Int64] { list.selectedIDs }
+
 
         /// Selects the newest list row with this subject.
         func debugSelect(subject: String) {
