@@ -512,6 +512,70 @@ public final class MailStore: Sendable {
     // MARK: Messages (reads)
 
     /// Ordered IDs for a list. Cheap even for a million messages; rows are fetched separately.
+    /// One row of a threaded list.
+    public struct ThreadedRow: Sendable, Hashable {
+        public var id: Int64
+        /// Identifies the conversation: the account and its JMAP thread id.
+        public var thread: String
+        /// 0 for a thread's first message, 1 for its replies.
+        public var depth: Int
+        /// How many messages the thread has in this list (on its first row; 1 elsewhere).
+        public var size: Int
+        /// Whether any message of the thread is unread (on its first row).
+        public var anyUnread: Bool
+
+        public init(id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool) {
+            self.id = id
+            self.thread = thread
+            self.depth = depth
+            self.size = size
+            self.anyUnread = anyUnread
+        }
+    }
+
+    /// A list's messages grouped into conversations, as MailMate shows threads: each thread where its
+    /// first message in `sort` order would be, its oldest message first and the replies after it (oldest
+    /// first, one level in). Replies of threads in `collapsed` are left out.
+    public func threadedMessages(
+        scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, collapsed: Set<String> = []
+    ) throws -> [ThreadedRow] {
+        let (filter, args) = Self.filter(scope: scope, search: search)
+        let sql = """
+            SELECT m.id, m.accountId || ':' || m.threadId AS thread, m.receivedAt, m.isSeen FROM message m
+            WHERE \(filter) ORDER BY \(Self.orderBy(sort))
+            """
+        let rows = try dbPool.read { db in
+            try Row.fetchAll(db, sql: sql, arguments: args).map {
+                (id: $0["id"] as Int64, thread: $0["thread"] as String, at: $0["receivedAt"] as Double, seen: $0["isSeen"] as Bool)
+            }
+        }
+        return Self.thread(rows, collapsed: collapsed)
+    }
+
+    static func thread(
+        _ rows: [(id: Int64, thread: String, at: Double, seen: Bool)], collapsed: Set<String>
+    ) -> [ThreadedRow] {
+        var order: [String] = []
+        var members: [String: [(id: Int64, at: Double, seen: Bool)]] = [:]
+        for row in rows {
+            if members[row.thread] == nil { order.append(row.thread) }
+            members[row.thread, default: []].append((row.id, row.at, row.seen))
+        }
+        var result: [ThreadedRow] = []
+        result.reserveCapacity(rows.count)
+        for thread in order {
+            let messages = members[thread]!.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
+            let anyUnread = messages.contains { !$0.seen }
+            for (index, message) in messages.enumerated() {
+                if index > 0 && collapsed.contains(thread) { break }
+                result.append(ThreadedRow(
+                    id: message.id, thread: thread, depth: index == 0 ? 0 : 1,
+                    size: index == 0 ? messages.count : 1, anyUnread: index == 0 && anyUnread))
+            }
+        }
+        return result
+    }
+
     public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil) throws
         -> [Int64]
     {

@@ -5,7 +5,7 @@ import SwiftUI
 
 /// The Correspondence layout: sidebar | (message list over (correspondence | message)).
 @MainActor
-final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolbarItemValidation, NSWindowDelegate {
+final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolbarItemValidation, NSMenuItemValidation, NSWindowDelegate {
     private let model: AppModel
     private let sidebar: SidebarViewController
     private let list: MessageListViewController
@@ -40,7 +40,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         var displayed: Int64?
     }
 
-    private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged }
+    private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged, threadsChanged }
+    /// The main list groups conversations (View → Show Threads), remembered across launches.
+    private var showsThreads = UserDefaults.standard.object(forKey: "ShowThreads") as? Bool ?? true
+    /// Threads collapsed in the main list (for this run of the app).
+    private var collapsedThreads: Set<String> = []
+    /// The selection to restore after threads were collapsed, expanded or switched on or off.
+    private var selectAfterThreads: [Int64]?
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
 
     init(model: AppModel) {
@@ -184,6 +190,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private func wireUp() {
+        list.onToggleThread = { [weak self] thread, collapse in self?.setThread(thread, collapsed: collapse) }
         sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
@@ -225,12 +232,21 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let generation = loadGeneration
         let (store, scope, sort) = (model.store, scope, list.sort)
         let search: String? = search.isEmpty ? nil : search
+        let (threaded, collapsed) = (showsThreads, collapsedThreads)
         Task {
-            let (ids, newest) = await Task.detached(priority: .userInitiated) {
-                ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? [],
+            let (rows, newest) = await Task.detached(priority: .userInitiated) {
+                (threaded
+                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, collapsed: collapsed)) ?? []
+                    : ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
+                        MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
+                    },
                  try? store.newestMessageID(scope: scope, search: search))
             }.value
             guard generation == loadGeneration else { return }
+            let ids = rows.map(\.id)
+            list.showsThreads = threaded
+            list.collapsedThreads = collapsed
+            list.threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
             let before = list.selectedIDs
             var restoredDisplay: Int64?
 
@@ -245,6 +261,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 } else {
                     list.setIDs(ids, selecting: [], scroll: .toMessage(newest))
                 }
+            case .threadsChanged:
+                let wanted = (selectAfterThreads ?? before).filter(ids.contains)
+                selectAfterThreads = nil
+                list.setIDs(ids, selecting: wanted, scroll: .keepPosition)
             case .searchChanged, .sortChanged:
                 // Keep the selection if it is still in the list; otherwise show the newest message.
                 let kept = before.filter(ids.contains)
@@ -371,6 +391,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+
+        /// Collapses the first thread of the main list, as its chevron would.
+        func debugCollapseFirstThread() {
+            guard let root = list.ids.compactMap({ list.threadRows[$0] }).first(where: { $0.size > 1 }) else { return }
+            setThread(root.thread, collapsed: true)
+        }
         func debugExpandSidebar(key: String) { sidebar.debugExpand(key: key) }
 
         /// Selects a row of the Correspondence pane, as a click would.
@@ -441,6 +467,35 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?
+
+    // MARK: Threads
+
+    /// Collapses or expands a thread of the main list. A reply hidden by collapsing hands the selection
+    /// to its thread's first message.
+    private func setThread(_ thread: String, collapsed: Bool) {
+        if collapsed {
+            collapsedThreads.insert(thread)
+            let root = list.threadRows.values.first { $0.thread == thread && $0.depth == 0 }?.id
+            let selected = list.selectedIDs
+            if let root, selected.contains(where: { list.threadRows[$0]?.thread == thread && list.threadRows[$0]?.depth == 1 }) {
+                selectAfterThreads = Array(Set(selected.filter { list.threadRows[$0]?.thread != thread } + [root]))
+            }
+        } else {
+            collapsedThreads.remove(thread)
+        }
+        reloadList(.threadsChanged)
+    }
+
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleThreads(_:)) { item.state = showsThreads ? .on : .off }
+        return true
+    }
+
+    @objc func toggleThreads(_ sender: Any?) {
+        showsThreads.toggle()
+        UserDefaults.standard.set(showsThreads, forKey: "ShowThreads")
+        reloadList(.threadsChanged)
+    }
 
     /// Opens an account's settings for editing (one settings window at a time).
     func editAccount(id: String) {

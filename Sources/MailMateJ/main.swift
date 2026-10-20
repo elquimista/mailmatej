@@ -137,6 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     for key in keys.split(separator: ",") { windowController?.debugExpandSidebar(key: String(key)) }
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_COLLAPSE"] != nil {
+                    windowController?.debugCollapseFirstThread()
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SUBMAILBOXES"] != nil {
                     SubmailboxSettingsWindowController.show(key: "unified.inbox", title: "Inbox", over: target)
@@ -255,6 +259,7 @@ enum MainMenu {
             .keyEquivalentModifierMask = [.command, .option]
 
         let view = submenu(main, "View")
+        view.addItem(withTitle: "Show Threads", action: #selector(MainWindowController.toggleThreads(_:)), keyEquivalent: "")
         view.addItem(withTitle: "Toggle Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s")
             .keyEquivalentModifierMask = [.command, .control]
         view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")

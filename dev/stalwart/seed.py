@@ -307,6 +307,30 @@ def invite(name):
     print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} invite message")
 
 
+def thread(name):
+    """A three-message conversation in the inbox (the first one answered), for the threaded list."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    me = f"{name.capitalize()} <{name}@{DOMAIN}>"
+    now = datetime.now(timezone.utc)
+    ids = [make_msgid(domain="seed.mmj.test") for _ in range(3)]
+    items = []
+    for i, (who, subject, text) in enumerate([
+        ("Grace Hopper <grace@navy.example>", "Thread test", "Shall we meet on Friday?"),
+        ("Grace Hopper <grace@navy.example>", "Re: Thread test", "Or Monday, if Friday doesn't work."),
+        ("Ada Lovelace <ada@analytical.example>", "Re: Thread test", "Monday works for me too."),
+    ]):
+        refs = ids[:i]
+        headers = [f"From: {who}", f"To: {me}", f"Subject: {subject}",
+                   f"Date: {format_datetime(now - timedelta(minutes=30 - i * 10))}", f"Message-ID: {ids[i]}"]
+        if refs:
+            headers += [f"In-Reply-To: {refs[-1]}", f"References: {' '.join(refs)}"]
+        raw = "\r\n".join(headers + ["MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "", text, ""])
+        keywords = {"$seen": True, "$answered": True} if i == 0 else {}
+        items.append((raw, [inbox], keywords, now - timedelta(minutes=30 - i * 10)))
+    print(f"  {name}: imported {import_batch(auth, account, items)} thread messages")
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -327,6 +351,7 @@ def main():
     p.add_argument("--rich", metavar="USER")
     p.add_argument("--attachments", metavar="USER")
     p.add_argument("--invite", metavar="USER")
+    p.add_argument("--thread", metavar="USER")
     args = p.parse_args()
     random.seed(42)
     if args.live:
@@ -337,6 +362,8 @@ def main():
         return attachments(args.attachments)
     if args.invite:
         return invite(args.invite)
+    if args.thread:
+        return thread(args.thread)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)

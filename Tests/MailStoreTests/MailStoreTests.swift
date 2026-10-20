@@ -96,6 +96,20 @@ import Testing
         #expect(try store.myAddresses().contains("support@other.com"))
     }
 
+    @Test func threadsGroupConversations() {
+        // Sorted newest first: c2 (t2), b2 (t1, reply), c1 (t2's first), a (t1's first), d (alone).
+        let rows: [(id: Int64, thread: String, at: Double, seen: Bool)] = [
+            (5, "t2", 50, true), (4, "t1", 40, false), (3, "t2", 30, true), (2, "t1", 20, true), (1, "t3", 10, true),
+        ]
+        let open = MailStore.thread(rows, collapsed: [])
+        #expect(open.map(\.id) == [3, 5, 2, 4, 1])  // each thread where it first sorts, oldest message first
+        #expect(open.map(\.depth) == [0, 1, 0, 1, 0])
+        #expect(open.map(\.size) == [2, 1, 2, 1, 1])
+        #expect(open.first { $0.id == 2 }?.anyUnread == true)  // its reply is unread
+        let folded = MailStore.thread(rows, collapsed: ["t1"])
+        #expect(folded.map(\.id) == [3, 5, 2, 1])
+    }
+
     @Test func submailboxScopes() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100, keywords: ["$flagged"]),
