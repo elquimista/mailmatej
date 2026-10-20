@@ -276,6 +276,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             list.threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
             let before = list.selectedIDs
             var restoredDisplay: Int64?
+            // Where the newest mail is: the list's end when sorted by date (with threads, the newest
+            // message may sit inside a thread elsewhere), otherwise the newest message's row.
+            let newestEnd = sort.key == .receivedAt ? (sort.ascending ? ids.last : ids.first) : newest
 
             switch reason {
             case .scopeChanged where pendingHistorySelection.map(ids.contains) == true:
@@ -289,7 +292,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                         restoredDisplay = saved.displayed
                     }
                 } else {
-                    list.setIDs(ids, selecting: [], scroll: .toMessage(newest))
+                    list.setIDs(ids, selecting: [], scroll: .toMessage(newestEnd))
                 }
             case .threadsChanged:
                 let wanted = (selectAfterThreads ?? before).filter(ids.contains)
@@ -302,7 +305,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .searchChanged, .sortChanged:
                 // Keep the selection if it is still in the list; otherwise show the newest message.
                 let kept = before.filter(ids.contains)
-                list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newest) : .toSelection)
+                list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newestEnd) : .toSelection)
             case .dataChanged where selectAfterMove != nil:
                 // Right after Archive/Junk/Delete: if the messages left the list, select the next one.
                 let next = selectAfterMove!
@@ -311,11 +314,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 list.setIDs(ids, selecting: left && ids.contains(next) ? [next] : nil, scroll: .keepPosition)
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
-                // When sorted by date and the newest message was in view, follow new mail to the
-                // top (or bottom); if the user scrolled away from it, keep their position.
+                // When sorted by date and the end new mail arrives at (the top, or the bottom when oldest
+                // first) is in view, it stays in view as mail arrives; if the user scrolled away, their
+                // position is kept. (The end, not the newest message: with threads that can be a reply
+                // listed under its thread's first message, far from where the user is reading.)
                 let wasEmpty = list.ids.isEmpty
-                let following = sort.key == .receivedAt && list.isFullyVisible(lastNewestID)
-                list.setIDs(ids, scroll: wasEmpty || (following && newest != lastNewestID) ? .toMessage(newest) : .keepPosition)
+                let edge = sort.ascending ? list.ids.last : list.ids.first
+                let following = sort.key == .receivedAt && list.isFullyVisible(edge)
+                let newEdge = sort.ascending ? ids.last : ids.first
+                #if DEBUG
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_FOLLOW"] != nil {
+                        NSLog("MMJ follow: following=\(following) edge \(edge ?? -1) -> \(newEdge ?? -1) rows \(list.ids.count) -> \(ids.count)")
+                    }
+                #endif
+                list.setIDs(
+                    ids,
+                    scroll: wasEmpty ? .toMessage(newestEnd) : following && newEdge != edge ? .toMessage(newEdge) : .keepPosition)
             }
             lastNewestID = newest
 

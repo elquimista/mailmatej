@@ -209,7 +209,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             visible.origin.y += header - clip.contentInsets.top
             visible.size.height -= header - clip.contentInsets.top
         }
-        return visible.contains(tableView.rect(ofRow: row).insetBy(dx: 0, dy: 1))
+        // Vertically only: rows can be a little wider than the visible area (column widths).
+        let rect = tableView.rect(ofRow: row)
+        return rect.minY + 1 >= visible.minY && rect.maxY - 1 <= visible.maxY
     }
 
     var scrollAnchor: ScrollAnchor? {
