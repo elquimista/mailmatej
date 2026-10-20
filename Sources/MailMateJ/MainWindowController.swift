@@ -770,7 +770,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private static func toolbarButton(
         symbol: String, pointSize: CGFloat, weight: NSFont.Weight = .regular, label: String, width: CGFloat
     ) -> NSButton {
-        let button = NSButton()
+        let button = ToolbarIconButton()
         button.bezelStyle = .toolbar
         button.showsBorderOnlyWhileMouseInside = true
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
@@ -958,7 +958,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// to button within a group, 46 pt between groups, symbols 15 px tall (measured at 1x).
     private func actionGroupItem(_ id: NSToolbarItem.Identifier, _ buttons: [ActionButton]) -> NSToolbarItem {
         let views = buttons.map { b -> NSButton in
-            let button = NSButton()
+            let button = ToolbarIconButton()
             button.bezelStyle = .toolbar
             button.showsBorderOnlyWhileMouseInside = true
             button.image = NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)?
@@ -972,12 +972,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return button
         }
         var arranged: [NSView] = views
+        var arrow: NSButton?
         if views.contains(where: { $0.action == #selector(toggleFlag(_:)) }) {
             // MailMate's small arrow beside Flag, with Flag and Unflag.
-            let arrow = Self.toolbarButton(symbol: "chevron.down", pointSize: 8, label: "Flag Options", width: 14)
-            arrow.target = self
-            arrow.action = #selector(showFlagMenu(_:))
-            arranged.append(arrow)
+            let button = Self.toolbarButton(symbol: "chevron.down", pointSize: 8, label: "Flag Options", width: 14)
+            button.target = self
+            button.action = #selector(showFlagMenu(_:))
+            arranged.append(button)
+            arrow = button
         }
         let stack = SeparatedStackView(views: arranged)
         stack.spacing = 8
@@ -1009,6 +1011,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 default: button.isEnabled = hasTarget
                 }
             }
+            arrow?.isEnabled = hasTarget
         }
         return item
     }
@@ -1102,6 +1105,33 @@ final class MenuAction: NSObject {
 
 /// A toolbar group whose buttons are divided by thin lines, as MailMate's are (measured at 1x: 1 px wide,
 /// 14 px tall, centered between the buttons).
+/// A toolbar button in MailMate's two shades (measured at 1x on its 72 toolbar): icons at 196 when
+/// enabled, 111 when not. AppKit's own dimming of disabled images is off, so the shades are exact.
+final class ToolbarIconButton: NSButton {
+    static let enabledColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.64) : NSColor(white: 0, alpha: 0.66)
+    }
+    static let disabledColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.175) : NSColor(white: 0, alpha: 0.2)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        (cell as? NSButtonCell)?.imageDimsWhenDisabled = false
+        updateTint()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isEnabled: Bool {
+        didSet { updateTint() }
+    }
+
+    private func updateTint() {
+        contentTintColor = isEnabled ? Self.enabledColor : Self.disabledColor
+    }
+}
+
 final class SeparatedStackView: NSStackView {
     /// Slightly lighter than the toolbar in dark mode, as MailMate draws its dividers (86 on 72);
     /// slightly darker in light mode.
@@ -1146,7 +1176,7 @@ final class TagToolbarControl: NSControl {
         SeparatedStackView.lineColor.setFill()
         NSRect(x: 30, y: (bounds.midY - 7).rounded(), width: 1, height: 14).fill()
 
-        let color: NSColor = isEnabled ? .labelColor : .tertiaryLabelColor
+        let color: NSColor = isEnabled ? ToolbarIconButton.enabledColor : ToolbarIconButton.disabledColor
         let title = NSAttributedString(string: "Tag", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: color])
         let size = title.size()
         title.draw(at: NSPoint(x: 5, y: ((bounds.height - size.height) / 2).rounded()))
