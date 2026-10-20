@@ -172,6 +172,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         content.splitView.identifier = .init("ContentSplit")
 
         let root = NSSplitViewController()
+        // MailMate's 1 px black line beside the sidebar (AppKit draws none for a sidebar that isn't full height).
+        root.splitView = SidebarSplitView()
+        root.splitView.isVertical = true
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         sidebarItem.minimumThickness = 180
         sidebarItem.maximumThickness = 400
@@ -1133,6 +1136,12 @@ final class CorrespondenceSplitView: NSSplitView {
         NSColor(srgbRed: 154 / 255, green: 154 / 255, blue: 158 / 255, alpha: 1).setFill()  // Shows as (168, 168, 172).
         NSRect(x: rect.minX + 1, y: rect.minY, width: rect.width - 1, height: rect.height).fill()
     }
+}
+
+/// The divider between the sidebar and the lists, as MailMate draws it (measured at 1x): 1 px, black.
+final class SidebarSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 1 }
+    override var dividerColor: NSColor { .black }
 }
 
 /// A toolbar item made of its own buttons, which the toolbar's regular validation passes keep current.
