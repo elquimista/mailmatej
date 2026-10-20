@@ -861,7 +861,9 @@ public final class MailStore: Sendable {
         public init() {}
     }
 
-    public func counts() throws -> Counts {
+    /// Badge counts. `flaggedByMailbox`, which reads every flagged message, only when Flagged is split
+    /// by source mailbox.
+    public func counts(flaggedByMailbox needsFlaggedByMailbox: Bool = false) throws -> Counts {
         try dbPool.read { db in
             var c = Counts()
             for row in try Row.fetchAll(
@@ -875,14 +877,16 @@ public final class MailStore: Sendable {
                 c.unreadByAccount[row["accountId"]] = row["n"]
             }
             c.flagged = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message WHERE isFlagged") ?? 0
-            for row in try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT mm.mailboxId, COUNT(*) AS n FROM message m JOIN message_mailbox mm ON mm.messageId = m.id
-                    WHERE m.isFlagged GROUP BY mm.mailboxId
-                    """)
-            {
-                c.flaggedByMailbox[row["mailboxId"]] = row["n"]
+            if needsFlaggedByMailbox {
+                for row in try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT mm.mailboxId, COUNT(*) AS n FROM message m JOIN message_mailbox mm ON mm.messageId = m.id
+                        WHERE m.isFlagged GROUP BY mm.mailboxId
+                        """)
+                {
+                    c.flaggedByMailbox[row["mailboxId"]] = row["n"]
+                }
             }
             for row in try Row.fetchAll(db, sql: "SELECT accountId, COUNT(*) AS n FROM message WHERE isFlagged GROUP BY accountId") {
                 c.flaggedByAccount[row["accountId"]] = row["n"]

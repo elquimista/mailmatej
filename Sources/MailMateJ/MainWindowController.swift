@@ -452,6 +452,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+        var debugInboxBadge: Int { sidebar.debugInboxBadge }
 
         var debugCorrespondenceThreads: String {
             let multi = correspondence.ids.compactMap { correspondence.threadRows[$0] }.filter { $0.size > 1 }

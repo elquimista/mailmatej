@@ -161,7 +161,7 @@ import Testing
         #expect(try store.messageIDs(scope: .flaggedInMailbox(inbox.id)).count == 1)
         #expect(try store.messageIDs(scope: .flaggedInAccount("acc")).count == 2)
         #expect(try store.messageIDs(scope: .allInAccount("acc")).count == 2)  // not the one in Trash
-        let counts = try store.counts()
+        let counts = try store.counts(flaggedByMailbox: true)
         #expect(counts.flaggedByMailbox[inbox.id] == 1)
         #expect(counts.flaggedByAccount["acc"] == 2)
     }

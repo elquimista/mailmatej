@@ -7,7 +7,7 @@ final class SidebarNode: NSObject {
 
     let key: String
     let kind: Kind
-    let title: String
+    var title: String
     let symbol: String
     let scope: MessageScope?
     let accountId: String?
@@ -137,6 +137,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         reconfigureVisibleRows()
     }
 
+    /// Every row's key, in tree order: equal when the rows are the same.
+    private static func keys(_ nodes: [SidebarNode]) -> [String] {
+        nodes.flatMap { [$0.key] + keys($0.children) }
+    }
+
     private func reconfigureVisibleRows() {
         let rows = outline.rows(in: outline.visibleRect)
         for row in rows.location..<(rows.location + rows.length) {
@@ -149,8 +154,31 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Rebuilds the tree from the store, keeping expansion and selection.
     func reload() {
+        let fresh = Self.buildTree(model: model)
+        // Usually only counts and states changed: update the rows in place, so nothing is reloaded or
+        // re-expanded (which made expanding a row stutter while mail synced). Rebuild when rows come or go.
+        if Self.keys(fresh) == Self.keys(roots) {
+            var old: [String: SidebarNode] = [:]
+            func index(_ nodes: [SidebarNode]) { for n in nodes { old[n.key] = n; index(n.children) } }
+            index(roots)
+            func update(_ nodes: [SidebarNode]) {
+                for n in nodes {
+                    if let node = old[n.key] {
+                        node.badge = n.badge
+                        node.warning = n.warning
+                        node.info = n.info
+                        node.role = n.role
+                        node.title = n.title
+                    }
+                    update(n.children)
+                }
+            }
+            update(fresh)
+            refreshStatuses()
+            return
+        }
         let selectedKey = selectedNode?.key ?? "unified.inbox"
-        roots = Self.buildTree(model: model)
+        roots = fresh
         isReloading = true
         defer { isReloading = false }
         suppressSelection = true
@@ -174,6 +202,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func debugExpand(key: String) {
             if let node = find(key, in: roots) { outline.expandItem(node) }
         }
+
+        var debugInboxBadge: Int { find("unified.inbox", in: roots)?.badge ?? -1 }
 
         func debugSelect(key: String) {
             guard let node = find(key, in: roots) else { return }
@@ -208,7 +238,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let store = model.store
         let accounts = (try? store.accounts()) ?? []
         let mailboxes = (try? store.mailboxes()) ?? []
-        let counts = (try? store.counts()) ?? MailStore.Counts()
+        let counts = (try? store.counts(
+            flaggedByMailbox: SubmailboxSettings.settings(for: "unified.flagged").splitsBySource)) ?? MailStore.Counts()
         let roles = Set(mailboxes.compactMap(\.role))
 
         let unified = SidebarNode(key: "header.mailboxes", kind: .header, title: "Mailboxes")
@@ -405,14 +436,28 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
         expandedKeys.insert(node.key)
         UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
-        if !isReloading { refreshStatuses() }
+        if !isReloading { refreshStatusesAfterAnimation() }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
         expandedKeys.remove(node.key)
         UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
-        if !isReloading { refreshStatuses() }
+        if !isReloading { refreshStatusesAfterAnimation() }
+    }
+
+    private var statusRefreshPending = false
+
+    /// Expanding or collapsing only changes whether a row shows its children's activity; reconfiguring
+    /// the rows during the outline's slide made it stutter, so the refresh waits until it's done.
+    private func refreshStatusesAfterAnimation() {
+        guard !statusRefreshPending else { return }
+        statusRefreshPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            statusRefreshPending = false
+            refreshStatuses()
+        }
     }
 
     // MARK: Context menu

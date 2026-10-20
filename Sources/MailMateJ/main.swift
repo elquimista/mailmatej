@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectSidebar(key: key)  // e.g. account.dev-carol
                     try? await Task.sleep(for: .seconds(1))
                 }
+                NSLog("MMJ inbox badge before: \(windowController?.debugInboxBadge ?? -1)")
                 if let steps = Int(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_STEPS"] ?? "") {
                     for _ in 0..<steps {
                         windowController?.debugSelectNextMessage()
@@ -154,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(1))
                 }
+                NSLog("MMJ inbox badge after: \(windowController?.debugInboxBadge ?? -1)")
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SUBMAILBOXES"] != nil {
                     SubmailboxSettingsWindowController.show(key: "unified.inbox", title: "Inbox", over: target)
