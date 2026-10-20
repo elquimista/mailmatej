@@ -97,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     await controller.debugType("n")  // Brings the window forward with a message selected.
                     NSLog("MMJ menu: \(controller.debugMessageMenu())")
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_ROWS"] != nil { windowController?.debugRowFrames() }
+                if let mode = ProcessInfo.processInfo.environment["MMJ_DEBUG_HEADER"] {
+                    windowController?.debugHeader(toggle: mode == "toggle")
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_KEYS"] {
                     // Keys typed as a user would; "|filter" after a v or gl chooses in the mailbox picker.
                     for part in keys.split(separator: " ") {

@@ -37,7 +37,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onEditAccount: ((String) -> Void)?
 
     private let model: AppModel
-    private let outline = NSOutlineView()
+    private let outline = SidebarOutlineView()
+    /// Sections (Mailboxes, Sources) the user hid with the header's Hide, remembered across launches.
+    private var hiddenSections = Set(UserDefaults.standard.stringArray(forKey: "SidebarHiddenSections") ?? [])
     private var roots: [SidebarNode] = []
     private var expandedKeys: Set<String>
     private var suppressSelection = false
@@ -183,7 +185,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         defer { isReloading = false }
         suppressSelection = true
         outline.reloadData()
-        for root in roots {
+        for root in roots where !hiddenSections.contains(root.key) {
             outline.expandItem(root)
             expandRemembered(root.children)
         }
@@ -196,7 +198,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     #if DEBUG
+        /// Shows the first header as hovered (Hide visible); with `toggle`, hides its section too.
+        func debugHeader(toggle: Bool) {
+            guard let header = roots.first, let cell = outline.view(atColumn: 0, row: outline.row(forItem: header), makeIfNecessary: false) as? SidebarHeaderCell
+            else { return NSLog("MMJ header: none") }
+            cell.mouseEntered(with: NSEvent())
+            if toggle { toggleSection(header) }
+            NSLog("MMJ header: rows \(outline.numberOfRows), expanded \(outline.isItemExpanded(header)), hidden \(hiddenSections)")
+        }
+
         func debugFocus() { view.window?.makeFirstResponder(outline) }
+
+        /// Logs each header's row frame and its neighbours'.
+        func debugRowFrames() {
+            for root in roots {
+                let row = outline.row(forItem: root)
+                guard row >= 0 else { continue }
+                let frames = (max(0, row - 1)...min(outline.numberOfRows - 1, row + 1)).map { NSStringFromRect(outline.rect(ofRow: $0)) }
+                NSLog("MMJ rows around \(root.title) (row \(row)): \(frames) intercell \(outline.intercellSpacing)")
+            }
+        }
 
         /// Selects the item with `key` as a click would (fires `onSelect`).
         func debugExpand(key: String) {
@@ -414,8 +435,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     // MARK: Delegate
 
-    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
-        (item as? SidebarNode)?.kind == .header
+    // Headers aren't AppKit group rows: the source-list style puts 13 pt of space above every group row
+    // but the first, where MailMate keeps "Sources" close to the rows above it. (Their look is ours anyway.)
+
+    /// Section headers as MailMate spaces them (measured at 1x): 15 px from the toolbar to the title's
+    /// capitals, 28 px from them to the middle of the first row.
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        guard let node = item as? SidebarNode, node.kind == .header else { return outlineView.rowHeight }
+        return node === roots.first ? SidebarHeaderCell.firstRowHeight : SidebarHeaderCell.rowHeight
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
@@ -426,26 +453,35 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let node = item as? SidebarNode else { return nil }
         if node.kind == .header {
             let id = NSUserInterfaceItemIdentifier("header")
-            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-                let cell = NSTableCellView()
-                cell.identifier = id
-                let field = NSTextField(labelWithString: "")
-                field.translatesAutoresizingMaskIntoConstraints = false
-                cell.addSubview(field)
-                cell.textField = field
-                NSLayoutConstraint.activate([
-                    field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                    field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                ])
-                return cell
-            }()
-            cell.textField?.stringValue = node.title
+            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarHeaderCell ?? SidebarHeaderCell(identifier: id)
+            cell.title = node.title
+            cell.isFirst = node === roots.first
+            cell.isHidingSection = hiddenSections.contains(node.key)
+            cell.onToggle = { [weak self] in self?.toggleSection(node) }
             return cell
         }
         let id = NSUserInterfaceItemIdentifier("item")
         let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
         cell.configure(node)
         return cell
+    }
+
+    /// Hide or Show on a section header: folds the section away or brings it back (with its folders as
+    /// they were), as in MailMate.
+    private func toggleSection(_ node: SidebarNode) {
+        if outline.isItemExpanded(node) {
+            outline.animator().collapseItem(node)
+            hiddenSections.insert(node.key)
+        } else {
+            outline.animator().expandItem(node)
+            expandRemembered(node.children)
+            hiddenSections.remove(node.key)
+        }
+        UserDefaults.standard.set(Array(hiddenSections), forKey: "SidebarHiddenSections")
+        let row = outline.row(forItem: node)
+        if row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarHeaderCell {
+            cell.isHidingSection = hiddenSections.contains(node.key)
+        }
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
@@ -669,5 +705,114 @@ final class SidebarRowView: NSTableRowView {
         let rect = bounds.insetBy(dx: 10, dy: 0)
         (isEmphasized ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor).setFill()
         NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
+    }
+}
+
+/// The sidebar outline. Section headers are top-level rows (not group rows), so: no chevron on them
+/// (they show Hide/Show instead), and the rows under them are drawn one level further left, where they
+/// sat under group rows.
+final class SidebarOutlineView: NSOutlineView {
+    private func isHeader(_ row: Int) -> Bool { (item(atRow: row) as? SidebarNode)?.kind == .header }
+
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect {
+        if isHeader(row) { return .zero }
+        var frame = super.frameOfOutlineCell(atRow: row)
+        if level(forRow: row) > 0 { frame.origin.x -= indentationPerLevel }
+        return frame
+    }
+
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        var frame = super.frameOfCell(atColumn: column, row: row)
+        // Headers start where group rows did, without the room left for a disclosure triangle (11 pt).
+        let shift = isHeader(row) ? 11 : level(forRow: row) > 0 ? indentationPerLevel : 0
+        frame.origin.x -= shift
+        frame.size.width += shift
+        // A header spans to the row's right edge (where Hide sits), as a group row did.
+        if isHeader(row) { frame.size.width = rect(ofRow: row).maxX - frame.minX }
+        return frame
+    }
+}
+
+/// A section header as MailMate draws it (measured at 1x): 12 pt semibold grey title, and "Hide" (or
+/// "Show" once hidden) at the right while the pointer is over the header.
+final class SidebarHeaderCell: NSTableCellView {
+    /// Shows as (181, 181, 181) on the dark sidebar, as MailMate's headers do (explicit sRGB greys draw
+    /// lighter on this display: 166 comes out as 181).
+    static let color = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 166 / 255, green: 166 / 255, blue: 166 / 255, alpha: 1) : .secondaryLabelColor
+    }
+    static let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+    /// The first header (measured at 1x): 15 px from the toolbar to its capitals, 28 px from them to the
+    /// middle of the first row. Later ones: 18.5 px from the middle of the row above, 26.5 px below.
+    static let firstRowHeight: CGFloat = 32
+    static let rowHeight: CGFloat = 22
+
+    private let toggle = NSButton(title: "Hide", target: nil, action: nil)
+    /// Not the cell's `textField`: AppKit restyles that one in a group row (smaller, fainter).
+    private let label = NSTextField(labelWithString: "")
+    var title: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue }
+    }
+    var onToggle: () -> Void = {}
+    private var titleOffset: NSLayoutConstraint!
+    var isFirst = true {
+        didSet { titleOffset.constant = isFirst ? 4 : 2 }
+    }
+    var isHidingSection = false {
+        didSet { updateToggle() }
+    }
+    private var hovering = false {
+        didSet { toggle.isHidden = !hovering }
+    }
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        let field = label
+        titleOffset = field.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 4)
+        field.font = Self.font
+        field.textColor = Self.color
+        toggle.isBordered = false
+        toggle.target = self
+        toggle.action = #selector(toggleClicked(_:))
+        toggle.isHidden = true
+        for v in [field, toggle] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            // 4 px left of the rows' chevrons, as in MailMate (measured at 1x).
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -5),
+            titleOffset,
+            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),  // 3 px inside the badges' right edge
+            toggle.centerYAnchor.constraint(equalTo: field.centerYAnchor),
+        ])
+        updateToggle()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func updateToggle() {
+        toggle.attributedTitle = NSAttributedString(
+            string: isHidingSection ? "Show" : "Hide", attributes: [.font: Self.font, .foregroundColor: Self.color])
+    }
+
+    @objc private func toggleClicked(_ sender: Any?) { onToggle() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        hovering = false
     }
 }
