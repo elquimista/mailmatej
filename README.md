@@ -6,10 +6,10 @@ A MailMate-style, native macOS mail client with JMAP support. Personal use; buil
 
 | Path | What |
 |---|---|
-| `Sources/JMAPKit` | JMAP client: session, batched requests with back-references, blob download, EventSource push. No UI or storage. |
+| `Sources/JMAPKit` | JMAP client: session, batched requests with back-references, blob upload and download, WebSocket and EventSource push. No UI or storage. |
 | `Sources/MailStore` | SQLite (GRDB) source of truth: schema, list/correspondence/search queries, raw `.eml` store. Protocol-neutral. |
-| `Sources/MailSync` | `JMAPAccountSync` (state strings + `/changes`) and `SyncCoordinator` (bounded concurrency, push, polling). |
-| `Sources/MailMateJ` | AppKit app: sidebar, virtualized message lists, Correspondence layout, WebKit message view. SwiftUI only for the Add Account sheet. |
+| `Sources/MailSync` | `JMAPAccountSync` (state strings + `/changes`, full download, message changes, sending) and `SyncCoordinator` (bounded concurrency, push, polling). |
+| `Sources/MailMateJ` | AppKit app: sidebar, virtualized and threaded message lists, Correspondence layout, WebKit message view, composer, account and mailbox settings. SwiftUI only for the Settings window's Counters pane. |
 | `Sources/mmj-sync` | Headless sync CLI for development. |
 | `dev/stalwart` | Local Stalwart server and a seeding script. |
 
@@ -24,9 +24,11 @@ open build/MailMateJ.app
 swift test
 ```
 
-Add accounts with the toolbar button or **File → Add Account…**:
-- **Fastmail**: an API token (Settings → Privacy & Security → API tokens).
-- **Stalwart / other JMAP**: server host (autodiscovers via `/.well-known/jmap`), username, password.
+Add accounts with the toolbar button or **File → Add Account…**, which opens a JMAP version of MailMate's account settings:
+- **Stalwart / other JMAP**: the server's host name (autodiscovers via `/.well-known/jmap`; Port and Require SSL for anything unusual), user name and password.
+- **Fastmail**: `fastmail.com` as the server and an API token (Settings → Privacy & Security → API tokens) as the password.
+
+Double-click an account in the sidebar (or **Edit Account…** in its context menu) to change it; the password is kept unless a new one is typed. **Email Address(es)** takes `address`, `<address>` or `Name <address>`, comma-separated. Those addresses are the From choices, in that order; ones the server has no identity for are sent through the account's own identity.
 
 The two builds are separate apps: different bundle IDs, icons (a tilted postage stamp; Dev is orange with a DEV label) and data folders, `~/Library/Application Support/MailMateJ` and `…/MailMateJ Dev`. `MMJ_DATA_DIR` overrides the folder. Secrets are in the login keychain. The icons are drawn by `scripts/make-icon.swift`; regenerate them with `scripts/make-icons.sh`.
 
@@ -60,13 +62,13 @@ First time only, complete Stalwart's bootstrap (fixed dev admin from `docker-com
 curl -s -u admin:mmj-dev-admin -H 'Content-Type: application/json' http://localhost:18080/jmap -d '{"using":["urn:ietf:params:jmap:core","urn:stalwart:jmap"],"methodCalls":[["x:Bootstrap/set",{"update":{"singleton":{"serverHostname":"mail.mmj.test","defaultDomain":"mmj.test","requestTlsCertificate":false,"generateDkimKeys":false}}},"c0"]]}'
 ```
 
-The response contains the permanent admin. Save it as `user:secret` in `dev/stalwart/data/admin-credentials`. Then restart the server and seed it:
+The server listens on 127.0.0.1 only: the admin and test passwords are in this repo. The response contains the permanent admin. Save it as `user:secret` in `dev/stalwart/data/admin-credentials`. Then restart the server and seed it:
 
 ```bash
 docker compose restart && python3 seed.py
 ```
 
-`seed.py` creates alice/bob/carol (password `<name>-dev-pass`) with 300 messages each. `--accounts 100 --messages 50` is for scale tests, and `--live alice` delivers a message every 10 s for push testing.
+`seed.py` creates alice/bob/carol (password `<name>-dev-pass`) with 300 messages each. `--accounts 100 --messages 50` is for scale tests, and `--live alice` delivers a message every 10 s for push testing. Test messages for one user: `--rich` (embedded, remote and tracker images), `--attachments`, `--invite` (an unnamed calendar part) and `--thread` (a three-message conversation).
 
 Then:
 
@@ -79,10 +81,10 @@ Stalwart always advertises `https://<hostname>` endpoints. For session URLs on l
 
 ## Status
 
-- [x] M0 – JMAPKit, schema, initial + incremental sync, push
-- [x] M1 – read-only window: unified mailboxes, account trees, virtualized lists, Correspondence layout, HTML/plain rendering with remote content blocked, search
-- [ ] M2 – smart mailboxes (tables exist: `smart_mailbox`, `smart_membership`)
-- [ ] M3 – actions (read/flag/move/delete) via the `pending_change` outbox; then rules
-- [ ] M4 – compose and send (`EmailSubmission`)
+- [x] M0 – JMAPKit, schema, initial + incremental sync, push (WebSocket, EventSource fallback, fast polling when push stalls), full download of every message
+- [x] M1 – window: unified mailboxes with submailboxes, account trees, virtualized lists with threads, Correspondence layout, HTML/plain rendering with remote content blocked, attachments (Quick Look, save, drag out), search, Dock counters
+- [ ] M2 – smart mailboxes: submailboxes of the unified mailboxes are done; user-defined smart mailboxes with conditions are not (tables exist: `smart_mailbox`, `smart_membership`)
+- [ ] M3 – actions: archive, junk, delete, read/unread and flag are done (local change at once, then `Email/set`); an offline queue for changes made without a connection and rules are not
+- [x] M4 – compose and send (`EmailSubmission`): new message, reply, reply all, forward with attachments, Bcc, several From addresses per account
 - [ ] M5 – 100-account soak test, Instruments pass
 - [ ] M6 – IMAP + SMTP backend
