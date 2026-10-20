@@ -196,6 +196,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private func wireUp() {
         list.onToggleThread = { [weak self] row, collapse in self?.toggle(row, collapse: collapse) }
+        // Showing a message marks it read, as in MailMate.
+        messageView.onDisplay = { [weak self] id in
+            guard let self, let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
+            // The row turns read at once; the store and the server follow.
+            list.showSeen(true, id: id)
+            correspondence.showSeen(true, id: id)
+            model.perform(.markRead, on: [id]) { _ in false }
+        }
         correspondence.onToggleThread = { [weak self] row, collapse in
             self?.toggle(row, collapse: collapse, inCorrespondence: true)
         }

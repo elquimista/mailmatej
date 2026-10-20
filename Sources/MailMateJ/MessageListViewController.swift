@@ -294,6 +294,14 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         scrollView.reflectScrolledClipView(clip)
     }
 
+    /// Shows a message as read or unread right away, before the store's change reaches the list.
+    func showSeen(_ seen: Bool, id: Int64) {
+        guard let index = ids.firstIndex(of: id), var row = cache[id], row.isSeen != seen else { return }
+        row.isSeen = seen
+        cache[id] = row
+        tableView.reloadData(forRowIndexes: [index], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+    }
+
     private func row(at index: Int) -> MessageRow? {
         guard index < ids.count else { return nil }
         if let row = cache[ids[index]] { return row }

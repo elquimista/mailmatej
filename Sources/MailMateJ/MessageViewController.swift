@@ -16,6 +16,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private let partHandler: EmbeddedPartSchemeHandler
 
     private var currentID: Int64?
+    /// A message was put on screen (on its own, not as one of several selected).
+    var onDisplay: ((Int64) -> Void)?
 
     /// The message on screen, if one real message is shown.
     var displayedMessageID: Int64? { currentID.flatMap { $0 > 0 && currentDetail != nil ? $0 : nil } }
@@ -125,6 +127,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         currentDetail = detail
         placeholder.isHidden = true
         webView.isHidden = false
+        onDisplay?(messageID)
 
         if let body = try? model.store.body(messageId: messageID) {
             render(body)
