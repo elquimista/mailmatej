@@ -1141,7 +1141,12 @@ final class CorrespondenceSplitView: NSSplitView {
 /// The divider between the sidebar and the lists, as MailMate draws it (measured at 1x): 1 px, black.
 final class SidebarSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 1 }
-    override var dividerColor: NSColor { .black }
+
+    /// A plain line: the default style would add a grip dot in the middle.
+    override func drawDivider(in rect: NSRect) {
+        NSColor.black.setFill()
+        rect.fill()
+    }
 }
 
 /// A toolbar item made of its own buttons, which the toolbar's regular validation passes keep current.
