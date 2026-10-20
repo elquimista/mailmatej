@@ -24,6 +24,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var selectAfterMove: Int64?
     private var correspondent: String?
     private var correspondenceTask: Task<Void, Never>?
+    private var lastSelectionChange: CFAbsoluteTime = 0
     /// Last selection per mailbox, for this run of the app only (like MailMate): coming back to a
     /// mailbox restores it; a mailbox not visited yet this run opens scrolled to its newest message.
     private var remembered: [MessageScope: SavedView] = [:]
@@ -346,10 +347,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
     }
 
+    /// Updates the Correspondence pane at once for a click or a single key press, as MailMate does.
+    /// Only while selections come in quick succession (a held arrow key) does it wait for a pause, to
+    /// keep the scrolling smooth.
     private func scheduleCorrespondenceUpdate(for id: Int64?) {
         correspondenceTask?.cancel()
+        let now = CFAbsoluteTimeGetCurrent()
+        let rapid = now - lastSelectionChange < 0.15
+        lastSelectionChange = now
+        guard rapid else { return reloadCorrespondence(for: id) }
         correspondenceTask = Task {
-            try? await Task.sleep(for: .milliseconds(60))  // Keep arrow-key scrolling smooth.
+            try? await Task.sleep(for: .milliseconds(60))
             guard !Task.isCancelled else { return }
             reloadCorrespondence(for: id)
         }
