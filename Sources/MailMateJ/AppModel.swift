@@ -209,6 +209,16 @@ final class AppModel {
 
     enum MessageAction {
         case archive, junk, delete, markRead, markUnread, flag, unflag
+        /// Adds or removes a tag (a JMAP keyword).
+        case tag(String, Bool)
+    }
+
+    /// A tag name as a JMAP keyword: printable ASCII without spaces or the characters RFC 8621 excludes,
+    /// lowercased (keywords are case-insensitive, and the store keeps them lowercase).
+    static func keyword(forTag name: String) -> String {
+        let excluded = Set("(){]%*\"\\ ")
+        return String(name.trimmingCharacters(in: .whitespaces).map { $0.isASCII && !excluded.contains($0) && $0.asciiValue! > 0x20 ? $0 : "_" })
+            .lowercased()
     }
 
     /// Archives, marks as junk, deletes, marks or flags messages: here at once, then on the server.
@@ -258,6 +268,7 @@ final class AppModel {
         case .markUnread: try await setKeyword("$seen", false)
         case .flag: try await setKeyword("$flagged", true)
         case .unflag: try await setKeyword("$flagged", false)
+        case .tag(let keyword, let on): try await setKeyword(keyword, on)
         case .archive: try await move(toRole: "archive")
         case .junk: try await move(toRole: "junk", extra: ["keywords/$junk": .bool(true), "keywords/$notjunk": .null])
         case .delete:

@@ -212,6 +212,31 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     #endif
 
+    /// Selects a row by key (as a click would), opening the rows above it. Returns whether it exists.
+    @discardableResult
+    func select(key: String) -> Bool {
+        guard let node = find(key, in: roots) else { return false }
+        var row = outline.row(forItem: node)
+        if row < 0 {
+            // Inside a collapsed row: open its ancestors.
+            func path(_ nodes: [SidebarNode], _ trail: [SidebarNode]) -> [SidebarNode]? {
+                for n in nodes {
+                    if n === node { return trail }
+                    if let found = path(n.children, trail + [n]) { return found }
+                }
+                return nil
+            }
+            for ancestor in path(roots, []) ?? [] { outline.expandItem(ancestor) }
+            row = outline.row(forItem: node)
+        }
+        guard row >= 0 else { return false }
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+        outline.scrollRowToVisible(row)
+        return true
+    }
+
+    var selectedKey: String? { selectedNode?.key }
+
     /// Selects the default item and notifies `onSelect`.
     func selectInitial() {
         reload()

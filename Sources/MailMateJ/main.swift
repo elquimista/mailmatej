@@ -156,6 +156,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1))
                 }
                 NSLog("MMJ inbox badge after: \(windowController?.debugInboxBadge ?? -1)")
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_BACK"] != nil {
+                    NSLog("MMJ before back: selected \(windowController?.debugSelection ?? [])")
+                    windowController?.goBack(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    NSLog("MMJ after back: selected \(windowController?.debugSelection ?? [])")
+                    windowController?.goForward(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    NSLog("MMJ after forward: selected \(windowController?.debugSelection ?? [])")
+                }
                 var target = windowController?.window
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SUBMAILBOXES"] != nil {
                     SubmailboxSettingsWindowController.show(key: "unified.inbox", title: "Inbox", over: target)

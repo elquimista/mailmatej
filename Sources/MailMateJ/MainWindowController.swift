@@ -88,7 +88,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let toolbar = NSToolbar(identifier: "MainToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
-        toolbar.centeredItemIdentifiers = Set(Self.actionGroups.map(\.id))
         window.toolbar = toolbar
 
         wireUp()
@@ -172,6 +171,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebarItem.minimumThickness = 180
         sidebarItem.maximumThickness = 400
         sidebarItem.canCollapse = true
+        // As in MailMate, the toolbar spans the whole window (back/forward at its left) over the sidebar.
+        sidebarItem.allowsFullHeightLayout = false
         root.addSplitViewItem(sidebarItem)
         let contentItem = NSSplitViewItem(viewController: content)
         contentItem.minimumThickness = 600
@@ -198,7 +199,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         list.onToggleThread = { [weak self] row, collapse in self?.toggle(row, collapse: collapse) }
         // Showing a message marks it read, as in MailMate.
         messageView.onDisplay = { [weak self] id in
-            guard let self, let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
+            guard let self else { return }
+            recordInHistory(id)
+            guard let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
             // The row turns read at once; the store and the server follow.
             list.showSeen(true, id: id)
             correspondence.showSeen(true, id: id)
@@ -275,6 +278,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             var restoredDisplay: Int64?
 
             switch reason {
+            case .scopeChanged where pendingHistorySelection.map(ids.contains) == true:
+                list.setIDs(ids, selecting: [pendingHistorySelection!], scroll: .toSelection)
+                pendingHistorySelection = nil
             case .scopeChanged:
                 if let saved = remembered[scope], saved.selection.contains(where: ids.contains) {
                     list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
@@ -316,6 +322,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if list.selectedIDs != before || reason == .scopeChanged {
                 messageView.show(messageID: restoredDisplay ?? list.selectedID, selectionCount: list.selectedIDs.count)
                 scheduleCorrespondenceUpdate(for: list.selectedID)
+            }
+            if reason == .scopeChanged {
+                // A Back/Forward that switched mailboxes is done (its message selected, or gone).
+                pendingHistorySelection = nil
+                navigatingHistory = false
             }
             updateTitle()
         }
@@ -432,6 +443,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case "read": markRead(nil)
             case "unread": markUnread(nil)
             case "flag": toggleFlag(nil)
+            case "tag": perform(.tag(AppModel.keyword(forTag: "MMJ Test"), true), on: targetIDs)
+            case "untag": perform(.tag(AppModel.keyword(forTag: "MMJ Test"), false), on: targetIDs)
             case "new": newMessage(nil)
             case "reply": reply(nil)
             case "replyAll": replyAll(nil)
@@ -669,13 +682,20 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     // MARK: Toolbar
 
-    private static let getMailItem = NSToolbarItem.Identifier("getMail")
-    private static let addAccountItem = NSToolbarItem.Identifier("addAccount")
+    private static let navigationItem = NSToolbarItem.Identifier("navigation")
+    private static let tagItem = NSToolbarItem.Identifier("tag")
+    private static let listStyleItem = NSToolbarItem.Identifier("listStyle")
     private static let searchItem = NSToolbarItem.Identifier("search")
 
     private typealias ActionButton = (label: String, symbol: String, action: Selector)
+    /// The message buttons' symbols at MailMate's sizes (measured at 1x): 17 pt (archive 17 px wide,
+    /// Reply All 22), but 16 pt for New Message and Mark as Read, which SF draws larger.
+    private static let iconSize: CGFloat = 17
+    private static func iconSize(for symbol: String) -> CGFloat {
+        ["square.and.pencil", "envelope.open"].contains(symbol) ? 16 : iconSize
+    }
 
-    /// MailMate's message buttons, in its order and groups, centered in the toolbar.
+    /// MailMate's message buttons, in its order and groups, between back/forward and the list buttons.
     private static let actionGroups: [(id: NSToolbarItem.Identifier, buttons: [ActionButton])] = [
         (.init("mailboxActions"), [
             ("Archive", "archivebox", #selector(archiveMessages(_:))),
@@ -692,12 +712,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             ("Mark as Unread", "envelope.badge", #selector(markUnread(_:))),
             ("Mark as Read", "envelope.open", #selector(markRead(_:))),
         ]),
-        (.init("flag"), [("Flag", "flag", #selector(toggleFlag(_:)))]),
+        (.init("flag"), [("Flag", "flag.fill", #selector(toggleFlag(_:)))]),
     ]
 
+    /// MailMate's toolbar (measured at 1x): back and forward at the left; the message buttons, Flag's menu
+    /// and Tag midway; the threaded and flat list buttons and the search field at the right.
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, Self.getMailItem, .flexibleSpace]
-            + Self.actionGroups.map(\.id) + [.flexibleSpace, Self.addAccountItem, Self.searchItem]
+        [Self.navigationItem, .flexibleSpace] + Self.actionGroups.map(\.id)
+            + [Self.tagItem, .flexibleSpace, Self.listStyleItem, Self.searchItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -711,21 +733,196 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return actionGroupItem(id, group.buttons)
         }
         switch id {
-        case Self.getMailItem:
-            return button(id, "Get Mail", "arrow.clockwise", #selector(getAllMail(_:)))
-        case Self.addAccountItem:
-            return button(id, "Add Account", "person.crop.circle.badge.plus", #selector(addAccount(_:)))
+        case Self.navigationItem:
+            return navigationToolbarItem(id)
+        case Self.tagItem:
+            return tagToolbarItem(id)
+        case Self.listStyleItem:
+            return listStyleToolbarItem(id)
         case Self.searchItem:
             let item = NSSearchToolbarItem(itemIdentifier: id)
-            item.searchField.placeholderString = "Search Messages"
+            item.searchField.placeholderString = "Search All Messages"
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
             item.searchField.sendsWholeSearchString = false
-            item.preferredWidthForSearchField = 260
+            item.preferredWidthForSearchField = 320
             searchField = item.searchField
             return item
         default:
             return nil
+        }
+    }
+
+    private static func toolbarButton(
+        symbol: String, pointSize: CGFloat, weight: NSFont.Weight = .regular, label: String, width: CGFloat
+    ) -> NSButton {
+        let button = NSButton()
+        button.bezelStyle = .toolbar
+        button.showsBorderOnlyWhileMouseInside = true
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
+        button.imagePosition = .imageOnly
+        button.toolTip = label
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return button
+    }
+
+    /// Back and forward through the messages viewed (30 pt apart, as in MailMate).
+    private func navigationToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
+        // MailMate's 7 × 14 px chevrons, with a divider between them.
+        let back = Self.toolbarButton(symbol: "chevron.left", pointSize: 17, weight: .light, label: "Back", width: 24)
+        let forward = Self.toolbarButton(symbol: "chevron.right", pointSize: 17, weight: .light, label: "Forward", width: 24)
+        back.target = self
+        back.action = #selector(goBack(_:))
+        forward.target = self
+        forward.action = #selector(goForward(_:))
+        let stack = SeparatedStackView(views: [back, forward])
+        stack.spacing = 4
+        let item = ValidatingToolbarItem(itemIdentifier: id)
+        item.view = stack
+        item.label = "Back/Forward"
+        item.onValidate = { [weak self] in
+            guard let self else { return }
+            back.isEnabled = historyIndex > 0
+            forward.isEnabled = historyIndex < history.count - 1
+        }
+        return item
+    }
+
+    /// "Tag ⌄": the tags in use and New Tag…, in MailMate's bordered box.
+    private func tagToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
+        let control = TagToolbarControl()
+        control.onClick = { [weak self, weak control] in
+            guard let self, let control else { return }
+            showTagMenu(control)
+        }
+        let item = ValidatingToolbarItem(itemIdentifier: id)
+        item.view = control
+        item.label = "Tag"
+        item.toolTip = "Tag"
+        item.onValidate = { [weak self, weak control] in control?.isEnabled = !(self?.targetIDs.isEmpty ?? true) }
+        return item
+    }
+
+    /// The threaded and flat list buttons (48 pt apart, as in MailMate); the one in use is shown pressed.
+    private func listStyleToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
+        let threaded = Self.toolbarButton(symbol: "list.bullet.indent", pointSize: 16, label: "Show Threads", width: 32)
+        let flat = Self.toolbarButton(symbol: "list.bullet", pointSize: 16, label: "Show Messages Without Threads", width: 32)
+        for (button, action) in [(threaded, #selector(showThreadedList(_:))), (flat, #selector(showFlatList(_:)))] {
+            button.setButtonType(.pushOnPushOff)
+            button.target = self
+            button.action = action
+        }
+        let stack = NSStackView(views: [threaded, flat])
+        stack.spacing = 16
+        let item = ValidatingToolbarItem(itemIdentifier: id)
+        item.view = stack
+        item.label = "List Style"
+        item.onValidate = { [weak self] in
+            guard let self else { return }
+            threaded.state = showsThreads ? .on : .off
+            flat.state = showsThreads ? .off : .on
+        }
+        return item
+    }
+
+    @objc private func showThreadedList(_ sender: Any?) { if !showsThreads { toggleThreads(sender) } }
+    @objc private func showFlatList(_ sender: Any?) { if showsThreads { toggleThreads(sender) } }
+
+    @objc private func showFlagMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let ids = targetIDs
+        for (title, action) in [("Flag", AppModel.MessageAction.flag), ("Unflag", .unflag)] {
+            let item = menu.addItem(withTitle: title, action: #selector(menuAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = MenuAction { [weak self] in self?.perform(action, on: ids) }
+            item.isEnabled = !ids.isEmpty
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    private func showTagMenu(_ sender: NSView) {
+        let ids = targetIDs
+        guard !ids.isEmpty else { return }
+        let keywords = (try? model.store.keywords(ids: ids)) ?? [:]
+        let menu = NSMenu()
+        for tag in (try? model.store.tags()) ?? [] {
+            let count = ids.filter { keywords[$0]?.contains(tag) == true }.count
+            let item = menu.addItem(withTitle: tag, action: #selector(menuAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = count == ids.count ? .on : count > 0 ? .mixed : .off
+            let add = count < ids.count  // As a checkbox: adds unless every message has it.
+            item.representedObject = MenuAction { [weak self] in self?.perform(.tag(tag, add), on: ids) }
+        }
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+        let new = menu.addItem(withTitle: "New Tag…", action: #selector(menuAction(_:)), keyEquivalent: "")
+        new.target = self
+        new.representedObject = MenuAction { [weak self] in self?.askForNewTag(ids) }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    private func askForNewTag(_ ids: [Int64]) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "New Tag"
+        alert.informativeText = "Adds the tag to the selected message\(ids.count == 1 ? "" : "s")."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let tag = AppModel.keyword(forTag: field.stringValue)
+            guard response == .alertFirstButtonReturn, !tag.isEmpty, !tag.hasPrefix("$") else { return }
+            self?.perform(.tag(tag, true), on: ids)
+        }
+    }
+
+    @objc private func menuAction(_ sender: NSMenuItem) { (sender.representedObject as? MenuAction)?.run() }
+
+    // MARK: History
+
+    /// Messages viewed, for Back and Forward: the sidebar row they were in and the message.
+    private var history: [(key: String, id: Int64)] = []
+    private var historyIndex = -1
+    private var navigatingHistory = false
+    private var pendingHistorySelection: Int64?
+
+    private func recordInHistory(_ id: Int64) {
+        guard !navigatingHistory, let key = sidebar.selectedKey else { return }
+        if historyIndex >= 0, history[historyIndex].id == id { return }
+        history = Array(history.prefix(historyIndex + 1)) + [(key, id)]
+        if history.count > 200 { history.removeFirst(history.count - 200) }
+        historyIndex = history.count - 1
+    }
+
+    @objc func goBack(_ sender: Any?) {
+        guard historyIndex > 0 else { return }
+        historyIndex -= 1
+        go(to: history[historyIndex])
+    }
+
+    @objc func goForward(_ sender: Any?) {
+        guard historyIndex < history.count - 1 else { return }
+        historyIndex += 1
+        go(to: history[historyIndex])
+    }
+
+    private func go(to entry: (key: String, id: Int64)) {
+        navigatingHistory = true
+        if sidebar.selectedKey == entry.key, list.ids.contains(entry.id) {
+            list.setIDs(list.ids, selecting: [entry.id], scroll: .toSelection)
+            messageView.show(messageID: entry.id)
+            scheduleCorrespondenceUpdate(for: entry.id)
+            updateTitle()
+            navigatingHistory = false
+        } else {
+            pendingHistorySelection = entry.id  // Selected once that mailbox's list has loaded.
+            if !sidebar.select(key: entry.key) {
+                pendingHistorySelection = nil
+                navigatingHistory = false
+            }
         }
     }
 
@@ -751,7 +948,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             button.bezelStyle = .toolbar
             button.showsBorderOnlyWhileMouseInside = true
             button.image = NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+                .withSymbolConfiguration(.init(pointSize: Self.iconSize(for: b.symbol), weight: .regular))
             button.imagePosition = .imageOnly
             button.toolTip = b.label
             button.target = self
@@ -760,8 +957,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             button.widthAnchor.constraint(equalToConstant: 32).isActive = true
             return button
         }
-        let stack = NSStackView(views: views)
+        var arranged: [NSView] = views
+        if views.contains(where: { $0.action == #selector(toggleFlag(_:)) }) {
+            // MailMate's small arrow beside Flag, with Flag and Unflag.
+            let arrow = Self.toolbarButton(symbol: "chevron.down", pointSize: 8, label: "Flag Options", width: 14)
+            arrow.target = self
+            arrow.action = #selector(showFlagMenu(_:))
+            arranged.append(arrow)
+        }
+        let stack = SeparatedStackView(views: arranged)
         stack.spacing = 8
+        stack.setCustomSpacing(5, after: views.last!)
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 3, bottom: 0, right: 3)
         let item = ValidatingToolbarItem(itemIdentifier: id)
         item.view = stack
@@ -783,8 +989,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 case #selector(toggleFlag(_:)):
                     let flagged = allFlagged(targetIDs)
                     button.toolTip = flagged ? "Unflag" : "Flag"
-                    button.image = NSImage(systemSymbolName: flagged ? "flag.slash" : "flag", accessibilityDescription: button.toolTip)?
-                        .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+                    button.image = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: button.toolTip)?
+                        .withSymbolConfiguration(.init(pointSize: Self.iconSize, weight: .regular))
                     button.isEnabled = hasTarget
                 default: button.isEnabled = hasTarget
                 }
@@ -853,16 +1059,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
     }
 
-    private func button(_ id: NSToolbarItem.Identifier, _ label: String, _ symbol: String, _ action: Selector) -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: id)
-        item.label = label
-        item.toolTip = label
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        item.target = self
-        item.action = action
-        item.isBordered = true
-        return item
-    }
 }
 
 /// The divider between the Correspondence list and the message, as MailMate draws it (measured at 1x):
@@ -882,4 +1078,73 @@ final class CorrespondenceSplitView: NSSplitView {
 final class ValidatingToolbarItem: NSToolbarItem {
     var onValidate: () -> Void = {}
     override func validate() { onValidate() }
+}
+
+/// A closure carried by a menu item.
+final class MenuAction: NSObject {
+    let run: () -> Void
+    init(_ run: @escaping () -> Void) { self.run = run }
+}
+
+/// A toolbar group whose buttons are divided by thin lines, as MailMate's are (measured at 1x: 1 px wide,
+/// 14 px tall, centered between the buttons).
+final class SeparatedStackView: NSStackView {
+    /// Slightly lighter than the toolbar in dark mode, as MailMate draws its dividers (86 on 72);
+    /// slightly darker in light mode.
+    static let lineColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.055) : NSColor(white: 0, alpha: 0.12)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        Self.lineColor.setFill()
+        let views = arrangedSubviews.filter { !$0.isHidden }
+        for (a, b) in zip(views, views.dropFirst()) {
+            let x = ((a.frame.maxX + b.frame.minX) / 2).rounded(.down)
+            NSRect(x: x, y: (bounds.midY - 7).rounded(), width: 1, height: 14).fill()
+        }
+    }
+}
+
+/// MailMate's Tag control (measured at 1x): a 52 × 22 pt box with rounded corners and a 1 px border,
+/// "Tag" 5 pt in, a separator at 30 pt and a small arrow after it. A click opens the tag menu.
+final class TagToolbarControl: NSControl {
+    var onClick: () -> Void = {}
+
+    override init(frame: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 52, height: 22))
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 52).isActive = true
+        heightAnchor.constraint(equalToConstant: 22).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isEnabled: Bool { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let box = bounds.insetBy(dx: 0.5, dy: 0.5)
+        SeparatedStackView.lineColor.setStroke()
+        let border = NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5)
+        border.lineWidth = 1
+        border.stroke()
+        SeparatedStackView.lineColor.setFill()
+        NSRect(x: 30, y: (bounds.midY - 7).rounded(), width: 1, height: 14).fill()
+
+        let color: NSColor = isEnabled ? .labelColor : .tertiaryLabelColor
+        let title = NSAttributedString(string: "Tag", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: color])
+        let size = title.size()
+        title.draw(at: NSPoint(x: 5, y: ((bounds.height - size.height) / 2).rounded()))
+        if let arrow = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 8, weight: .regular).applying(.init(paletteColors: [color])))
+        {
+            arrow.draw(in: NSRect(
+                x: 37, y: ((bounds.height - arrow.size.height) / 2).rounded(), width: arrow.size.width, height: arrow.size.height))
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isEnabled { onClick() }
+    }
 }

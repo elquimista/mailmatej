@@ -508,8 +508,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return image
     }()
 
-    /// The flag in rows, as MailMate draws it (measured at 1x): about 12 × 13 px, from 4 px below the
-    /// row's top to its bottom, on whole pixels.
+    /// The flag in rows, as MailMate draws it (measured at 1x): about 11 × 13 px, rows 2–14 of the row,
+    /// on whole pixels.
     /// The replied arrow in the status column, as MailMate draws it (measured at 1x): 14 × 12 px from
     /// 2 px below the row's top, in the text color.
     private static let repliedArrow: NSImage? = cellSymbol("arrowshape.turn.up.left.fill", pointSize: 13, top: 2, width: 16)
@@ -599,8 +599,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         else { return nil }
         let ink = inkBounds(of: symbol, integral: false)
         let size = NSSize(width: 16, height: 17)  // The flag column's cell.
+        // Measured on screen against MailMate: the ink from 2 px below the row's top, 26 px before the sender.
         let shift = NSPoint(
-            x: ((size.width - ink.width) / 2 - ink.minX).rounded(), y: (size.height - 4 - ink.maxY).rounded())
+            x: ((size.width - ink.width) / 2 - ink.minX).rounded() - 1, y: (size.height - 1 - ink.maxY).rounded())
         let image = NSImage(size: size, flipped: false) { _ in
             symbol.draw(at: shift, from: .zero, operation: .sourceOver, fraction: 1)
             return true
