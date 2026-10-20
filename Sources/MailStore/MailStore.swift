@@ -446,29 +446,6 @@ public final class MailStore: Sendable {
         }
     }
 
-    /// The tags in use (keywords that aren't JMAP's own `$…` ones), sorted.
-    public func tags() throws -> [String] {
-        try dbPool.read { db in
-            try String.fetchAll(
-                db, sql: "SELECT DISTINCT keyword FROM message_keyword WHERE keyword NOT LIKE '$%' ORDER BY keyword COLLATE NOCASE")
-        }
-    }
-
-    /// The keywords of each of these messages.
-    public func keywords(ids: [Int64]) throws -> [Int64: Set<String>] {
-        guard !ids.isEmpty else { return [:] }
-        return try dbPool.read { db in
-            var result: [Int64: Set<String>] = [:]
-            for row in try Row.fetchAll(
-                db, sql: "SELECT messageId, keyword FROM message_keyword WHERE messageId IN (\(Self.placeholders(ids.count)))",
-                arguments: StatementArguments(ids))
-            {
-                result[row["messageId"], default: []].insert(row["keyword"])
-            }
-            return result
-        }
-    }
-
     /// Puts the messages in exactly one mailbox, as a move does.
     public func moveMessages(_ messageIds: [Int64], toMailboxId mailboxId: Int64) throws {
         guard !messageIds.isEmpty else { return }

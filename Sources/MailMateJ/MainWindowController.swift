@@ -457,8 +457,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case "read": markRead(nil)
             case "unread": markUnread(nil)
             case "flag": toggleFlag(nil)
-            case "tag": perform(.tag(AppModel.keyword(forTag: "MMJ Test"), true), on: targetIDs)
-            case "untag": perform(.tag(AppModel.keyword(forTag: "MMJ Test"), false), on: targetIDs)
             case "new": newMessage(nil)
             case "reply": reply(nil)
             case "replyAll": replyAll(nil)
@@ -697,7 +695,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     // MARK: Toolbar
 
     private static let navigationItem = NSToolbarItem.Identifier("navigation")
-    private static let tagItem = NSToolbarItem.Identifier("tag")
     private static let listStyleItem = NSToolbarItem.Identifier("listStyle")
     private static let searchItem = NSToolbarItem.Identifier("search")
 
@@ -729,11 +726,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         (.init("flag"), [("Flag", "flag.fill", #selector(toggleFlag(_:)))]),
     ]
 
-    /// MailMate's toolbar (measured at 1x): back and forward at the left; the message buttons, Flag's menu
-    /// and Tag midway; the threaded and flat list buttons and the search field at the right.
+    /// MailMate's toolbar (measured at 1x): back and forward at the left; the message buttons and Flag's
+    /// menu midway; the threaded and flat list buttons and the search field at the right.
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [Self.navigationItem, .flexibleSpace] + Self.actionGroups.map(\.id)
-            + [Self.tagItem, .flexibleSpace, Self.listStyleItem, Self.searchItem]
+            + [.flexibleSpace, Self.listStyleItem, Self.searchItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -749,8 +746,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         switch id {
         case Self.navigationItem:
             return navigationToolbarItem(id)
-        case Self.tagItem:
-            return tagToolbarItem(id)
         case Self.listStyleItem:
             return listStyleToolbarItem(id)
         case Self.searchItem:
@@ -804,21 +799,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return item
     }
 
-    /// "Tag ⌄": the tags in use and New Tag…, in MailMate's bordered box.
-    private func tagToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
-        let control = TagToolbarControl()
-        control.onClick = { [weak self, weak control] in
-            guard let self, let control else { return }
-            showTagMenu(control)
-        }
-        let item = ValidatingToolbarItem(itemIdentifier: id)
-        item.view = control
-        item.label = "Tag"
-        item.toolTip = "Tag"
-        item.onValidate = { [weak self, weak control] in control?.isEnabled = !(self?.targetIDs.isEmpty ?? true) }
-        return item
-    }
-
     /// The threaded and flat list buttons (48 pt apart, as in MailMate); the one in use is shown pressed.
     private func listStyleToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
         let threaded = Self.toolbarButton(symbol: "list.bullet.indent", pointSize: 16, label: "Show Threads", width: 32)
@@ -854,43 +834,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             item.isEnabled = !ids.isEmpty
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
-    }
-
-    private func showTagMenu(_ sender: NSView) {
-        let ids = targetIDs
-        guard !ids.isEmpty else { return }
-        let keywords = (try? model.store.keywords(ids: ids)) ?? [:]
-        let menu = NSMenu()
-        for tag in (try? model.store.tags()) ?? [] {
-            let count = ids.filter { keywords[$0]?.contains(tag) == true }.count
-            let item = menu.addItem(withTitle: tag, action: #selector(menuAction(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = count == ids.count ? .on : count > 0 ? .mixed : .off
-            let add = count < ids.count  // As a checkbox: adds unless every message has it.
-            item.representedObject = MenuAction { [weak self] in self?.perform(.tag(tag, add), on: ids) }
-        }
-        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
-        let new = menu.addItem(withTitle: "New Tag…", action: #selector(menuAction(_:)), keyEquivalent: "")
-        new.target = self
-        new.representedObject = MenuAction { [weak self] in self?.askForNewTag(ids) }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
-    }
-
-    private func askForNewTag(_ ids: [Int64]) {
-        guard let window else { return }
-        let alert = NSAlert()
-        alert.messageText = "New Tag"
-        alert.informativeText = "Adds the tag to the selected message\(ids.count == 1 ? "" : "s")."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            let tag = AppModel.keyword(forTag: field.stringValue)
-            guard response == .alertFirstButtonReturn, !tag.isEmpty, !tag.hasPrefix("$") else { return }
-            self?.perform(.tag(tag, true), on: ids)
-        }
     }
 
     @objc private func menuAction(_ sender: NSMenuItem) { (sender.representedObject as? MenuAction)?.run() }
@@ -1151,44 +1094,3 @@ final class SeparatedStackView: NSStackView {
     }
 }
 
-/// MailMate's Tag control (measured at 1x): a 52 × 22 pt box with rounded corners and a 1 px border,
-/// "Tag" 5 pt in, a separator at 30 pt and a small arrow after it. A click opens the tag menu.
-final class TagToolbarControl: NSControl {
-    var onClick: () -> Void = {}
-
-    override init(frame: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 52, height: 22))
-        translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 52).isActive = true
-        heightAnchor.constraint(equalToConstant: 22).isActive = true
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var isEnabled: Bool { didSet { needsDisplay = true } }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let box = bounds.insetBy(dx: 0.5, dy: 0.5)
-        SeparatedStackView.lineColor.setStroke()
-        let border = NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5)
-        border.lineWidth = 1
-        border.stroke()
-        SeparatedStackView.lineColor.setFill()
-        NSRect(x: 30, y: (bounds.midY - 7).rounded(), width: 1, height: 14).fill()
-
-        let color: NSColor = isEnabled ? ToolbarIconButton.enabledColor : ToolbarIconButton.disabledColor
-        let title = NSAttributedString(string: "Tag", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: color])
-        let size = title.size()
-        title.draw(at: NSPoint(x: 5, y: ((bounds.height - size.height) / 2).rounded()))
-        if let arrow = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .regular).applying(.init(paletteColors: [color])))
-        {
-            arrow.draw(in: NSRect(
-                x: 37, y: ((bounds.height - arrow.size.height) / 2).rounded(), width: arrow.size.width, height: arrow.size.height))
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if isEnabled { onClick() }
-    }
-}
