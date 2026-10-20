@@ -327,9 +327,11 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
         switch column {
         case .unread:
-            // A collapsed thread is unread if any of its messages is; read and replied shows the arrow.
+            // A collapsed thread is unread if any of its messages is; read and replied shows the arrow. A
+            // lone message goes by its own state, which `showSeen` changes at once.
             let thread = threadRows[row.id]
-            let unread = !row.isSeen || (thread.map { $0.anyUnread && !expandedThreads.contains($0.thread) } ?? false)
+            let unread = !row.isSeen
+                || (thread.map { $0.size > 1 && $0.anyUnread && !expandedThreads.contains($0.thread) } ?? false)
             if unread { return iconCell(tableView, column, image: Self.unreadDot, tint: .controlAccentColor) }
             return iconCell(tableView, column, image: row.isAnswered ? Self.repliedArrow : nil, tint: .labelColor)
         case .flag:
