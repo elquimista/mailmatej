@@ -71,6 +71,12 @@ import Testing
         #expect(thread.first == sent)
         let oldestFirst = try store.correspondenceIDs(email: "ada@x.com", sort: MessageSort(key: .receivedAt, ascending: true))
         #expect(oldestFirst == thread.reversed())
+
+        // Deleted messages are left out, unless the pane is for that message.
+        try store.upsertMessages(accountId: "acc", [message("4", from: "ada@x.com", box: "tr", at: 400)])
+        let deleted = try #require(try store.messageIDs(scope: .role("trash")).first)
+        #expect(try store.correspondenceIDs(email: "ada@x.com") == thread)
+        #expect(try store.correspondenceIDs(email: "ada@x.com", keeping: deleted) == [deleted] + thread)
     }
 
     @Test func addressFieldParsing() {

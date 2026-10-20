@@ -851,13 +851,16 @@ public final class MailStore: Sendable {
     /// Messages from or to `email`, across all accounts and mailboxes: the newest `limit`, in `sort` order.
     /// With `mine`, only the ones that also involve that address of mine, so mail with the same person
     /// through my other addresses stays out.
+    /// Mail exchanged with `email`, leaving out deleted messages (in Deleted Messages) as MailMate's
+    /// Correspondence pane does, except `keeping` (the message it was opened for, wherever it is).
     public func correspondenceIDs(
-        email: String, via mine: String? = nil, sort: MessageSort = .newestFirst, limit: Int = 2000
+        email: String, via mine: String? = nil, sort: MessageSort = .newestFirst, limit: Int = 2000, keeping: Int64? = nil
     ) throws -> [Int64] {
         try dbPool.read { db in
             let viaMine = mine == nil ? "" : " AND id IN (SELECT messageId FROM address WHERE email = ?)"
             var arguments: [any DatabaseValueConvertible] = [email.lowercased()]
             if let mine { arguments.append(mine.lowercased()) }
+            arguments.append(keeping ?? -1)
             arguments.append(limit)
             return try Int64.fetchAll(
                 db,
@@ -865,6 +868,9 @@ public final class MailStore: Sendable {
                     SELECT m.id FROM (
                         SELECT id, receivedAt, fromDisplay, sortSubject, size FROM message
                         WHERE id IN (SELECT messageId FROM address WHERE email = ?)\(viaMine)
+                          AND (id = ? OR id NOT IN (
+                            SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                            WHERE b.role = 'trash'))
                         ORDER BY receivedAt DESC LIMIT ?
                     ) m
                     ORDER BY \(Self.orderBy(sort))

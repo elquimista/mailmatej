@@ -385,7 +385,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         correspondent = email
         // Only mail with this person through the address of mine this message used.
         let mine = try? model.store.myAddress(in: id, myAddresses: model.myAddresses)
-        let flat = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort)) ?? []
+        let flat = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort, keeping: id)) ?? []
         let ids = threadCorrespondence(flat)
         // A message inside a collapsed thread is selected through its thread's first row.
         let selectable: (Int64) -> Int64 = { [correspondence] id in
