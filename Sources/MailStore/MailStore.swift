@@ -460,6 +460,32 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Each message's mailboxes (local ids), e.g. to put messages back where they were.
+    public func mailboxIDs(messageIds: [Int64]) throws -> [Int64: [Int64]] {
+        guard !messageIds.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            var result: [Int64: [Int64]] = [:]
+            for row in try Row.fetchAll(
+                db,
+                sql: "SELECT messageId, mailboxId FROM message_mailbox WHERE messageId IN (\(Self.placeholders(messageIds.count)))",
+                arguments: StatementArguments(messageIds))
+            {
+                result[row["messageId"], default: []].append(row["mailboxId"])
+            }
+            return result
+        }
+    }
+
+    /// Puts a message in exactly these mailboxes.
+    public func setMailboxes(_ mailboxIds: [Int64], messageId: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM message_mailbox WHERE messageId = ?", arguments: [messageId])
+            for box in mailboxIds {
+                try db.execute(sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [messageId, box])
+            }
+        }
+    }
+
     private static func placeholders(_ count: Int) -> String {
         Array(repeating: "?", count: count).joined(separator: ", ")
     }

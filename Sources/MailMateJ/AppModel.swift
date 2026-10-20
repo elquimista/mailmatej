@@ -209,78 +209,140 @@ final class AppModel {
 
     enum MessageAction {
         case archive, junk, delete, markRead, markUnread, flag, unflag
+        /// Into one mailbox of the messages' account.
+        case move(toMailboxId: Int64)
+        /// Each message back into the mailboxes it was in (undo of a move).
+        case restoreMailboxes([Int64: [Int64]], clearJunk: Bool)
     }
 
     /// Archives, marks as junk, deletes, marks or flags messages: here at once, then on the server.
+    /// The local change is made before this returns and the lists refresh right away (no debounce), so
+    /// the app reacts instantly, as MailMate does; the server requests follow in the background.
     /// Messages of several accounts are handled per account. Delete moves to Deleted Messages; messages
     /// already there are deleted for good (after `confirmPermanentDelete` agrees).
     func perform(_ action: MessageAction, on ids: [Int64], confirmPermanentDelete: @escaping (Int) async -> Bool) {
         guard let refs = try? store.refs(ids: ids), !refs.isEmpty else { return }
+        var work: [(accountId: String, refs: [MailStore.MessageRef], server: ServerWork)] = []
+        for (accountId, refs) in Dictionary(grouping: refs, by: \.accountId) {
+            do {
+                work.append((accountId, refs, try applyLocally(action, accountId: accountId, refs: refs)))
+            } catch {
+                report(error, count: refs.count)
+            }
+        }
+        refreshNow()
         Task {
-            for (accountId, refs) in Dictionary(grouping: refs, by: \.accountId) {
+            for item in work {
                 do {
-                    try await perform(action, accountId: accountId, refs: refs, confirm: confirmPermanentDelete)
+                    try await send(item.server, accountId: item.accountId, refs: item.refs, confirm: confirmPermanentDelete)
                 } catch {
-                    let alert = NSAlert()
-                    alert.messageText = "Couldn’t change \(refs.count == 1 ? "the message" : "\(refs.count) messages") on the server."
-                    alert.informativeText = Self.describe(error)
-                    alert.runModal()
+                    report(error, count: item.refs.count)
                 }
             }
         }
     }
 
-    private func perform(
-        _ action: MessageAction, accountId: String, refs: [MailStore.MessageRef],
-        confirm: (Int) async -> Bool
-    ) async throws {
+    /// What's left for the server once the local change is made.
+    private struct ServerWork {
+        var updates: [(remoteIds: [String], patch: [String: JSONValue])] = []
+        /// The account has no Archive yet: create it, then move there (here and on the server).
+        var archiveIntoNewMailbox = false
+        /// Messages already in Deleted Messages, deleted for good once confirmed.
+        var deleteForGood: [MailStore.MessageRef] = []
+    }
+
+    private func applyLocally(_ action: MessageAction, accountId: String, refs: [MailStore.MessageRef]) throws -> ServerWork {
         let ids = refs.map(\.id), remoteIds = refs.map(\.remoteId)
-        func setKeyword(_ keyword: String, _ on: Bool) async throws {
+        var work = ServerWork()
+        func setKeyword(_ keyword: String, _ on: Bool) throws {
             try store.setKeyword(keyword, on, messageIds: ids)
-            try await coordinator.update(
-                accountId: accountId, remoteIds: remoteIds, patch: ["keywords/\(keyword)": on ? .bool(true) : .null])
+            work.updates.append((remoteIds, ["keywords/\(keyword)": on ? .bool(true) : .null]))
         }
-        func move(toRole role: String, extra: [String: JSONValue] = [:]) async throws {
-            // An account without an Archive gets one, as other mail apps do on first use.
-            if role == "archive", try store.mailbox(accountId: accountId, role: role) == nil {
-                try await coordinator.createMailbox(accountId: accountId, name: "Archive", role: "archive")
-            }
-            guard let target = try store.mailbox(accountId: accountId, role: role) else {
-                throw MessageActionError.noMailbox(role: role)
-            }
-            try store.moveMessages(ids, toMailboxId: target.id)
+        func move(_ messages: [MailStore.MessageRef], to target: MailboxRecord, extra: [String: JSONValue] = [:]) throws {
+            try store.moveMessages(messages.map(\.id), toMailboxId: target.id)
             var patch = extra
             patch["mailboxIds"] = .object([target.remoteId: .bool(true)])
-            try await coordinator.update(accountId: accountId, remoteIds: remoteIds, patch: patch)
+            work.updates.append((messages.map(\.remoteId), patch))
         }
         switch action {
-        case .markRead: try await setKeyword("$seen", true)
-        case .markUnread: try await setKeyword("$seen", false)
-        case .flag: try await setKeyword("$flagged", true)
-        case .unflag: try await setKeyword("$flagged", false)
-        case .archive: try await move(toRole: "archive")
-        case .junk: try await move(toRole: "junk", extra: ["keywords/$junk": .bool(true), "keywords/$notjunk": .null])
+        case .markRead: try setKeyword("$seen", true)
+        case .markUnread: try setKeyword("$seen", false)
+        case .flag: try setKeyword("$flagged", true)
+        case .unflag: try setKeyword("$flagged", false)
+        case .archive:
+            if let archive = try store.mailbox(accountId: accountId, role: "archive") {
+                try move(refs, to: archive)
+            } else {
+                work.archiveIntoNewMailbox = true  // An account without an Archive gets one, as other mail apps do.
+            }
+        case .junk:
+            guard let junk = try store.mailbox(accountId: accountId, role: "junk") else {
+                throw MessageActionError.noMailbox(role: "junk")
+            }
+            try move(refs, to: junk, extra: ["keywords/$junk": .bool(true), "keywords/$notjunk": .null])
+        case .move(let mailboxId):
+            guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
+                throw MessageActionError.noMailbox(role: "")
+            }
+            try move(refs, to: target)
+        case .restoreMailboxes(let saved, let clearJunk):
+            let remote = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.id, $0.remoteId) })
+            // One request per set of mailboxes (usually all the same).
+            for (boxes, group) in Dictionary(grouping: refs, by: { Set(saved[$0.id] ?? []) }) where !boxes.isEmpty {
+                for ref in group { try store.setMailboxes(Array(boxes), messageId: ref.id) }
+                var patch: [String: JSONValue] = [
+                    "mailboxIds": .object(Dictionary(uniqueKeysWithValues: boxes.compactMap { remote[$0] }.map { ($0, JSONValue.bool(true)) }))
+                ]
+                if clearJunk { patch["keywords/$junk"] = .null }
+                work.updates.append((group.map(\.remoteId), patch))
+            }
         case .delete:
             let inTrash = try store.messageIDs(ids, inRole: "trash")
             let toTrash = refs.filter { !inTrash.contains($0.id) }
             if !toTrash.isEmpty {
-                try await moveToTrash(accountId: accountId, refs: toTrash)
+                guard let trash = try store.mailbox(accountId: accountId, role: "trash") else {
+                    throw MessageActionError.noMailbox(role: "trash")
+                }
+                try move(toTrash, to: trash)
             }
-            let forGood = refs.filter { inTrash.contains($0.id) }
-            if !forGood.isEmpty, await confirm(forGood.count) {
-                try await coordinator.destroy(accountId: accountId, remoteIds: forGood.map(\.remoteId))
+            work.deleteForGood = refs.filter { inTrash.contains($0.id) }
+        }
+        return work
+    }
+
+    private func send(
+        _ work: ServerWork, accountId: String, refs: [MailStore.MessageRef], confirm: (Int) async -> Bool
+    ) async throws {
+        var updates = work.updates
+        if work.archiveIntoNewMailbox {
+            try await coordinator.createMailbox(accountId: accountId, name: "Archive", role: "archive")
+            guard let archive = try store.mailbox(accountId: accountId, role: "archive") else {
+                throw MessageActionError.noMailbox(role: "archive")
             }
+            try store.moveMessages(refs.map(\.id), toMailboxId: archive.id)
+            refreshNow()
+            updates.append((refs.map(\.remoteId), ["mailboxIds": .object([archive.remoteId: .bool(true)])]))
+        }
+        for update in updates {
+            try await coordinator.update(accountId: accountId, remoteIds: update.remoteIds, patch: update.patch)
+        }
+        if !work.deleteForGood.isEmpty, await confirm(work.deleteForGood.count) {
+            try await coordinator.destroy(accountId: accountId, remoteIds: work.deleteForGood.map(\.remoteId))
         }
     }
 
-    private func moveToTrash(accountId: String, refs: [MailStore.MessageRef]) async throws {
-        guard let trash = try store.mailbox(accountId: accountId, role: "trash") else {
-            throw MessageActionError.noMailbox(role: "trash")
-        }
-        try store.moveMessages(refs.map(\.id), toMailboxId: trash.id)
-        try await coordinator.update(
-            accountId: accountId, remoteIds: refs.map(\.remoteId),
-            patch: ["mailboxIds": .object([trash.remoteId: .bool(true)])])
+    private func report(_ error: Error, count: Int) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t change \(count == 1 ? "the message" : "\(count) messages") on the server."
+        alert.informativeText = Self.describe(error)
+        alert.runModal()
+    }
+
+    /// Refreshes the UI from the store now, skipping the debounce meant for sync bursts.
+    private func refreshNow() {
+        myAddresses = (try? store.myAddresses()) ?? myAddresses
+        dockCounters?.update()
+        NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
     }
 
     enum MessageActionError: LocalizedError {

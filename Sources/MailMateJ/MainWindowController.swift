@@ -54,6 +54,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var toggledRow: Int64?
     private var toggledCorrespondenceRow: Int64?
     private var splits: (root: NSSplitView, content: NSSplitView, bottom: NSSplitView)?
+    /// The first key of a two-key shortcut (g, *, d, r) and when it was pressed.
+    private var pendingKey: (key: String, at: Date)?
+    private var keyMonitor: Any?
 
     init(model: AppModel) {
         self.model = model
@@ -92,6 +95,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         window.toolbar = toolbar
 
         wireUp()
+        installKeyBindings()
         sidebar.selectInitial()
         NotificationCenter.default.addObserver(
             forName: .mailStoreDidChange, object: nil, queue: .main
@@ -333,6 +337,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                     scroll: wasEmpty ? .toMessage(newestEnd) : following && newEdge != edge ? .toMessage(newEdge) : .keepPosition)
             }
             lastNewestID = newest
+            #if DEBUG
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: list shown (\(reason), \(ids.count) rows)") }
+            #endif
 
             if list.selectedIDs != before || reason == .scopeChanged {
                 messageView.show(messageID: restoredDisplay ?? list.selectedID, selectionCount: list.selectedIDs.count)
@@ -656,7 +663,32 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleThreads(_:)) { item.state = showsThreads ? .on : .off }
-        return true
+        // While text is being typed, keys such as ⌫ belong to the text, not the menu.
+        let editing = window?.firstResponder is NSText
+        let ids = targetIDs
+        switch item.action {
+        case #selector(archiveMessages(_:)), #selector(junkMessages(_:)), #selector(deleteMessages(_:)),
+            #selector(moveToMailbox(_:)), #selector(flagMessages(_:)), #selector(unflagMessages(_:)):
+            return !editing && !ids.isEmpty
+        case #selector(toggleReadState(_:)):
+            let rows = (try? model.store.rows(ids: ids)) ?? []
+            item.title = !rows.isEmpty && !rows.contains(where: \.isSeen) ? "Mark as Read" : "Mark as Unread"
+            return !editing && !rows.isEmpty
+        case #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
+            return ids.count == 1 && model.canCompose
+        case #selector(nextMessage(_:)), #selector(previousMessage(_:)), #selector(nextUnreadMessage(_:)),
+            #selector(previousUnreadMessage(_:)), #selector(nextThread(_:)), #selector(previousThread(_:)),
+            #selector(nextUnreadThread(_:)), #selector(previousUnreadThread(_:)):
+            return !editing && !activeList.ids.isEmpty
+        case #selector(rootOfThread(_:)), #selector(lastOfThread(_:)):
+            return !editing && showsThreads && activeList.selectedID != nil
+        case #selector(quickLookAttachments(_:)), #selector(saveAttachments(_:)), #selector(openAttachments(_:)):
+            return messageView.hasAttachments
+        case #selector(goToMailbox(_:)):
+            return !editing
+        default:
+            return true
+        }
     }
 
     @objc func toggleThreads(_ sender: Any?) {
@@ -983,12 +1015,19 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.compose(kind, messageId: ids[0], window: window)
     }
 
-    @objc private func archiveMessages(_ sender: Any?) { moveAway(.archive) }
-    @objc private func junkMessages(_ sender: Any?) { moveAway(.junk) }
-    @objc private func deleteMessages(_ sender: Any?) { moveAway(.delete) }
-    @objc private func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
-    @objc private func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
-    @objc private func toggleFlag(_ sender: Any?) {
+    @objc func archiveMessages(_ sender: Any?) { moveAway(.archive) }
+    @objc func junkMessages(_ sender: Any?) { moveAway(.junk) }
+    @objc func deleteMessages(_ sender: Any?) { moveAway(.delete) }
+    @objc func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
+    @objc func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
+    @objc func flagMessages(_ sender: Any?) { perform(.flag, on: targetIDs) }
+    @objc func unflagMessages(_ sender: Any?) { perform(.unflag, on: targetIDs) }
+    /// Message → Mark as Unread (Mark as Read when every selected message is unread).
+    @objc func toggleReadState(_ sender: Any?) {
+        let rows = (try? model.store.rows(ids: targetIDs)) ?? []
+        perform(rows.contains(where: \.isSeen) ? .markUnread : .markRead, on: targetIDs)
+    }
+    @objc func toggleFlag(_ sender: Any?) {
         let ids = targetIDs
         perform(allFlagged(ids) ? .unflag : .flag, on: ids)
     }
@@ -1009,8 +1048,62 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
         guard !ids.isEmpty else { return }
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: action \(action) start") }
+        #endif
+        registerUndo(for: action, on: ids)
+        // Marks and flags show in the rows at once.
+        for id in ids {
+            for rows in [list, correspondence] {
+                switch action {
+                case .markRead: rows.showSeen(true, id: id)
+                case .markUnread: rows.showSeen(false, id: id)
+                case .flag: rows.showFlagged(true, id: id)
+                case .unflag: rows.showFlagged(false, id: id)
+                default: break
+                }
+            }
+        }
         model.perform(action, on: ids) { [weak self] count in
             await self?.confirmPermanentDelete(count) ?? false
+        }
+    }
+
+    /// Records how to take an action back (Edit → Undo, or u): moves put the messages back in the
+    /// mailboxes they were in, marks and flags go back to each message's previous state. Undoing runs
+    /// through `perform` again, which records the redo. Deleting for good can't be undone.
+    private func registerUndo(for action: AppModel.MessageAction, on ids: [Int64]) {
+        guard let undo = window?.undoManager else { return }
+        let rows = (try? model.store.rows(ids: ids)) ?? []
+        func keyword(_ name: String, _ on: KeyPath<MessageRow, Bool>, set: AppModel.MessageAction, clear: AppModel.MessageAction) {
+            let wasOn = rows.filter { $0[keyPath: on] }.map(\.id), wasOff = rows.filter { !$0[keyPath: on] }.map(\.id)
+            undo.registerUndo(withTarget: self) { target in
+                if !wasOn.isEmpty { target.perform(set, on: wasOn) }
+                if !wasOff.isEmpty { target.perform(clear, on: wasOff) }
+            }
+            undo.setActionName(name)
+        }
+        switch action {
+        case .markRead: keyword("Mark as Read", \.isSeen, set: .markRead, clear: .markUnread)
+        case .markUnread: keyword("Mark as Unread", \.isSeen, set: .markRead, clear: .markUnread)
+        case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
+        case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
+        case .archive, .junk, .delete, .move, .restoreMailboxes:
+            let inTrash: Set<Int64>
+            if case .delete = action { inTrash = (try? model.store.messageIDs(ids, inRole: "trash")) ?? [] } else { inTrash = [] }
+            let movable = ids.filter { !inTrash.contains($0) }  // Those deleted for good stay deleted.
+            guard !movable.isEmpty, let saved = try? model.store.mailboxIDs(messageIds: movable) else { return }
+            var clearJunk = false
+            if case .junk = action { clearJunk = true }
+            undo.registerUndo(withTarget: self) { target in
+                target.perform(.restoreMailboxes(saved, clearJunk: clearJunk), on: movable)
+            }
+            switch action {
+            case .archive: undo.setActionName("Archive")
+            case .junk: undo.setActionName("Mark as Junk")
+            case .delete: undo.setActionName("Delete")
+            default: undo.setActionName("Move")
+            }
         }
     }
 
@@ -1102,3 +1195,305 @@ final class SeparatedStackView: NSStackView {
     }
 }
 
+
+// MARK: - Keyboard (Gmail+Vimium)
+
+/// MailMate's "Gmail+Vimium" key bindings, built in: single keys and two-key sequences act on the
+/// message list while no text is being edited. ⌘↩ sends from a compose window.
+extension MainWindowController {
+    fileprivate func installKeyBindings() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Local monitors run on the main thread.
+            nonisolated(unsafe) let event = event
+            let handled = MainActor.assumeIsolated { self?.handleKey(event) == true }
+            return handled ? nil : event
+        }
+    }
+
+    /// Whether the key was a shortcut (and was handled).
+    fileprivate func handleKey(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control])
+        // ⌘↩ (or ⌘ Enter) sends the message being written.
+        if let compose = event.window?.windowController as? ComposeWindowController {
+            guard modifiers == .command, event.keyCode == 36 || event.keyCode == 76 else { return false }
+            compose.sendMessage(nil)
+            return true
+        }
+        guard let window, event.window === window, window.attachedSheet == nil,
+            !(window.firstResponder is NSText), modifiers.isSubset(of: [.control])
+        else { return false }
+
+        if modifiers == .control {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "r": window.undoManager?.redo()
+            case "s": NSSound.beep()  // Save draft: drafts aren't saved yet.
+            default: return false
+            }
+            return true
+        }
+        // Backspace (⌫, labelled delete on Mac keyboards; key code 51) and forward delete (⌦, 117) delete,
+        // like dd. Handled here, before the views, so it works wherever the focus is.
+        if modifiers.isEmpty, event.keyCode == 51 || event.keyCode == 117 {
+            pendingKey = nil
+            deleteMessages(nil)
+            return true
+        }
+        guard let key = event.characters, key.count == 1 else { return false }
+
+        if let pending = pendingKey {
+            pendingKey = nil
+            if Date().timeIntervalSince(pending.at) < 2 {
+                if !sequence(pending.key, key) { NSSound.beep() }
+                return true
+            }
+        }
+        switch key {
+        case "g", "*", "d", "r": pendingKey = (key, Date())
+        case "c": newMessage(nil)
+        case "/": focusSearch(nil)
+        case "n": moveSelection(down: true, extending: false)
+        case "p": moveSelection(down: false, extending: false)
+        case "N", "J": moveSelection(down: true, extending: true)
+        case "P", "K": moveSelection(down: false, extending: true)
+        case "j": moveToThread(down: true)
+        case "k": moveToThread(down: false)
+        case "o": toggleSelectedThread()
+        case "a", "m": moveAway(.archive)  // m mutes and archives in MailMate; there's no muting here yet.
+        case "s": toggleFlag(nil)
+        case "!": moveAway(.junk)
+        case "f": forward(nil)
+        case "v": pickMailbox(move: true)
+        case "u": window.undoManager?.undo()
+        case "l": messageView.loadRemoteContentOnce()
+        case "I": perform(.markRead, on: targetIDs)
+        case "U": perform(.markUnread, on: targetIDs)
+        case "G": selectRow(activeList.ids.count - 1)
+        default: return false
+        }
+        return true
+    }
+
+    /// The second key of a sequence; false if the pair means nothing.
+    private func sequence(_ first: String, _ second: String) -> Bool {
+        switch (first, second) {
+        case ("g", "a"): return goTo("unified.all")
+        case ("g", "s"): return goTo("unified.flagged")
+        case ("g", "d"): return goTo("unified.drafts")
+        case ("g", "i"): return goTo("unified.inbox")
+        case ("g", "t"): return goTo("unified.sent")
+        case ("g", "l"): pickMailbox(move: false)
+        case ("g", "g"): selectRow(0)
+        case ("*", "a"): activeList.tableView.selectAll(nil)
+        case ("*", "n"): activeList.tableView.deselectAll(nil)
+        case ("*", "r"): selectRows { $0.isSeen }
+        case ("*", "u"): selectRows { !$0.isSeen }
+        case ("*", "s"): selectRows { $0.isFlagged }
+        case ("*", "t"): selectRows { !$0.isFlagged }
+        case ("d", "d"): moveAway(.delete)
+        case ("r", "r"): reply(nil)
+        case ("r", "a"): replyAll(nil)
+        default: return false
+        }
+        return true
+    }
+
+    /// The list the keys act on: Correspondence while it has focus, else the main list.
+    fileprivate var activeList: MessageListViewController {
+        window?.firstResponder === correspondence.tableView ? correspondence : list
+    }
+
+    /// n/p (and with ⇧ extending the selection), as ↓ and ↑ do in the list.
+    fileprivate func moveSelection(down: Bool, extending: Bool) {
+        let table = activeList.tableView
+        let code = down ? NSDownArrowFunctionKey : NSUpArrowFunctionKey
+        guard let arrow = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: extending ? [.shift, .numericPad, .function] : [.numericPad, .function],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window?.windowNumber ?? 0, context: nil,
+            characters: String(UnicodeScalar(code)!), charactersIgnoringModifiers: String(UnicodeScalar(code)!),
+            isARepeat: false, keyCode: down ? 125 : 126)
+        else { return }
+        table.keyDown(with: arrow)
+    }
+
+    /// j/k: the next or previous thread (a message that isn't a reply shown under another).
+    fileprivate func moveToThread(down: Bool) {
+        let rows = activeList
+        let selected = rows.tableView.selectedRowIndexes
+        let start = down ? (selected.last ?? -1) : (selected.first ?? rows.ids.count)
+        let candidates = down ? Array(stride(from: start + 1, to: rows.ids.count, by: 1)) : Array(stride(from: start - 1, through: 0, by: -1))
+        guard let row = candidates.first(where: { (rows.threadRows[rows.ids[$0]]?.depth ?? 0) == 0 }) else { return NSSound.beep() }
+        selectRow(row)
+    }
+
+    fileprivate func selectRow(_ row: Int) {
+        let table = activeList.tableView
+        guard row >= 0, row < activeList.ids.count else { return NSSound.beep() }
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        table.scrollRowToVisible(row)
+    }
+
+    /// o: opens or closes the selected message's thread (or the replies under it).
+    private func toggleSelectedThread() {
+        let rows = activeList
+        guard let id = rows.selectedID, let row = rows.threadRows[id], row.size > 1 || row.hasReplies else { return NSSound.beep() }
+        let open = row.depth == 0 ? expandedThreads.contains(row.thread) : openedMessages.contains(id)
+        toggle(row, collapse: open, inCorrespondence: rows === correspondence)
+    }
+
+    /// *r, *u, *s, *t: selects the list's messages that are read, unread, flagged or not flagged.
+    private func selectRows(where matches: (MessageRow) -> Bool) {
+        let rows = activeList
+        let wanted = Set(((try? model.store.rows(ids: rows.ids)) ?? []).filter(matches).map(\.id))
+        rows.tableView.selectRowIndexes(IndexSet(rows.ids.indices.filter { wanted.contains(rows.ids[$0]) }), byExtendingSelection: false)
+    }
+
+    private func goTo(_ key: String) -> Bool {
+        sidebar.select(key: key)
+    }
+
+    /// v: moves the selected messages to a mailbox of their account; g then l: shows a mailbox.
+    fileprivate func pickMailbox(move: Bool) {
+        guard let window else { return }
+        let roots = SidebarViewController.buildTree(model: model)
+        if move {
+            let ids = targetIDs
+            let accounts = Set(((try? model.store.refs(ids: ids)) ?? []).map(\.accountId))
+            // A mailbox belongs to one account, so the messages must too.
+            guard accounts.count == 1, let account = accounts.first else { return NSSound.beep() }
+            MailboxPicker.show(
+                over: window, title: "Move to Mailbox", roots: roots,
+                include: { $0.kind == .mailbox && $0.accountId == account }
+            ) { [weak self] node in
+                guard case .mailbox(let id)? = node.scope else { return }
+                self?.moveAway(.move(toMailboxId: id))
+            }
+        } else {
+            MailboxPicker.show(over: window, title: "Go to Mailbox", roots: roots, include: { _ in true }) { [weak self] node in
+                _ = self?.sidebar.select(key: node.key)
+            }
+        }
+    }
+
+    #if DEBUG
+        /// The Message menu's items and whether each is enabled now.
+        func debugMessageMenu() -> String {
+            guard let menu = NSApp.mainMenu?.item(withTitle: "Message")?.submenu else { return "no menu" }
+            // Validated by this controller directly (the app may not be frontmost in a test run).
+            return menu.items.filter { !$0.isSeparatorItem && $0.action != nil }.map { item in
+                let on = responds(to: item.action) ? validateMenuItem(item) : false
+                return "\(item.title)\(on ? "" : " (off)")"
+            }.joined(separator: ", ")
+        }
+
+        /// Presses keys as typed (each char a key; "^r" for ⌃R), 400 ms apart, logging the selection.
+        func debugType(_ keys: String) async {
+            NSApp.activate()
+            window?.makeKeyAndOrderFront(nil)
+            window?.makeFirstResponder(list.tableView)
+            var chars = Array(keys)
+            while !chars.isEmpty {
+                var key = String(chars.removeFirst())
+                var flags: NSEvent.ModifierFlags = []
+                if key == "^", let next = chars.first { key = String(next); chars.removeFirst(); flags = .control }
+                if key == "⏎" { key = "\r"; flags = .command }
+                if key == "⌦" { key = "\u{7F}" }  // Backspace as the key handler sees it (key code 51).
+                if key == "⌧" { key = String(UnicodeScalar(NSDeleteFunctionKey)!) }  // Forward delete (key code 117).
+                if let selector = ["N": "nextUnreadMessage:", "T": "nextUnreadThread:", "R": "rootOfThread:", "L": "lastOfThread:",
+                    "Y": "quickLookAttachments:"][key], keys.hasPrefix("@") {
+                    perform(Selector(selector), with: nil)  // A Message menu command, as its menu item would.
+                    try? await Task.sleep(for: .milliseconds(600))
+                    NSLog("MMJ menu \(selector): selected=\(activeList.selectedIDs.prefix(6)) rows=\(activeList.ids.count)")
+                    continue
+                }
+                if key == "@" { continue }
+                if key == "⌫" || key == "⌘" || key == "⌥" {
+                    // Through the main menu, as a key equivalent: ⌫, ⌘↓ (next), ⌥⌘↓ (next unread).
+                    let (chars, code, mods): (String, UInt16, NSEvent.ModifierFlags) =
+                        key == "⌫" ? ("\u{7F}", 51, []) : (String(UnicodeScalar(NSDownArrowFunctionKey)!), 125,
+                            key == "⌘" ? [.command, .function, .numericPad] : [.command, .option, .function, .numericPad])
+                    let menuEvent = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window?.windowNumber ?? 0, context: nil, characters: chars, charactersIgnoringModifiers: chars,
+                        isARepeat: false, keyCode: code)
+                    let handled = menuEvent.map { NSApp.mainMenu?.performKeyEquivalent(with: $0) ?? false } ?? false
+                    try? await Task.sleep(for: .milliseconds(600))
+                    NSLog("MMJ menu key \(key): handled=\(handled) selected=\(activeList.selectedIDs.prefix(6)) rows=\(activeList.ids.count)")
+                    continue
+                }
+                guard let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: NSApp.keyWindow?.windowNumber ?? window?.windowNumber ?? 0, context: nil, characters: key,
+                    charactersIgnoringModifiers: key, isARepeat: false,
+                    keyCode: key == "\r" ? 36 : key == "\u{7F}" ? 51 : key == String(UnicodeScalar(NSDeleteFunctionKey)!) ? 117 : 0)
+                else { continue }
+                // Through the event queue, as a real key press arrives (so undo groups per key press).
+                NSApp.postEvent(event, atStart: false)
+                let handled = true
+                try? await Task.sleep(for: .milliseconds(400))
+                NSLog("MMJ key \(flags == .control ? "^" : "")\(key): handled=\(handled) scope=\(sidebar.selectedKey ?? "-") selected=\(activeList.selectedIDs.prefix(6)) rows=\(activeList.ids.count)")
+            }
+        }
+    #endif
+}
+
+// MARK: - Message menu
+
+/// The Message menu's commands that aren't toolbar buttons, as MailMate has them.
+extension MainWindowController {
+    @objc func moveToMailbox(_ sender: Any?) { pickMailbox(move: true) }
+    @objc func goToMailbox(_ sender: Any?) { pickMailbox(move: false) }
+
+    @objc func nextMessage(_ sender: Any?) { moveSelection(down: true, extending: false) }
+    @objc func previousMessage(_ sender: Any?) { moveSelection(down: false, extending: false) }
+    @objc func nextThread(_ sender: Any?) { moveToThread(down: true) }
+    @objc func previousThread(_ sender: Any?) { moveToThread(down: false) }
+    @objc func nextUnreadMessage(_ sender: Any?) { moveToUnread(down: true, threads: false) }
+    @objc func previousUnreadMessage(_ sender: Any?) { moveToUnread(down: false, threads: false) }
+    @objc func nextUnreadThread(_ sender: Any?) { moveToUnread(down: true, threads: true) }
+    @objc func previousUnreadThread(_ sender: Any?) { moveToUnread(down: false, threads: true) }
+
+    /// The next or previous unread message, or thread with unread mail, in the list.
+    fileprivate func moveToUnread(down: Bool, threads: Bool) {
+        let rows = activeList
+        let unread = Set(((try? model.store.rows(ids: rows.ids)) ?? []).filter { !$0.isSeen }.map(\.id))
+        let selected = rows.tableView.selectedRowIndexes
+        let start = down ? (selected.last ?? -1) : (selected.first ?? rows.ids.count)
+        let candidates = down ? Array(stride(from: start + 1, to: rows.ids.count, by: 1)) : Array(stride(from: start - 1, through: 0, by: -1))
+        let match = candidates.first { index in
+            let id = rows.ids[index]
+            let row = rows.threadRows[id]
+            if threads {
+                // A thread's first row stands for the thread: unread if any of its messages is.
+                guard (row?.depth ?? 0) == 0 else { return false }
+                return unread.contains(id) || row?.anyUnread == true
+            }
+            return unread.contains(id) || (row.map { $0.depth == 0 && $0.size > 1 && $0.anyUnread } ?? false)
+        }
+        guard let match else { return NSSound.beep() }
+        selectRow(match)
+    }
+
+    /// The first message of the selected message's thread.
+    @objc func rootOfThread(_ sender: Any?) {
+        let rows = activeList
+        guard let selected = rows.tableView.selectedRowIndexes.first else { return NSSound.beep() }
+        let root = stride(from: selected, through: 0, by: -1).first { (rows.threadRows[rows.ids[$0]]?.depth ?? 0) == 0 }
+        selectRow(root ?? selected)
+    }
+
+    /// The last message listed in the selected message's thread.
+    @objc func lastOfThread(_ sender: Any?) {
+        let rows = activeList
+        guard let selected = rows.tableView.selectedRowIndexes.last else { return NSSound.beep() }
+        var last = selected
+        while last + 1 < rows.ids.count, (rows.threadRows[rows.ids[last + 1]]?.depth ?? 0) > 0 { last += 1 }
+        if last == selected, let row = rows.threadRows[rows.ids[selected]], row.depth == 0, row.size > 1 {
+            return NSSound.beep()  // A closed thread: its messages aren't listed.
+        }
+        selectRow(last)
+    }
+
+    @objc func quickLookAttachments(_ sender: Any?) { messageView.quickLookAllAttachments() }
+    @objc func saveAttachments(_ sender: Any?) { messageView.saveAllAttachments() }
+    @objc func openAttachments(_ sender: Any?) { messageView.openAllAttachments() }
+}

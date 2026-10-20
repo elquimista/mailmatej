@@ -93,6 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugFocusSidebar()
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_MENU"] != nil, let controller = windowController {
+                    await controller.debugType("n")  // Brings the window forward with a message selected.
+                    NSLog("MMJ menu: \(controller.debugMessageMenu())")
+                }
+                if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_KEYS"] {
+                    // Keys typed as a user would; "|filter" after a v or gl chooses in the mailbox picker.
+                    for part in keys.split(separator: " ") {
+                        if part.hasPrefix("|") {
+                            MailboxPicker.debugChoose(filter: String(part.dropFirst()))
+                            try? await Task.sleep(for: .seconds(1))
+                        } else {
+                            await windowController?.debugType(String(part))
+                        }
+                        try? await Task.sleep(for: .milliseconds(800))
+                    }
+                }
                 if let actions = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS"] {
                     // Comma-separated toolbar actions, 3 s apart.
                     for name in actions.split(separator: ",") {
@@ -292,15 +308,49 @@ enum MainMenu {
         let mailbox = submenu(main, "Mailbox")
         mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
 
+        // MailMate's Message menu and shortcuts, for the commands MailMateJ has.
         let message = submenu(main, "Message")
-        message.addItem(withTitle: "Send", action: #selector(ComposeWindowController.sendMessage(_:)), keyEquivalent: "D")
+        let down = String(UnicodeScalar(NSDownArrowFunctionKey)!), up = String(UnicodeScalar(NSUpArrowFunctionKey)!)
+        func add(
+            _ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command
+        ) {
+            menu.addItem(withTitle: title, action: action, keyEquivalent: key).keyEquivalentModifierMask = modifiers
+        }
+        add(message, "Send", #selector(ComposeWindowController.sendMessage(_:)), "d", [.command, .shift])
         message.addItem(.separator())
-        message.addItem(withTitle: "Reply", action: #selector(MainWindowController.reply(_:)), keyEquivalent: "r")
-        message.addItem(withTitle: "Reply All", action: #selector(MainWindowController.replyAll(_:)), keyEquivalent: "")
-        message.addItem(withTitle: "Forward", action: #selector(MainWindowController.forward(_:)), keyEquivalent: "F")
+        add(message, "Reply", #selector(MainWindowController.reply(_:)), "r")
+        add(message, "Reply All", #selector(MainWindowController.replyAll(_:)), "r", [.command, .shift])
+        add(message, "Forward", #selector(MainWindowController.forward(_:)), "f", [.command, .shift])
+        add(message, "Move to Archive", #selector(MainWindowController.archiveMessages(_:)), "m", [.command, .shift])
+        add(message, "Move to Junk", #selector(MainWindowController.junkMessages(_:)), "j", [.command, .shift])
+        add(message, "Move to Mailbox…", #selector(MainWindowController.moveToMailbox(_:)), "t", [.command, .option])
+        add(message, "Delete", #selector(MainWindowController.deleteMessages(_:)), "\u{8}", [])  // Shown as ⌫; the key itself is handled by the key bindings.
         message.addItem(.separator())
-        message.addItem(withTitle: "Show in Finder", action: #selector(MainWindowController.showInFinder(_:)), keyEquivalent: "R")
-            .keyEquivalentModifierMask = [.command, .shift]
+        let flag = NSMenu(title: "Flag")
+        add(flag, "Flag", #selector(MainWindowController.flagMessages(_:)))
+        add(flag, "Unflag", #selector(MainWindowController.unflagMessages(_:)))
+        message.addItem(withTitle: "Flag", action: nil, keyEquivalent: "").submenu = flag
+        add(message, "Mark as Unread", #selector(MainWindowController.toggleReadState(_:)), "u", [.command, .shift])
+        message.addItem(.separator())
+        add(message, "Next Message", #selector(MainWindowController.nextMessage(_:)), down)
+        add(message, "Previous Message", #selector(MainWindowController.previousMessage(_:)), up)
+        add(message, "Next Unread Message", #selector(MainWindowController.nextUnreadMessage(_:)), down, [.command, .option])
+        add(message, "Previous Unread Message", #selector(MainWindowController.previousUnreadMessage(_:)), up, [.command, .option])
+        message.addItem(.separator())
+        add(message, "Next Thread", #selector(MainWindowController.nextThread(_:)), down, [.command, .control])
+        add(message, "Previous Thread", #selector(MainWindowController.previousThread(_:)), up, [.command, .control])
+        add(message, "Next Unread Thread", #selector(MainWindowController.nextUnreadThread(_:)), down, [.command, .control, .option])
+        add(message, "Previous Unread Thread", #selector(MainWindowController.previousUnreadThread(_:)), up, [.command, .control, .option])
+        add(message, "Root of Thread", #selector(MainWindowController.rootOfThread(_:)), "r", [.command, .control])
+        add(message, "Last of Thread", #selector(MainWindowController.lastOfThread(_:)), "l", [.command, .control])
+        message.addItem(.separator())
+        add(message, "Save Attachments…", #selector(MainWindowController.saveAttachments(_:)), "a", [.command, .option, .shift])
+        add(message, "Quick Look Attachments…", #selector(MainWindowController.quickLookAttachments(_:)), "y")
+        add(message, "Open Attachments", #selector(MainWindowController.openAttachments(_:)), "\r", [.command, .option])
+        message.addItem(.separator())
+        add(message, "Show in Finder", #selector(MainWindowController.showInFinder(_:)))
+        message.addItem(.separator())
+        add(message, "Go to Mailbox…", #selector(MainWindowController.goToMailbox(_:)), "t")
 
         let window = submenu(main, "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")

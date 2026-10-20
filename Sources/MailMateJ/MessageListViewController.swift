@@ -304,6 +304,14 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         tableView.reloadData(forRowIndexes: [index], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
     }
 
+    /// Shows a message as flagged or not at once, before the store's change comes back.
+    func showFlagged(_ flagged: Bool, id: Int64) {
+        guard let index = ids.firstIndex(of: id), var row = cache[id], row.isFlagged != flagged else { return }
+        row.isFlagged = flagged
+        cache[id] = row
+        tableView.reloadData(forRowIndexes: [index], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+    }
+
     private func row(at index: Int) -> MessageRow? {
         guard index < ids.count else { return nil }
         if let row = cache[ids[index]] { return row }

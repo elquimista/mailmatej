@@ -26,7 +26,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     /// Files attached to the message on screen, in the order shown.
     private var attachments: [MessagePart] = []
     /// The file Quick Look shows.
-    private var previewURL: URL?
+    private var previewURLs: [URL] = []
     /// Whether the page shows the buttons' ⌥ variants (⌥ is held).
     private var showsOptionVariants = false
     private var flagsMonitor: Any?
@@ -368,9 +368,69 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private func quickLookAttachment(_ index: Int) {
         withAttachmentFile(index) { [weak self] url in
             guard let self, let panel = QLPreviewPanel.shared() else { return }
-            previewURL = url
-            view.window?.makeFirstResponder(webView)
-            if panel.isVisible { panel.reloadData() } else { panel.makeKeyAndOrderFront(nil) }
+            showQuickLook([url], panel: panel)
+        }
+    }
+
+    private func showQuickLook(_ urls: [URL], panel: QLPreviewPanel) {
+        previewURLs = urls
+        view.window?.makeFirstResponder(webView)
+        if panel.isVisible { panel.reloadData() } else { panel.makeKeyAndOrderFront(nil) }
+    }
+
+    // MARK: All attachments (Message menu)
+
+    var hasAttachments: Bool { !attachments.isEmpty }
+
+    /// Every attachment as a file, in the message's order; reports the first one that couldn't be fetched.
+    private func withAllAttachmentFiles(_ body: @escaping @MainActor ([URL]) -> Void) {
+        guard !attachments.isEmpty, let id = currentID, let detail = currentDetail else { return NSSound.beep() }
+        let parts = attachments
+        Task { @MainActor in
+            var urls: [URL] = []
+            for (index, part) in parts.enumerated() {
+                do {
+                    urls.append(try await model.attachmentFile(messageId: id, index: index, accountId: detail.accountId, part: part))
+                } catch {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn’t get “\(AppModel.fileName(for: part))”."
+                    alert.informativeText = AppModel.describe(error)
+                    if let window = view.window { alert.beginSheetModal(for: window, completionHandler: nil) } else { alert.runModal() }
+                    return
+                }
+            }
+            body(urls)
+        }
+    }
+
+    func quickLookAllAttachments() {
+        withAllAttachmentFiles { [weak self] urls in
+            guard let self, let panel = QLPreviewPanel.shared() else { return }
+            showQuickLook(urls, panel: panel)
+        }
+    }
+
+    func openAllAttachments() {
+        withAllAttachmentFiles { urls in urls.forEach { NSWorkspace.shared.open($0) } }
+    }
+
+    /// Saves every attachment into a folder the user picks.
+    func saveAllAttachments() {
+        guard hasAttachments, let window = view.window else { return NSSound.beep() }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Save"
+        panel.message = "Choose where to save the attachments."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let folder = panel.url else { return }
+            self?.withAllAttachmentFiles { urls in
+                for source in urls {
+                    let target = Self.unusedURL(folder.appendingPathComponent(source.lastPathComponent))
+                    guard self?.copy(source, to: target, replacing: false) == true else { return }
+                }
+            }
         }
     }
 
@@ -492,7 +552,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     // QuickLookUI declares these outside any actor; AppKit calls them on the main thread.
     override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
-        MainActor.assumeIsolated { previewURL != nil }
+        MainActor.assumeIsolated { !previewURLs.isEmpty }
     }
 
     override nonisolated func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
@@ -502,7 +562,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     override nonisolated func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
         MainActor.assumeIsolated {
             panel.dataSource = nil
-            previewURL = nil
+            previewURLs = []
         }
     }
 
@@ -547,6 +607,12 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         guard let value = sender.representedObject as? String else { return }
         try? model.store.allowRemoteContent(value)
         rerender()
+    }
+
+    /// Loads the blocked remote content of the message on screen, this once (the bar's Load).
+    func loadRemoteContentOnce() {
+        guard displayedMessageID != nil else { return NSSound.beep() }
+        perform(.load)
     }
 
     #if DEBUG
@@ -612,7 +678,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_QUICKLOOK"] != nil {
                 quickLookAttachment(1)
                 try? await Task.sleep(for: .seconds(2))
-                NSLog("MMJ attachment Quick Look visible: \(QLPreviewPanel.shared()?.isVisible ?? false) item=\(previewURL?.lastPathComponent ?? "none")")
+                NSLog("MMJ attachment Quick Look visible: \(QLPreviewPanel.shared()?.isVisible ?? false) item=\(previewURLs.first?.lastPathComponent ?? "none")")
             }
             withAttachmentFile(0) { url in
                 let q = (try? url.resourceValues(forKeys: [.quarantinePropertiesKey]))?.quarantineProperties
@@ -680,11 +746,12 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
 extension MessageViewController: QLPreviewPanelDataSource {
     nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        MainActor.assumeIsolated { previewURL == nil ? 0 : 1 }
+        MainActor.assumeIsolated { previewURLs.count }
     }
 
     nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        MainActor.assumeIsolated { previewURL as NSURL? }
+        let url: URL? = MainActor.assumeIsolated { previewURLs.indices.contains(index) ? previewURLs[index] : nil }
+        return url as NSURL?
     }
 }
 
