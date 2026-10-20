@@ -96,6 +96,20 @@ import Testing
         #expect(try store.myAddresses().contains("support@other.com"))
     }
 
+    @Test func archiveFolderWithoutRoleIsUsed() throws {
+        func box(_ id: String, _ name: String, role: String? = nil, parent: String? = nil) -> IncomingMailbox {
+            IncomingMailbox(remoteId: id, parentRemoteId: parent, name: name, role: role, sortOrder: 0, totalEmails: 0, unreadEmails: 0)
+        }
+        try store.applyMailboxes(
+            accountId: "acc", upserts: [box("in", "Inbox", role: "inbox"), box("x", "Archive", parent: "in"), box("a", "Archive")],
+            destroyed: [], replaceAll: true)
+        #expect(try store.mailbox(accountId: "acc", role: "archive")?.remoteId == "a")  // top level, by name
+        try store.applyMailboxes(accountId: "acc", upserts: [box("a", "Archive")], destroyed: [], replaceAll: false)
+        #expect(try store.mailbox(accountId: "acc", role: "archive")?.remoteId == "a")  // kept after a sync
+        try store.applyMailboxes(accountId: "acc", upserts: [box("z", "Old Mail", role: "archive")], destroyed: [], replaceAll: false)
+        #expect(try store.mailboxes().filter { $0.role == "archive" }.map(\.remoteId) == ["z"])  // the server's wins
+    }
+
     @Test func threadsGroupConversations() {
         // Sorted newest first: c2 (t2), b2 (t1, reply), c1 (t2's first), a (t1's first), d (alone).
         let rows: [(id: Int64, thread: String, at: Double, seen: Bool)] = [

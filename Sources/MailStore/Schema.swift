@@ -211,6 +211,14 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v8-infer-archive") { db in
+            // A top-level "Archive" stands in for an account without an archive-role mailbox
+            // (MailStore.inferArchive does the same on every mailbox sync).
+            for accountId in try String.fetchAll(db, sql: "SELECT id FROM account") {
+                try MailStore.inferArchive(db, accountId: accountId, serverArchive: nil)
+            }
+        }
+
         return m
     }
 }

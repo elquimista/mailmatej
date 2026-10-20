@@ -241,6 +241,10 @@ final class AppModel {
                 accountId: accountId, remoteIds: remoteIds, patch: ["keywords/\(keyword)": on ? .bool(true) : .null])
         }
         func move(toRole role: String, extra: [String: JSONValue] = [:]) async throws {
+            // An account without an Archive gets one, as other mail apps do on first use.
+            if role == "archive", try store.mailbox(accountId: accountId, role: role) == nil {
+                try await coordinator.createMailbox(accountId: accountId, name: "Archive", role: "archive")
+            }
             guard let target = try store.mailbox(accountId: accountId, role: role) else {
                 throw MessageActionError.noMailbox(role: role)
             }
@@ -285,7 +289,7 @@ final class AppModel {
         var errorDescription: String? {
             switch self {
             case .noMailbox(let role):
-                let name = ["archive": "an Archive", "junk": "a Junk", "trash": "a Deleted Messages"][role] ?? "a matching"
+                let name = ["archive": "Archive", "junk": "Junk", "trash": "Deleted Messages"][role] ?? "matching"
                 return "This account has no \(name) mailbox."
             }
         }

@@ -157,6 +157,11 @@ public actor SyncCoordinator {
         return try await engine.ensureIdentities(addresses, name: name)
     }
 
+    public func createMailbox(accountId: String, name: String, role: String?) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.createMailbox(name: name, role: role)
+    }
+
     public func destroy(accountId: String, remoteIds: [String]) async throws {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         defer { requestSync(accountId) }

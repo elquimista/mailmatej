@@ -176,7 +176,28 @@ public final class MailStore: Sendable {
                 try db.execute(
                     sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
             }
+            try Self.inferArchive(db, accountId: accountId, serverArchive: upserts.first { $0.role == "archive" }?.remoteId)
         }
+    }
+
+    /// Many servers don't give the Archive folder JMAP's archive role. Where an account has no mailbox
+    /// with it, a top-level mailbox named "Archive" stands in (locally), so Archive and the unified Archive
+    /// mailbox use it. A mailbox the server does mark as Archive takes over from it.
+    static func inferArchive(_ db: Database, accountId: String, serverArchive: String?) throws {
+        if let serverArchive {
+            try db.execute(
+                sql: "UPDATE mailbox SET role = NULL WHERE accountId = ? AND role = 'archive' AND remoteId != ?",
+                arguments: [accountId, serverArchive])
+            return
+        }
+        try db.execute(
+            sql: """
+                UPDATE mailbox SET role = 'archive'
+                WHERE id = (SELECT id FROM mailbox WHERE accountId = ? AND role IS NULL AND parentRemoteId IS NULL
+                            AND name = 'Archive' COLLATE NOCASE ORDER BY sortOrder LIMIT 1)
+                  AND NOT EXISTS (SELECT 1 FROM mailbox WHERE accountId = ? AND role = 'archive')
+                """,
+            arguments: [accountId, accountId])
     }
 
     // MARK: Messages (writes)

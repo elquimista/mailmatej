@@ -426,6 +426,24 @@ public actor JMAPAccountSync {
         }
     }
 
+    /// Creates a top-level mailbox (Mailbox/set), with `role` if the server accepts it, and syncs the
+    /// mailbox list so it's in the store.
+    public func createMailbox(name: String, role: String?) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        func create(withRole: Bool) async throws -> JSONValue? {
+            var mailbox: [String: JSONValue] = ["name": .string(name), "parentId": .null]
+            if withRole, let role { mailbox["role"] = .string(role) }
+            var request = JMAPRequest()
+            let set = request.call("Mailbox/set", ["accountId": .string(accountId), "create": ["new": .object(mailbox)]])
+            return try await client.send(request).arguments(set)["notCreated"]?["new"]
+        }
+        if var error = try await create(withRole: role != nil) {
+            if role != nil { error = try await create(withRole: false) ?? .null }  // Some servers won't set roles.
+            if error != .null { throw SendError.rejected(Self.setErrorText(error)) }
+        }
+        _ = try await syncMailboxes(accountId)
+    }
+
     /// Deletes emails for good (Email/set destroy), here and on the server.
     public func destroy(remoteIds: [String]) async throws {
         guard !remoteIds.isEmpty else { return }
