@@ -2,6 +2,7 @@
 # Builds the app into ./build without Xcode.
 #   scripts/bundle.sh            # release → build/MailMateJ.app
 #   scripts/bundle.sh debug      # debug   → build/MailMateJ Dev.app (own bundle id, data folder and icon)
+#   MMJ_VERSION=1.2.0 scripts/bundle.sh   # stamps that version (the release workflow passes the tag)
 # Signing: uses the "MailMateJ Signing" certificate if it is in your keychain (see README), so
 # keychain "Always Allow" survives rebuilds; otherwise ad-hoc. MMJ_SIGN_IDENTITY overrides the name.
 set -euo pipefail
@@ -25,6 +26,11 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy \
   -c "Set :CFBundleName $NAME" -c "Set :CFBundleDisplayName $NAME" -c "Set :CFBundleIdentifier $BUNDLE_ID" \
   "$APP/Contents/Info.plist"
+# MMJ_VERSION (e.g. from a release tag, "1.2.0") stamps the version; the build number counts commits.
+if [ -n "${MMJ_VERSION:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MMJ_VERSION" \
+    -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" "$APP/Contents/Info.plist"
+fi
 cp "Resources/$ICON.icns" "$APP/Contents/Resources/AppIcon.icns"
 for bundle in "$BIN"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"

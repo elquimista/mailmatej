@@ -50,6 +50,16 @@ macOS ties keychain access to an app's Team ID. Without one, every new build cou
 
 Zip `build/MailMateJ.app` and send it. On first launch macOS blocks it. They open it once, then go to System Settings → Privacy & Security → **Open Anyway**. Alternatively they run `xattr -dr com.apple.quarantine MailMateJ.app`.
 
+### Releases
+
+Pushing a tag builds the release app on GitHub Actions (`.github/workflows/release.yml`) and publishes it, zipped, as that tag's release: `v1.2.0` becomes version 1.2.0, and a tag with a hyphen (`v1.3.0-beta1`) a pre-release.
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+To sign releases with your Apple Development certificate (so the keychain keeps trusting updates), add two repository secrets: `MACOS_CERTIFICATE_P12`, the base64 of the certificate and its private key exported from Keychain Access as a .p12 (`base64 -i cert.p12 | pbcopy`), and `MACOS_CERTIFICATE_PASSWORD`, the export password. Without them releases are signed ad hoc.
+
 ## Local dev server
 
 ```bash
