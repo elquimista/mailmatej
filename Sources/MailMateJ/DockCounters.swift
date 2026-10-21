@@ -148,11 +148,13 @@ final class DockTileView: NSView {
 
     private func badge(for value: Int, maxWidth: CGFloat) -> Badge {
         let height = badgeHeight
-        let padding = height * 0.5
+        let padding = height * 0.32  // MailMate: "1617" badge 26 px wide around 20 px of digits
         let minFont = height * 0.42
 
         // Full digits, shrunk if needed; if they can't fit at a readable size, the compact form.
-        var fontSize = height * 0.56  // Digits about 8 px tall in a 19 px badge, as MailMate draws them.
+        // MailMate's digits (measured in the Dock at 1x): regular weight, proportional, 8 px tall in a
+        // 19 px badge, "1617" 21 px wide; 0.53 drew them about 7% narrower.
+        var fontSize = height * 0.56
         var label = Self.attributed(Self.label(for: value), size: fontSize)
         while label.size().width + padding > maxWidth && fontSize > minFont {
             fontSize -= 0.5
@@ -196,7 +198,7 @@ final class DockTileView: NSView {
 
     private static func attributed(_ text: String, size: CGFloat) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: size, weight: .regular), .foregroundColor: NSColor.white,
         ])
     }
 }
