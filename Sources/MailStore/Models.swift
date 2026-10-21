@@ -292,6 +292,12 @@ public enum MessageScope: Hashable, Sendable {
     case flaggedInMailbox(Int64)
     case flaggedInAccount(String)
     case allInAccount(String)
+    /// A smart mailbox, and its submailboxes: messages with one value of a field, or of one account.
+    case smart(Int64)
+    case smartValue(Int64, SmartField, String)
+    case smartAccount(Int64, String)
+    /// With "each account" and a value split both on: one account's messages with that value.
+    case smartAccountValue(Int64, String, SmartField, String)
 
     /// A stable string form, for settings: "all", "flagged", "role:inbox", "mailbox:42", "account:<id>",
     /// "flagged:mailbox:42", "flagged:account:<id>", "all:account:<id>".
@@ -305,6 +311,11 @@ public enum MessageScope: Hashable, Sendable {
         case .flaggedInMailbox(let id): "flagged:mailbox:\(id)"
         case .flaggedInAccount(let id): "flagged:account:\(id)"
         case .allInAccount(let id): "all:account:\(id)"
+        case .smart(let id): "smart:\(id)"
+        case .smartValue(let id, let field, let value): "smartvalue:\(id):\(field.rawValue):\(value)"
+        case .smartAccount(let id, let account): "smartaccount:\(id):\(account)"
+        case .smartAccountValue(let id, let account, let field, let value):
+            "smartaccountvalue:\(id):\(account):\(field.rawValue):\(value)"
         }
     }
 
@@ -316,6 +327,20 @@ public enum MessageScope: Hashable, Sendable {
         case ("role", 2): self = .role(parts[1])
         case ("mailbox", 2): if let id = Int64(parts[1]) { self = .mailbox(id) } else { return nil }
         case ("account", 2): self = .account(parts[1])
+        case ("smart", 2): if let id = Int64(parts[1]) { self = .smart(id) } else { return nil }
+        case ("smartvalue", 2):
+            let rest = parts[1].split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+            guard rest.count == 3, let id = Int64(rest[0]), !rest[1].isEmpty else { return nil }
+            let field = SmartField(rawValue: rest[1])
+            self = .smartValue(id, field, rest[2])
+        case ("smartaccountvalue", 2):
+            let rest = parts[1].split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false).map(String.init)
+            guard rest.count == 4, let id = Int64(rest[0]), !rest[2].isEmpty else { return nil }
+            self = .smartAccountValue(id, rest[1], SmartField(rawValue: rest[2]), rest[3])
+        case ("smartaccount", 2):
+            let rest = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
+            guard rest.count == 2, let id = Int64(rest[0]) else { return nil }
+            self = .smartAccount(id, rest[1])
         case ("flagged", 2), ("all", 2):
             let rest = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
             guard rest.count == 2 else { return nil }

@@ -33,6 +33,8 @@ public actor SyncCoordinator {
 
     private let store: MailStore
     private let credentials: CredentialsProvider
+    /// New messages of an account, by remote id, after a sync (for rules).
+    private let onArrived: @Sendable (String, [String]) -> Void
     private let onStatus: @Sendable (AccountSyncStatus) -> Void
     private let limiter: AsyncLimiter
     private let urlSession: URLSession
@@ -54,11 +56,13 @@ public actor SyncCoordinator {
 
     public init(
         store: MailStore, maxConcurrentSyncs: Int = 6, credentials: @escaping CredentialsProvider,
-        onStatus: @escaping @Sendable (AccountSyncStatus) -> Void = { _ in }
+        onStatus: @escaping @Sendable (AccountSyncStatus) -> Void = { _ in },
+        onArrived: @escaping @Sendable (_ accountId: String, _ remoteIds: [String]) -> Void = { _, _ in }
     ) {
         self.store = store
         self.credentials = credentials
         self.onStatus = onStatus
+        self.onArrived = onArrived
         self.limiter = AsyncLimiter(limit: maxConcurrentSyncs)
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 8
@@ -188,6 +192,11 @@ public actor SyncCoordinator {
         try await engine.send(message)
     }
 
+    public func redirect(accountId: String, remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.redirect(remoteId: remoteId, to: recipients, identityId: identityId, mailFrom: mailFrom)
+    }
+
     public func replyHeaders(accountId: String, remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         return try await engine.replyHeaders(remoteId: remoteId)
@@ -213,7 +222,8 @@ public actor SyncCoordinator {
             await limiter.acquire()
             update(accountId, .syncing)
             do {
-                try await engine.sync()
+                let result = try await engine.sync()
+                if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                 update(accountId, .idle, success: true)
                 startDownloads(accountId)
             } catch {

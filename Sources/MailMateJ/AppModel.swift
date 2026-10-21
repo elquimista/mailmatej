@@ -49,6 +49,9 @@ final class AppModel {
             credentials: Self.credentials(for:),
             onStatus: { status in
                 Task { @MainActor in AppModel.shared?.statusChanged(status) }
+            },
+            onArrived: { accountId, remoteIds in
+                Task { @MainActor in AppModel.shared?.runRules(accountId: accountId, remoteIds: remoteIds) }
             })
     }
 
@@ -209,6 +212,12 @@ final class AppModel {
 
     enum MessageAction {
         case archive, junk, delete, markRead, markUnread, flag, unflag
+        /// A rule's Set/Remove Tag/Keyword.
+        case keyword(String, Bool)
+        /// A rule's Copy to Mailbox (same account: the message is in that mailbox too).
+        case copy(toMailboxId: Int64)
+        /// A rule's Delete Permanently.
+        case deletePermanently
         /// Into one mailbox of the messages' account.
         case move(toMailboxId: Int64)
         /// Into each message's account's mailbox with this role (a Unified mailbox, such as Sent Messages).
@@ -271,6 +280,19 @@ final class AppModel {
         case .markUnread: try setKeyword("$seen", false)
         case .flag: try setKeyword("$flagged", true)
         case .unflag: try setKeyword("$flagged", false)
+        case .keyword(let keyword, let on): try setKeyword(keyword, on)
+        case .copy(let mailboxId):
+            guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
+                throw MessageActionError.noMailbox(role: "")
+            }
+            let current = try store.mailboxIDs(messageIds: ids)
+            for id in ids where !(current[id] ?? []).contains(target.id) {
+                try store.setMailboxes((current[id] ?? []) + [target.id], messageId: id)
+            }
+            work.updates.append((remoteIds, ["mailboxIds/\(target.remoteId)": .bool(true)]))
+        case .deletePermanently:
+            try store.deleteMessages(accountId: accountId, remoteIds: remoteIds)  // gone here at once
+            work.deleteForGood = refs
         case .archive:
             if let archive = try store.mailbox(accountId: accountId, role: "archive") {
                 try move(refs, to: archive)
@@ -355,11 +377,197 @@ final class AppModel {
         }
     }
 
+    private func present(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the smart mailbox."
+        alert.informativeText = Self.describe(error)
+        present(alert)
+    }
+
     /// Refreshes the UI from the store now, skipping the debounce meant for sync bursts.
-    private func refreshNow() {
+    func refreshNow() {
         myAddresses = (try? store.myAddresses()) ?? myAddresses
         dockCounters?.update()
         NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
+    }
+
+    // MARK: Rules
+
+    /// Runs the rules on newly arrived messages, as MailMate does: each rule of a mailbox the messages
+    /// are in, in order, on those meeting its conditions (see `runRule`). A message one rule moves
+    /// isn't touched by later rules.
+    func runRules(accountId: String, remoteIds: [String]) {
+        guard let rules = try? store.rules(), rules.contains(where: \.definition.enabled),
+            let ids = try? store.messageIDs(accountId: accountId, remoteIds: remoteIds), !ids.isEmpty
+        else { return }
+        var remaining = Set(ids)
+        for rule in rules where rule.parentId == nil && rule.definition.enabled && !remaining.isEmpty {
+            let result = runRule(rule, on: Array(remaining), all: rules)
+            remaining.subtract(result.moved)
+            #if DEBUG
+                NSLog("MMJ rules: \(rule.definition.name) matched \(result.matched.count) of \(ids.count) new")
+            #endif
+        }
+    }
+
+    /// Runs one rule on those of `ids` its mailbox and conditions take: its tags and copies at once, then
+    /// its subrules on the messages it matched (MailMate's subrules), then — after any Redirect or Forward
+    /// has been sent, since they read the message — its first move or delete on what the subrules didn't
+    /// move. Returns what it matched and what it (or a subrule) moved away.
+    @discardableResult
+    func runRule(_ rule: RuleRecord, on ids: [Int64], all: [RuleRecord]? = nil) -> (matched: [Int64], moved: Set<Int64>) {
+        guard let matched = try? store.messages(ids, matching: rule), !matched.isEmpty else { return ([], []) }
+        let actions = rule.definition.actions.filter(\.enabled)
+        let sends = actions.filter { $0.kind == .redirect || $0.kind == .forward }
+        for action in actions where !action.kind.moves && !sends.contains(action) { apply(action, to: matched) }
+        var moved = Set<Int64>()
+        let rules = all ?? ((try? store.rules()) ?? [])
+        for child in rules where child.parentId == rule.id && child.definition.enabled {
+            moved.formUnion(runRule(child, on: matched.filter { !moved.contains($0) }, all: rules).moved)
+        }
+        let rest = matched.filter { !moved.contains($0) }
+        if let move = actions.first(where: \.kind.moves), !rest.isEmpty {
+            if sends.isEmpty {
+                apply(move, to: rest)
+            } else {
+                Task {
+                    for action in sends { await send(action, messages: matched) }
+                    apply(move, to: rest)
+                }
+            }
+            moved.formUnion(rest)
+        } else if !sends.isEmpty {
+            Task { for action in sends { await send(action, messages: matched) } }
+        }
+        return (matched, moved)
+    }
+
+    private func apply(_ action: RuleAction, to ids: [Int64]) {
+        let never: (Int) async -> Bool = { _ in false }  // only Delete Permanently deletes for good
+        switch action.kind {
+        case .setKeyword, .removeKeyword:
+            guard !action.value.isEmpty else { return }
+            perform(.keyword(action.value, action.kind == .setKeyword), on: ids, confirmPermanentDelete: never)
+        case .delete: perform(.delete, on: ids, confirmPermanentDelete: never)
+        case .deletePermanently: perform(.deletePermanently, on: ids, confirmPermanentDelete: { _ in true })
+        case .archive: perform(.archive, on: ids, confirmPermanentDelete: never)
+        case .junk: perform(.junk, on: ids, confirmPermanentDelete: never)
+        case .move, .copy:
+            // A unified mailbox: each message's own (its account's Archive, Inbox, ...).
+            if case .role(let role)? = MessageScope(key: action.value) {
+                if action.kind == .move {
+                    // Archive as the toolbar does it (an account without one gets one); other roles as they are.
+                    return perform(role == "archive" ? .archive : .moveToRole(role), on: ids, confirmPermanentDelete: never)
+                }
+                guard let refs = try? store.refs(ids: ids) else { return }
+                for (accountId, group) in Dictionary(grouping: refs, by: \.accountId) {
+                    if let target = try? store.mailbox(accountId: accountId, role: role) {
+                        perform(.copy(toMailboxId: target.id), on: group.map(\.id), confirmPermanentDelete: never)
+                    }
+                }
+                return
+            }
+            guard let mailboxId = Int64(action.value), let target = try? store.mailboxes().first(where: { $0.id == mailboxId }),
+                let refs = try? store.refs(ids: ids)
+            else { return }
+            let same = refs.filter { $0.accountId == target.accountId }, other = refs.filter { $0.accountId != target.accountId }
+            let local: MessageAction = action.kind == .move ? .move(toMailboxId: mailboxId) : .copy(toMailboxId: mailboxId)
+            if !same.isEmpty { perform(local, on: same.map(\.id), confirmPermanentDelete: never) }
+            if !other.isEmpty {
+                if action.kind == .move { moveAcrossAccounts(other, toMailboxId: mailboxId) } else { copyAcrossAccounts(other, toMailboxId: mailboxId) }
+            }
+        case .redirect, .forward: break  // sent by `runRule`
+        }
+    }
+
+    /// Redirect (the message as it is) or Forward (a new message quoting it) to the action's address,
+    /// from an identity of the message's account. Failures are reported.
+    private func send(_ action: RuleAction, messages ids: [Int64]) async {
+        let address = action.value.trimmingCharacters(in: .whitespaces)
+        guard !address.isEmpty else { return }
+        for id in ids {
+            do {
+                guard let detail = try store.detail(id: id) else { continue }
+                if action.kind == .redirect {
+                    guard let identity = try store.identities().first(where: { $0.accountId == detail.accountId }) else {
+                        throw ComposeError.noIdentities
+                    }
+                    try await coordinator.redirect(
+                        accountId: detail.accountId, remoteId: detail.remoteId, to: [address], identityId: identity.remoteId,
+                        mailFrom: identity.envelopeEmail ?? identity.email)
+                } else {
+                    let setup = try await composeSetup(.forward, messageId: id)
+                    guard let identity = setup.identity else { throw ComposeError.noIdentities }
+                    var message = OutgoingMessage(
+                        identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
+                        to: [EmailAddress(name: nil, email: address)], cc: [], bcc: [], subject: setup.draft.subject,
+                        text: setup.draft.text, attachments: setup.attachments)
+                    message.mailFrom = identity.envelopeEmail
+                    try await coordinator.send(accountId: identity.accountId, message)
+                    perform(.keyword("$forwarded", true), on: [id]) { _ in false }
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "A rule couldn’t \(action.kind == .redirect ? "redirect" : "forward") a message to \(address)."
+                alert.informativeText = Self.describe(error)
+                present(alert)
+            }
+        }
+    }
+
+    /// Copies messages into a mailbox of another account (a rule's Copy to Mailbox), keeping the originals.
+    func copyAcrossAccounts(_ refs: [MailStore.MessageRef], toMailboxId mailboxId: Int64) {
+        guard let target = try? store.mailboxes().first(where: { $0.id == mailboxId }) else { return }
+        Task {
+            for ref in refs {
+                do {
+                    guard let detail = try store.detail(id: ref.id) else { continue }
+                    var raw = store.blobs.read(accountId: ref.accountId, blobId: detail.blobId)
+                    if raw == nil {
+                        raw = try await coordinator.downloadBlob(
+                            accountId: ref.accountId, blobId: detail.blobId, type: "message/rfc822", name: "message.eml")
+                    }
+                    guard let raw else { continue }
+                    try await coordinator.importMessage(
+                        accountId: target.accountId, raw, mailboxRemoteId: target.remoteId,
+                        keywords: (try? store.keywords(messageId: ref.id)) ?? [], receivedAt: detail.receivedAt)
+                } catch {
+                    report(error, count: 1)
+                }
+            }
+        }
+    }
+
+    // MARK: Smart mailboxes
+
+    /// Creates a smart mailbox (inside `parentId`, if given) and shows it at once.
+    func createSmartMailbox(name: String, parentId: Int64?) -> Int64? {
+        do {
+            let id = try store.createSmartMailbox(name: name, parentId: parentId)
+            refreshNow()
+            return id
+        } catch {
+            present(error)
+            return nil
+        }
+    }
+
+    func updateSmartMailbox(id: Int64, name: String? = nil, definition: SmartDefinition? = nil) {
+        do {
+            try store.updateSmartMailbox(id: id, name: name, definition: definition)
+            refreshNow()
+        } catch {
+            present(error)
+        }
+    }
+
+    func deleteSmartMailbox(id: Int64) {
+        do {
+            try store.deleteSmartMailbox(id: id)
+            refreshNow()
+        } catch {
+            present(error)
+        }
     }
 
     enum MessageActionError: LocalizedError {

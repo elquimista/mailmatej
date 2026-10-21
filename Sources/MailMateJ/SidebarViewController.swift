@@ -3,7 +3,7 @@ import MailStore
 import MailSync
 
 final class SidebarNode: NSObject {
-    enum Kind { case header, unified, account, mailbox }
+    enum Kind { case header, unified, account, mailbox, smart }
 
     let key: String
     let kind: Kind
@@ -31,10 +31,15 @@ final class SidebarNode: NSObject {
 
 /// Source-list sidebar: unified "Mailboxes" by role, then "Sources" with each account's folder tree.
 @MainActor
-final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate,
+    NSTextFieldDelegate
+{
     var onSelect: ((SidebarNode) -> Void)?
     /// Edit an account's settings (a double-click on it, or Edit Account… in its menu).
     var onEditAccount: ((String) -> Void)?
+    /// Unread counts, activity spinners, sync warnings and status tooltips on the rows; MailMate's
+    /// mailbox editor shows its sidebar without any of them.
+    var showsStatus = true
 
     private let model: AppModel
     private let outline = SidebarOutlineView()
@@ -95,6 +100,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// is working on its mailbox, for unified mailboxes when any mailbox with that role is busy, and
     /// for collapsed rows when anything inside them is busy.
     func refreshStatuses() {
+        guard showsStatus else { return }
         let busyIDs = model.busyMailboxIDs
         var busyRoles = Set<String>()
 
@@ -150,7 +156,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             guard let node = outline.item(atRow: row) as? SidebarNode, node.kind != .header,
                 let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell
             else { continue }
-            cell.configure(node)
+            cell.configure(node, plain: !showsStatus)
         }
     }
 
@@ -271,6 +277,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
+    func node(forKey key: String) -> SidebarNode? { find(key, in: roots) }
+
     private func find(_ key: String, in nodes: [SidebarNode]) -> SidebarNode? {
         for node in nodes {
             if node.key == key { return node }
@@ -309,6 +317,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "tray.full", scope: .allMessages)
         all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
         unified.children.append(all)
+        unified.children += smartNodes(store: store, accounts: accountsByID)
 
         let sources = SidebarNode(key: "header.sources", kind: .header, title: "Sources")
         let byAccount = Dictionary(grouping: mailboxes, by: \.accountId)
@@ -323,6 +332,57 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             sources.children.append(node)
         }
         return [unified, sources]
+    }
+
+    /// Smart mailboxes, nested as the user arranged them, each with its unread count and the
+    /// submailboxes of its Submailboxes tab.
+    static func smartNodes(store: MailStore, accounts: [String: AccountRecord]) -> [SidebarNode] {
+        let smart = (try? store.smartMailboxes()) ?? []
+        let byParent = Dictionary(grouping: smart, by: \.parentId)
+        func nodes(_ parent: Int64?) -> [SidebarNode] {
+            (byParent[parent] ?? []).map { record in
+                let node = SidebarNode(
+                    key: "smart.\(record.id)", kind: .smart, title: record.name, symbol: smartSymbol, scope: .smart(record.id))
+                node.badge = (try? store.count(scope: .smart(record.id), counting: .unread)) ?? 0
+                node.children = nodes(record.id) + splitNodes(record, store: store, accounts: accounts)
+                return node
+            }
+        }
+        return nodes(nil)
+    }
+
+    /// Smart mailboxes' icon: a filter (mail chosen by conditions, as the editor's Conditions tab shows).
+    static let smartSymbol = "line.3.horizontal.decrease.circle"
+
+    /// A smart mailbox's Submailboxes tab as sidebar rows: a child per value, or per account; with both,
+    /// the accounts, each with its own values (as unified mailboxes group sources by account).
+    private static func splitNodes(_ record: SmartMailboxRecord, store: MailStore, accounts: [String: AccountRecord]) -> [SidebarNode] {
+        let split = record.definition.split
+        func valueNodes(account: String?) -> [SidebarNode] {
+            guard split.byValue, let values = try? store.smartValues(id: record.id, field: split.field, account: account),
+                !(split.unlessOnlyOne && values.count < 2)
+            else { return [] }
+            return values.map { value, unread in
+                let scope: MessageScope = account.map { .smartAccountValue(record.id, $0, split.field, value) }
+                    ?? .smartValue(record.id, split.field, value)
+                let node = SidebarNode(
+                    key: "smart.\(record.id)\(account.map { ".account.\($0)" } ?? "").value.\(value.lowercased())", kind: .mailbox,
+                    title: value.isEmpty ? "Other" : value, symbol: smartSymbol, scope: scope, accountId: account)
+                node.badge = unread
+                return node
+            }
+        }
+        guard split.byAccount, let list = try? store.smartAccounts(id: record.id) else { return valueNodes(account: nil) }
+        let sorted = list.compactMap { entry in accounts[entry.accountId].map { ($0, entry.unread) } }
+            .sorted { ($0.0.sortOrder, $0.0.name) < ($1.0.sortOrder, $1.0.name) }
+        return sorted.map { account, unread in
+            let node = SidebarNode(
+                key: "smart.\(record.id).account.\(account.id)", kind: .mailbox, title: account.name, symbol: "at",
+                scope: .smartAccount(record.id, account.id), accountId: account.id)
+            node.badge = unread
+            node.children = valueNodes(account: account.id)
+            return node
+        }
     }
 
     /// MailMate's submailboxes of a unified mailbox. For a role (Inbox, Sent, ...) one per account's
@@ -341,7 +401,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let known = mailboxes.filter { accounts[$0.accountId] != nil }
         func child(_ key: String, _ title: String, _ scope: MessageScope, accountId: String, badge: Int, role: String?) -> SidebarNode {
             let child = SidebarNode(
-                key: "\(node.key).\(key)", kind: .mailbox, title: settings.name(source: title), symbol: node.symbol,
+                key: "\(node.key).\(key)", kind: .mailbox, title: title, symbol: node.symbol,
                 scope: scope, accountId: accountId)
             child.role = role
             child.badge = badge
@@ -462,7 +522,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         let id = NSUserInterfaceItemIdentifier("item")
         let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
-        cell.configure(node)
+        cell.configure(node, plain: !showsStatus)
         return cell
     }
 
@@ -526,10 +586,24 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
+        func add(_ title: String, _ action: Selector) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.representedObject = node
+            item.target = self
+        }
+        if node.key == "header.mailboxes" || node.kind == .unified || node.kind == .smart {
+            add("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))
+            menu.addItem(.separator())
+        }
+        if node.kind == .smart {
+            add("Edit Smart Mailbox…", #selector(editMailboxClicked(_:)))
+            add("Rename Smart Mailbox", #selector(renameClicked(_:)))
+            menu.addItem(.separator())
+            add("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:)))
+            return
+        }
         if node.kind == .unified {
-            let edit = menu.addItem(withTitle: "Edit Mailbox…", action: #selector(editMailboxClicked(_:)), keyEquivalent: "")
-            edit.representedObject = node
-            edit.target = self
+            add("Edit Mailbox…", #selector(editMailboxClicked(_:)))
             return
         }
         guard let accountId = node.accountId else { return }
@@ -569,9 +643,89 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if let id = sender.representedObject as? String { onEditAccount?(id) }
     }
 
+    /// Opens MailMate's mailbox editor on a unified or smart mailbox (not from the editor's own sidebar).
     private func editMailbox(_ node: SidebarNode) {
-        guard node.kind == .unified else { return }
-        SubmailboxSettingsWindowController.show(key: node.key, title: node.title, over: view.window)
+        guard node.kind == .unified || node.kind == .smart, !isInEditor else { return }
+        MailboxEditorWindowController.show(key: node.key, model: model, over: view.window)
+    }
+
+    private var isInEditor: Bool { view.window?.windowController is MailboxEditorWindowController }
+
+    // MARK: Smart mailboxes
+
+    @objc private func newSmartMailboxClicked(_ sender: NSMenuItem) {
+        newSmartMailbox(inside: sender.representedObject as? SidebarNode)
+    }
+
+    /// MailMate's New Smart Mailbox: "Untitled", inside the given smart mailbox (else at the top level),
+    /// selected, with its editor open at once on Conditions.
+    func newSmartMailbox(inside node: SidebarNode?) {
+        var parentId: Int64?
+        if case .smart(let id)? = node?.scope { parentId = id }
+        guard let id = model.createSmartMailbox(name: "Untitled", parentId: parentId) else { return }
+        reload()
+        if let parent = node, parent.kind == .smart { outline.expandItem(parent) }
+        let key = "smart.\(id)"
+        guard select(key: key) else { return }
+        MailboxEditorWindowController.show(key: key, model: model, over: view.window, tab: .conditions)
+    }
+
+    @objc private func renameClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        beginRename(key: node.key, thenEdit: false)
+    }
+
+    private var renaming: (key: String, thenEdit: Bool)?
+
+    /// Edits a smart mailbox's name in its row.
+    private func beginRename(key: String, thenEdit: Bool) {
+        guard let node = find(key, in: roots) else { return }
+        let row = outline.row(forItem: node)
+        guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarCell,
+            let field = cell.textField
+        else { return }
+        renaming = (key, thenEdit)
+        field.isEditable = true
+        field.delegate = self
+        view.window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, let renaming else { return }
+        self.renaming = nil
+        field.isEditable = false
+        guard let node = find(renaming.key, in: roots), case .smart(let id)? = node.scope else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty, name != node.title {
+            node.title = name
+            model.updateSmartMailbox(id: id, name: name)
+        } else {
+            field.stringValue = node.title
+        }
+        // Only Return goes on to the editor: ending the edit by clicking elsewhere stays where the click was.
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
+        if movement == .return {
+            view.window?.makeFirstResponder(outline)
+            if renaming.thenEdit { editMailbox(node) }
+        }
+    }
+
+    @objc private func deleteSmartClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode, case .smart(let id)? = node.scope, let window = view.window
+        else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(node.title)”?"
+        alert.informativeText = node.children.contains { $0.kind == .smart }
+            ? "The smart mailboxes inside it are deleted too. No messages are deleted."
+            : "No messages are deleted."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.model.deleteSmartMailbox(id: id)
+        }
     }
 
     @objc private func syncClicked(_ sender: NSMenuItem) {
@@ -640,19 +794,20 @@ final class SidebarCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ node: SidebarNode) {
+    /// `plain`: icon and name only (the mailbox editor's sidebar).
+    func configure(_ node: SidebarNode, plain: Bool = false) {
         textField?.stringValue = node.title
-        if let warning = node.warning {
+        if let warning = node.warning, !plain {
             imageView?.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Sync error")
             imageView?.contentTintColor = .systemOrange
             toolTip = warning
         } else {
             imageView?.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
             imageView?.contentTintColor = node.kind == .account ? .secondaryLabelColor : .controlAccentColor
-            toolTip = node.info
+            toolTip = plain ? nil : node.info
         }
-        badge.count = node.badge
-        if node.isBusy {
+        badge.count = plain ? 0 : node.badge
+        if node.isBusy, !plain {
             badge.isHidden = true
             spinner.startAnimation(nil)
         } else {

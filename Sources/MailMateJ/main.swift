@@ -209,10 +209,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ after forward: selected \(windowController?.debugSelection ?? [])")
                 }
                 var target = windowController?.window
-                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SUBMAILBOXES"] != nil {
-                    SubmailboxSettingsWindowController.show(key: "unified.inbox", title: "Inbox", over: target)
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_NEW_SMART"] != nil {
+                    windowController?.newSmartMailbox(nil)
+                    try? await Task.sleep(for: .seconds(1.5))
+                    target = NSApp.windows.first { $0.windowController is MailboxEditorWindowController } ?? target
+                }
+                // MMJ_SNAPSHOT_EDITOR="<sidebar key>|<tab>": the mailbox editor on that mailbox and tab.
+                if let spec = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_EDITOR"] {
+                    let parts = spec.split(separator: "|").map(String.init)
+                    MailboxEditorWindowController.show(key: parts[0], model: AppModel.shared, over: target)
                     try? await Task.sleep(for: .seconds(1))
-                    target = NSApp.windows.first { $0.title == "Inbox" && $0.subtitle == "Submailboxes" }
+                    if parts.count > 1 { MailboxEditorWindowController.debugShow(tab: parts[1]) }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_HOVER"] != nil { MailboxEditorWindowController.debugHoverTabs() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] != nil { MailboxEditorWindowController.debugDumpMailboxMenu() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_DUP_UNGROUP"] != nil { MailboxEditorWindowController.debugDuplicateAndUngroup() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_SPLIT_MENU"] != nil { MailboxEditorWindowController.debugDumpSplitMenu() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_PRESS_ADD"] != nil { MailboxEditorWindowController.debugPressAddRule() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_ADD_RULE"] != nil {
+                        MailboxEditorWindowController.debugClickAddRule()
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
+                    if let row = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_RULE_ROW"] ?? "") {
+                        MailboxEditorWindowController.debugSelectRule(row: row)
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
+                    if let points = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SCROLL"] ?? "") {
+                        MailboxEditorWindowController.debugScrollSidebar(by: points)
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                    if parts.count > 2 {
+                        MailboxEditorWindowController.debugAddRow(text: parts[2])
+                        try? await Task.sleep(for: .seconds(1))
+                    }
+                    target = NSApp.windows.first { $0.windowController is MailboxEditorWindowController }
                 }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTINGS"] != nil {
                     SettingsWindowController.shared.show()
@@ -334,6 +363,10 @@ enum MainMenu {
 
         let mailbox = submenu(main, "Mailbox")
         mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
+        mailbox.addItem(.separator())
+        let newSmart = mailbox.addItem(
+            withTitle: "New Smart Mailbox", action: #selector(MainWindowController.newSmartMailbox(_:)), keyEquivalent: "n")
+        newSmart.keyEquivalentModifierMask = [.command, .option]
 
         // MailMate's Message menu and shortcuts, for the commands MailMateJ has.
         let message = submenu(main, "Message")

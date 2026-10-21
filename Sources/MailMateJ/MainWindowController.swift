@@ -643,6 +643,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.syncAll()
     }
 
+    /// Mailbox › New Smart Mailbox (⌥⌘N): inside the selected smart mailbox, else at the top level.
+    @objc func newSmartMailbox(_ sender: Any?) {
+        sidebar.newSmartMailbox(inside: sidebar.selectedNode)
+    }
+
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?
 
@@ -1148,6 +1153,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case .markUnread: keyword("Mark as Unread", \.isSeen, set: .markRead, clear: .markUnread)
         case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
         case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
+        case .keyword, .copy, .deletePermanently: break  // only rules do these
         case .archive, .junk, .delete, .move, .moveToRole, .restoreMailboxes:
             let inTrash: Set<Int64>
             if case .delete = action { inTrash = (try? model.store.messageIDs(ids, inRole: "trash")) ?? [] } else { inTrash = [] }

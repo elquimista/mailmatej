@@ -233,6 +233,22 @@ enum Schema {
                 WHERE id NOT IN (SELECT messageId FROM address WHERE role IN (2, 3))
                 """)
         }
+        m.registerMigration("v11-rules") { db in
+            // A mailbox's rules (MailMate's Rules tab): the mailbox as a MessageScope key, the rule as JSON.
+            try db.execute(sql: """
+                CREATE TABLE rule (
+                    id INTEGER PRIMARY KEY,
+                    mailboxKey TEXT NOT NULL,
+                    sortOrder INTEGER NOT NULL DEFAULT 0,
+                    definition TEXT NOT NULL
+                );
+                CREATE INDEX rule_mailbox ON rule(mailboxKey, sortOrder);
+                """)
+        }
+        m.registerMigration("v12-subrules") { db in
+            // MailMate's subrules: a rule inside another, run on the messages its parent matched.
+            try db.execute(sql: "ALTER TABLE rule ADD COLUMN parentId INTEGER REFERENCES rule(id) ON DELETE CASCADE")
+        }
 
         return m
     }

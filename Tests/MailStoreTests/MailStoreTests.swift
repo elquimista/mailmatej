@@ -27,6 +27,174 @@ import Testing
             addresses: [.init(role: .from, name: nil, email: from), .init(role: .to, name: nil, email: to)])
     }
 
+    @Test func smartMailboxesMatchTheirConditions() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "pay@payoneer.com", at: 100, subject: "You Have Received a Payment!"),
+            message("2", from: "news@payoneer.com", at: 200, subject: "Newsletter"),
+            message("3", from: "x@other.com", at: 300, subject: "Payment from Bob was deposited", keywords: ["$seen"]),
+            message("4", from: "pay@payoneer.com", box: "tr", at: 400, subject: "You Have Received a Payment!"),
+            message("5", from: "pay@payoneer.com", at: 500, subject: "Payment from Ann was deposited"),
+        ])
+        func subjects(_ scope: MessageScope) throws -> Set<String> {
+            Set(try store.rows(ids: try store.messageIDs(scope: scope)).map { $0.subject })
+        }
+        // MailMate's Credit: Payoneer: From › Domain is payoneer.com, and Any of a subject or All of two words.
+        let id = try store.createSmartMailbox(name: "Credit: Payoneer", parentId: nil)
+        var definition = SmartDefinition()
+        definition.condition = .compound(.all, [
+            .rule(.fromDomain, .is, "Payoneer.com"),
+            .compound(.any, [
+                .rule(.subject, .is, "You have received a payment!"),
+                .compound(.all, [.rule(.subject, .contains, "payment from"), .rule(.subject, .contains, "deposited")]),
+            ]),
+        ])
+        try store.updateSmartMailbox(id: id, definition: definition)
+        #expect(try subjects(.smart(id)) == ["Payment from Ann was deposited", "You Have Received a Payment!"])  // trash excluded
+
+        // An unchecked row doesn't count.
+        definition.condition = .compound(.all, [.rule(.fromDomain, .is, "payoneer.com"), .rule(.subject, .is, "Newsletter", enabled: false)])
+        try store.updateSmartMailbox(id: id, definition: definition)
+        #expect(try store.messageIDs(scope: .smart(id)).count == 3)
+
+        // None of the rows: payoneer.com mail that is neither newsletter nor deposit.
+        definition.condition = .compound(.all, [
+            .rule(.fromDomain, .is, "payoneer.com"),
+            .compound(.none, [.rule(.subject, .is, "Newsletter"), .rule(.subject, .contains, "deposited")]),
+        ])
+        try store.updateSmartMailbox(id: id, definition: definition)
+        #expect(try subjects(.smart(id)) == ["You Have Received a Payment!"])
+        definition.condition = .compound(.all, [.rule(.fromDomain, .is, "payoneer.com")])
+        try store.updateSmartMailbox(id: id, definition: definition)
+
+        // Negation, status and a child that starts from its parent's messages.
+        let child = try store.createSmartMailbox(name: "Unread elsewhere", parentId: nil)
+        try store.updateSmartMailbox(id: child, definition: SmartDefinition(
+            sources: SmartSources(scopes: ["role:inbox"]),
+            condition: .compound(.all, [.rule(.fromDomain, .isNot, "payoneer.com")])))
+        #expect(try subjects(.smart(child)) == ["Payment from Bob was deposited"])
+        let nested = try store.createSmartMailbox(name: "Nested", parentId: id)
+        #expect(try store.smartMailboxes().first { $0.id == nested }?.definition.sources.scopes == ["smart:\(id)"])
+        // Sources nest too: Inbox, or All of (All Messages and not Inbox) - the latter matching Sent only.
+        let sourced = try store.createSmartMailbox(name: "Sourced", parentId: nil)
+        try store.updateSmartMailbox(id: sourced, definition: SmartDefinition(sources: SmartSources(root: .compound(.any, [
+            .rule(.mailbox, .is, "role:sent"),
+            .compound(.all, [.rule(.mailbox, .is, "all"), .rule(.mailbox, .isNot, "role:inbox")]),
+        ]))))
+        #expect(try store.messageIDs(scope: .smart(sourced)).isEmpty)
+        try store.deleteSmartMailbox(id: sourced)
+        try store.updateSmartMailbox(id: nested, definition: SmartDefinition(
+            sources: SmartSources(scopes: ["smart:\(id)"]), condition: .compound(.all, [.rule(.status, .is, "unread")])))
+        #expect(try store.messageIDs(scope: .smart(nested)).count == 3)
+
+        // Submailboxes by From › Address.
+        let values = try store.smartValues(id: id, field: .fromAddress)
+        #expect(values.map(\.value) == ["news@payoneer.com", "pay@payoneer.com"])  // A to Z
+        #expect(values.map(\.unread) == [1, 2])
+        #expect(try store.messageIDs(scope: .smartValue(id, .fromAddress, "news@payoneer.com")).count == 1)
+        #expect(MessageScope(key: MessageScope.smartValue(id, .fromName, "A: B").key) == .smartValue(id, .fromName, "A: B"))
+
+        // "Include messages in any submailboxes": an empty-handed parent shows its children's messages.
+        let parent = try store.createSmartMailbox(name: "Parent", parentId: nil)
+        try store.updateSmartMailbox(id: parent, definition: SmartDefinition(
+            condition: .compound(.all, [.rule(.subject, .is, "nothing matches this")])))
+        let kid = try store.createSmartMailbox(name: "Kid", parentId: parent)
+        try store.updateSmartMailbox(id: kid, definition: SmartDefinition(condition: .compound(.all, [.rule(.subject, .is, "Newsletter")])))
+        #expect(try store.messageIDs(scope: .smart(parent)).isEmpty)
+        var including = try #require(try store.smartMailboxes().first { $0.id == parent }).definition
+        including.sources.includeSubmailboxes = true
+        try store.updateSmartMailbox(id: parent, definition: including)
+        #expect(try subjects(.smart(parent)) == ["Newsletter"])
+        try store.deleteSmartMailbox(id: parent)
+
+        // Mailboxes that use each other as sources match nothing rather than loop.
+        try store.updateSmartMailbox(id: id, definition: SmartDefinition(sources: SmartSources(scopes: ["smart:\(nested)"])))
+        #expect(try store.messageIDs(scope: .smart(id)).isEmpty)
+        try store.deleteSmartMailbox(id: id)
+        #expect(try store.smartMailboxes().map(\.id) == [child])  // the nested one went with it
+    }
+
+    @Test func smartFieldsCoverMailMatesMenu() throws {
+        var a = message("a", from: "Ann <ann@mail.payoneer.co.uk>", at: 100, subject: "One", keywords: ["$label1"])
+        a.addresses = [.init(role: .from, name: "Ann Lee", email: "ann@mail.payoneer.co.uk"), .init(role: .bcc, name: nil, email: "me@example.com")]
+        let b = message("b", from: "bob@x.com", at: Date().timeIntervalSince1970 - 3600, subject: "Two")
+        try store.upsertMessages(accountId: "acc", [a, b])
+        let id = try store.createSmartMailbox(name: "S", parentId: nil)
+        func matches(_ condition: SmartCondition) throws -> Set<String> {
+            try store.updateSmartMailbox(id: id, definition: SmartDefinition(condition: .compound(.all, [condition])))
+            return Set(try store.rows(ids: try store.messageIDs(scope: .smart(id))).map(\.subject))
+        }
+        #expect(try matches(.rule(.address(.from, .user), .is, "ann")) == ["One"])
+        #expect(try matches(.rule(.address(.from, .top), .is, "uk")) == ["One"])
+        #expect(try matches(.rule(.address(.from, .second), .is, "co.uk")) == ["One"])
+        #expect(try matches(.rule(.address(.from, .third), .is, "payoneer.co.uk")) == ["One"])
+        #expect(try matches(.rule(.address(.from, .all), .contains, "ann lee")) == ["One"])  // No Specifier: name or address
+        #expect(try matches(.rule(.address(.from, .all), .is, "Ann Lee <ann@mail.payoneer.co.uk>")) == ["One"])  // or both
+        #expect(try store.fieldValues(.address(.from, .all), sources: SmartSources(scopes: [])) == ["Ann Lee <ann@mail.payoneer.co.uk>", "bob@x.com"])
+        #expect(try matches(.rule(.address(.recipient, .address), .is, "me@example.com")) == ["One", "Two"])  // Bcc, To
+        #expect(try matches(.rule(.address(.bcc, .address), .is, "me@example.com")) == ["One"])
+        #expect(try matches(.rule(.keyword, .is, "$label1")) == ["One"])
+        #expect(try matches(.rule(.sent, .withinLast, "1")) == ["Two"])
+        #expect(try matches(.rule(.status, .isNot, "unread")) == [])
+        // Submailboxes by any text field: keyword, From ‣ Second-Level, From (whole address).
+        try store.updateSmartMailbox(id: id, definition: SmartDefinition())
+        #expect(try store.smartValues(id: id, field: .keyword).map(\.value) == ["$label1"])
+        #expect(Set(try store.smartValues(id: id, field: .address(.from, .second)).map(\.value)) == ["co.uk", "x.com"])
+        #expect(try store.messageIDs(scope: .smartValue(id, .address(.from, .all), "Ann Lee <ann@mail.payoneer.co.uk>")).count == 1)
+        #expect(!MailStore.canSplit(by: .received) && MailStore.canSplit(by: .filename))
+        #expect(try store.smartValues(id: id, field: .mailbox).map(\.value) == ["Inbox \u{2013} Test"])
+        #expect(try store.messageIDs(scope: .smartValue(id, .mailbox, "Inbox \u{2013} Test")).count == 2)
+        #expect(try store.smartValues(id: id, field: .account).map(\.value) == ["Test"])
+        // By name, senders without one go into "Other" (""), last.
+        #expect(try store.smartValues(id: id, field: .fromName).map(\.value) == ["Ann Lee", ""])
+        #expect(try store.rows(ids: try store.messageIDs(scope: .smartValue(id, .fromName, ""))).map(\.subject) == ["Two"])
+        // Values within an account (both "each account" and a value split).
+        #expect(try store.smartValues(id: id, field: .keyword, account: "acc").map(\.value) == ["$label1"])
+        #expect(try store.smartValues(id: id, field: .keyword, account: "other").isEmpty)
+        let grouped = MessageScope.smartAccountValue(id, "acc", .keyword, "$label1")
+        #expect(MessageScope(key: grouped.key) == grouped)
+        #expect(try store.messageIDs(scope: grouped).count == 1)
+        // MailMate's operators and Options.
+        #expect(try matches(.rule(.subject, .isIn, "two, three")) == ["Two"])
+        #expect(try matches(.rule(.subject, .isNotIn, "two")) == ["One"])
+        #expect(try matches(.rule(.subject, .lessOrEqual, "one")) == ["One"])
+        #expect(try matches(.rule(.subject, .moreOrEqual, "p")) == ["Two"])
+        #expect(try matches(.rule(.address(.bcc, .address), .exists, "")) == ["One"])
+        #expect(try matches(.rule(.address(.bcc, .address), .notExists, "")) == ["Two"])
+        #expect(try matches(.rule(.subject, .contains, "ONE")) == ["One"])
+        #expect(try matches(.rule(.subject, .contains, "ONE", options: .caseSensitive)) == [])
+        #expect(try matches(.rule(.subject, .is, "One", options: .caseSensitive)) == ["One"])
+    }
+
+    @Test func rulesMatchNewMessagesInTheirMailbox() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "alert@alert.go2bank.com", at: 100, subject: "Your GO2bank statement"),
+            message("2", from: "alert@alert.go2bank.com", box: "se", at: 200, subject: "Your GO2bank statement"),
+            message("3", from: "x@other.com", at: 300, subject: "Your GO2bank statement"),
+        ])
+        let ids = try store.messageIDs(accountId: "acc", remoteIds: ["1", "2", "3"])
+        #expect(ids.count == 3)
+        let rule = RuleDefinition(name: "GO2bank alerts", condition: .compound(.all, [
+            .rule(.fromDomain, .is, "alert.go2bank.com"), .rule(.subject, .contains, "go2bank stat"),
+        ]), actions: [RuleAction(kind: .setKeyword, value: "$seen"), RuleAction(kind: .delete)])
+        let id = try store.createRule(mailboxKey: "role:inbox", definition: rule)
+        let record = try #require(try store.rules(mailboxKey: "role:inbox").first)
+        #expect(record.id == id && record.definition == rule)
+        // Only the inbox message from that domain: not the one in Sent, not another sender.
+        #expect(try store.rows(ids: try store.messages(ids, matching: record)).map(\.subject) == ["Your GO2bank statement"])
+        #expect(try store.messages(ids, matching: record).count == 1)
+        // Subrules: duplicated with their rule, deleted with it.
+        let sub = try store.createRule(mailboxKey: "role:inbox", parentId: id, definition: RuleDefinition(name: "Sub"))
+        #expect(try store.rules().first { $0.id == sub }?.parentId == id)
+        let copy = try #require(try store.duplicateRule(id: id))
+        let all = try store.rules(mailboxKey: "role:inbox")
+        #expect(all.first { $0.id == copy }?.definition.name == "GO2bank alerts copy")
+        #expect(all.contains { $0.parentId == copy && $0.definition.name == "Sub" })
+        #expect(all.filter { $0.parentId == nil }.map(\.id) == [id, copy])  // the copy right after it
+        try store.deleteRule(id: id)
+        try store.deleteRule(id: copy)
+        #expect(try store.rules().isEmpty)
+    }
+
     @Test func scopesAndOrdering() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100),

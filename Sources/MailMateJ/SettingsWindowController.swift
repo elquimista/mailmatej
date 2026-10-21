@@ -39,14 +39,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-/// MailMate's Mailbox menu: the sidebar's "Mailboxes" and "Sources" sections, with each mailbox
-/// that has children opening a submenu. As in MailMate, such a parent can itself be chosen by
-/// clicking it, which AppKit doesn't do on its own (see `Coordinator`).
+/// The Dock counter's Mailbox setting: MailMate's mailbox menu (see `MailboxMenu`) in a pull-down.
 struct MailboxMenuButton: NSViewRepresentable {
     let roots: [SidebarNode]
     @Binding var selection: String
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> MailboxMenu { MailboxMenu() }
 
     func makeNSView(context: Context) -> NSPopUpButton {
         let button = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -55,93 +53,12 @@ struct MailboxMenuButton: NSViewRepresentable {
     }
 
     func updateNSView(_ button: NSPopUpButton, context: Context) {
-        let coordinator = context.coordinator
-        coordinator.choose = { selection = $0 }
+        let menu = context.coordinator
+        menu.choose = { selection = $0 }
         let signature = selection + "|" + roots.flatMap(\.children).map(\.key).joined(separator: ",")
-        guard signature != coordinator.signature else { return }  // Rebuild only when something changed.
-        coordinator.signature = signature
-
-        let menu = NSMenu()
-        menu.delegate = coordinator
-        coordinator.rootMenu = menu
-        let titleItem = NSMenuItem(title: "None", action: nil, keyEquivalent: "")  // Pull-down's own title.
-        menu.addItem(titleItem)
-        for root in roots {
-            if root !== roots.first { menu.addItem(.separator()) }
-            menu.addItem(.sectionHeader(title: root.title))
-            for node in root.children { menu.addItem(item(for: node, coordinator: coordinator, titleItem: titleItem)) }
-        }
-        button.menu = menu
-    }
-
-    private func item(for node: SidebarNode, coordinator: Coordinator, titleItem: NSMenuItem) -> NSMenuItem {
-        let item = choice(for: node, coordinator: coordinator, titleItem: titleItem)
-        guard !node.children.isEmpty else { return item }
-        let submenu = NSMenu()
-        submenu.delegate = coordinator
-        for child in node.children { submenu.addItem(self.item(for: child, coordinator: coordinator, titleItem: titleItem)) }
-        item.submenu = submenu
-        return item
-    }
-
-    private func choice(for node: SidebarNode, coordinator: Coordinator, titleItem: NSMenuItem) -> NSMenuItem {
-        let item = NSMenuItem(title: node.title, action: #selector(Coordinator.chosen(_:)), keyEquivalent: "")
-        item.target = coordinator
-        item.representedObject = node.scope?.key
-        item.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
-        if node.scope?.key == selection {
-            item.state = .on
-            titleItem.title = node.title
-            titleItem.image = item.image
-        }
-        return item
-    }
-
-    /// Chooses items, including parents of submenus: while the menu is open it follows the
-    /// highlighted item and polls the mouse button (menu tracking doesn't hand the app its mouse
-    /// events), and a release over a parent item chooses it and closes the menu.
-    final class Coordinator: NSObject, NSMenuDelegate {
-        var choose: (String) -> Void = { _ in }
-        var signature = ""
-        weak var rootMenu: NSMenu?
-        private var highlighted: NSMenuItem?
-        private var timer: Timer?
-        private var wasPressed = false
-
-        @objc func chosen(_ sender: NSMenuItem) {
-            if let key = sender.representedObject as? String { choose(key) }
-        }
-
-        func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
-            highlighted = item
-        }
-
-        func menuWillOpen(_ menu: NSMenu) {
-            guard menu === rootMenu else { return }
-            highlighted = nil
-            wasPressed = NSEvent.pressedMouseButtons & 1 != 0  // Still down from the click that opened it.
-            let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.poll() }
-            }
-            RunLoop.current.add(timer, forMode: .common)
-            self.timer = timer
-        }
-
-        func menuDidClose(_ menu: NSMenu) {
-            guard menu === rootMenu else { return }
-            timer?.invalidate()
-            timer = nil
-        }
-
-        private func poll() {
-            let pressed = NSEvent.pressedMouseButtons & 1 != 0
-            defer { wasPressed = pressed }
-            guard wasPressed, !pressed, let item = highlighted, item.hasSubmenu,
-                let key = item.representedObject as? String
-            else { return }
-            rootMenu?.cancelTracking()
-            choose(key)
-        }
+        guard signature != menu.signature else { return }  // Rebuild only when something changed.
+        menu.signature = signature
+        button.menu = menu.build(roots: roots, selection: selection)
     }
 }
 

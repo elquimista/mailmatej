@@ -10,13 +10,33 @@ public final class MailStore: Sendable {
         URL.applicationSupportDirectory.appendingPathComponent("MailMateJ", isDirectory: true)
     }
 
+    let smartCatalog = SmartCatalog()
+
     public init(directory: URL = MailStore.defaultDirectory) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var config = Configuration()
         config.label = "MailStore"
+        config.prepareDatabase { db in
+            // The last `n` labels of an address's domain ("x@a.b.example.co.uk", 2 → "co.uk"), for smart
+            // mailboxes' Top-, Second- and Third-Level.
+            db.add(function: DatabaseFunction("mmj_domain_level", argumentCount: 2, pure: true) { values in
+                guard let email = String.fromDatabaseValue(values[0]), let n = Int.fromDatabaseValue(values[1]),
+                    let at = email.lastIndex(of: "@")
+                else { return nil }
+                let labels = email[email.index(after: at)...].split(separator: ".")
+                return labels.suffix(n).joined(separator: ".")
+            })
+            // A name's first (0) or last (1) word, for Name ▸ First and Last.
+            db.add(function: DatabaseFunction("mmj_name_word", argumentCount: 2, pure: true) { values in
+                guard let name = String.fromDatabaseValue(values[0]), let which = Int.fromDatabaseValue(values[1]) else { return nil }
+                let words = name.split(whereSeparator: \.isWhitespace)
+                return String((which == 0 ? words.first : words.last) ?? "")
+            })
+        }
         dbPool = try DatabasePool(path: directory.appendingPathComponent("mail.sqlite").path, configuration: config)
         try Schema.migrator.migrate(dbPool)
         blobs = BlobStore(root: directory.appendingPathComponent("Messages", isDirectory: true))
+        try refreshSmartCatalog()
     }
 
     // MARK: Accounts
@@ -696,7 +716,7 @@ public final class MailStore: Sendable {
         scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, expanded: Set<String> = [],
         opened: Set<Int64> = []
     ) throws -> ThreadedList {
-        let (filter, args) = Self.filter(scope: scope, search: search)
+        let (filter, args) = self.filter(scope: scope, search: search)
         let sql = "SELECT \(Self.threadColumns) FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         let rows = try dbPool.read { db in try Row.fetchAll(db, sql: sql, arguments: args).map(ThreadInput.init) }
         return ThreadedList(
@@ -844,14 +864,14 @@ public final class MailStore: Sendable {
     public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil) throws
         -> [Int64]
     {
-        let (filter, args) = Self.filter(scope: scope, search: search)
+        let (filter, args) = self.filter(scope: scope, search: search)
         let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
     }
 
     /// How many of a list's messages match `counting` (for Dock counters).
     public func count(scope: MessageScope, counting: MessageCount) throws -> Int {
-        let (filter, args) = Self.filter(scope: scope, search: nil)
+        let (filter, args) = self.filter(scope: scope, search: nil)
         let condition: String
         switch counting {
         case .all: condition = ""
@@ -865,13 +885,19 @@ public final class MailStore: Sendable {
 
     /// The most recently received message in a list, whatever the list's sort order.
     public func newestMessageID(scope: MessageScope, search: String? = nil) throws -> Int64? {
-        let (filter, args) = Self.filter(scope: scope, search: search)
+        let (filter, args) = self.filter(scope: scope, search: search)
         let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY m.receivedAt DESC, m.id DESC LIMIT 1"
         return try dbPool.read { db in try Int64.fetchOne(db, sql: sql, arguments: args) }
     }
 
     /// WHERE clause (on a table aliased `m`) and arguments selecting a list's messages.
-    static func filter(scope: MessageScope, search: String?) -> (String, StatementArguments) {
+    func filter(scope: MessageScope, search: String?) -> (String, StatementArguments) {
+        let (clause, args) = filterParts(scope: scope, search: search)
+        return (clause, StatementArguments(args))
+    }
+
+    /// `filter`'s clause with its arguments as a list, to combine into larger queries (smart mailboxes).
+    func filterParts(scope: MessageScope, search: String?) -> (String, [(any DatabaseValueConvertible)?]) {
         var clauses: [String] = []
         var args: [(any DatabaseValueConvertible)?] = []
 
@@ -907,6 +933,24 @@ public final class MailStore: Sendable {
                                                 WHERE mm.messageId = m.id AND b.role IN ('trash', 'junk'))
                 """)
             args.append(id)
+        case .smart(let id):
+            let (clause, smartArgs) = smartFilter(id: id)
+            clauses.append(clause)
+            args += smartArgs
+        case .smartValue(let id, let field, let value):
+            let (clause, smartArgs) = smartFilter(id: id)
+            let (test, testArgs) = Self.smartValueTest(field, value)
+            clauses.append("\(clause) AND \(test)")
+            args += smartArgs + testArgs
+        case .smartAccountValue(let id, let accountId, let field, let value):
+            let (clause, smartArgs) = smartFilter(id: id)
+            let (test, testArgs) = Self.smartValueTest(field, value)
+            clauses.append("\(clause) AND m.accountId = ? AND \(test)")
+            args += smartArgs + [accountId] + testArgs
+        case .smartAccount(let id, let accountId):
+            let (clause, smartArgs) = smartFilter(id: id)
+            clauses.append("\(clause) AND m.accountId = ?")
+            args += smartArgs + [accountId]
         }
 
         if let query = search.flatMap(Self.ftsQuery) {
@@ -914,7 +958,7 @@ public final class MailStore: Sendable {
             args.append(query)
         }
 
-        return (clauses.joined(separator: " AND "), StatementArguments(args))
+        return (clauses.joined(separator: " AND "), args)
     }
 
     public func rows(ids: [Int64]) throws -> [MessageRow] {
@@ -1082,7 +1126,7 @@ public final class MailStore: Sendable {
             Column("accountId"), Column("subject"), Column("fromDisplay"), Column("fromEmail"), Column("receivedAt"),
             Column("isSeen"), Column("isFlagged"), Column("isAnswered"), Column("hasAttachment"), Column("size"))
         let observation = DatabaseRegionObservation(
-            tracking: shown, Table("message_mailbox"), Table("mailbox"), Table("account"))
+            tracking: shown, Table("message_mailbox"), Table("mailbox"), Table("account"), Table("smart_mailbox"))
         let cancellable = observation.start(in: dbPool, onError: { _ in }, onChange: { _ in onChange() })
         return StoreObservation(cancellable)
     }

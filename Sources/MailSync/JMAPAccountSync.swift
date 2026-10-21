@@ -23,6 +23,9 @@ public actor JMAPAccountSync {
         public var created = 0
         public var updated = 0
         public var destroyed = 0
+        /// Messages that arrived since the last sync (from `/changes`, never the first full sync): what
+        /// rules run on.
+        public var arrived: [String] = []
     }
 
     /// One full sync round: mailboxes, identities, then emails.
@@ -395,6 +398,7 @@ public actor JMAPAccountSync {
             try store.setSyncState(delta.newState, accountId: account.id, type: "Email")
 
             result.created += createdEmails.count
+            result.arrived += createdEmails.map(\.id)
             result.updated += updatedEmails.count
             result.destroyed += delta.destroyed.count
             state = delta.newState
@@ -609,6 +613,30 @@ public actor JMAPAccountSync {
             try? await discardDraft(draftId, accountId)
             throw SendError.rejected(Self.setErrorText(error))
         }
+    }
+
+    /// Redirects a message as it is (a rule's Redirect): submits the stored email to new recipients,
+    /// only the envelope changing, so it arrives from its original sender.
+    public func redirect(remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
+        let session = try await client.currentSession()
+        guard session.supports(Capability.submission) else { throw JMAPError.missingCapability(Capability.submission) }
+        let accountId = try remoteAccountId(session)
+        var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
+        let submit = request.call("EmailSubmission/set", [
+            "accountId": .string(accountId),
+            "create": [
+                "redirect": [
+                    "identityId": .string(identityId),
+                    "emailId": .string(remoteId),
+                    "envelope": [
+                        "mailFrom": ["email": .string(mailFrom)],
+                        "rcptTo": .array(recipients.map { ["email": .string($0)] }),
+                    ],
+                ]
+            ],
+        ])
+        let result = try await client.send(request).arguments(submit)
+        if let error = result["notCreated"]?["redirect"] { throw SendError.rejected(Self.setErrorText(error)) }
     }
 
     /// In-Reply-To and References for a reply to this message (see `Compose.references`).
