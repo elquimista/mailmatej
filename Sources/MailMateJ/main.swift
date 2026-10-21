@@ -124,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             let panel = MailboxPicker.debugPanel
                             let order = NSApp.orderedWindows.map { $0 === panel ? "picker" : $0 === windowController?.window ? "main" : "other" }
                             NSLog("MMJ picker after main window front: visible=\(panel?.isVisible ?? false) level=\(panel?.level.rawValue ?? -1) order=\(order)")
+                        } else if part.hasPrefix("|wait:"), let seconds = Double(part.dropFirst(6)) {
+                            try? await Task.sleep(for: .seconds(seconds))  // e.g. to take the server down meanwhile
                         } else if part.hasPrefix("|") {
                             // "|filter" chooses the first match; "|filter>Name" makes a submailbox Name inside it.
                             let spec = part.dropFirst().split(separator: ">", maxSplits: 1).map(String.init)

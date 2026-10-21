@@ -48,3 +48,17 @@ import Testing
         #expect(groups.map { $0.map(\.id) } == [[1, 2], [3], [4]])
     }
 }
+
+@Test func unreachableErrorsAreQueuedRefusalsAreNot() {
+    for code in [URLError.Code.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotConnectToHost] {
+        #expect(ErrorText.isUnreachable(URLError(code)))
+    }
+    #expect(ErrorText.isUnreachable(JMAPError.http(status: 503, body: "")))
+    #expect(!ErrorText.isUnreachable(JMAPError.http(status: 400, body: "")))
+    #expect(!ErrorText.isUnreachable(JMAPError.unauthorized))
+    #expect(!ErrorText.isUnreachable(URLError(.serverCertificateUntrusted)))
+    #expect(!ErrorText.isUnreachable(JMAPAccountSync.ChangeRefused(count: 1, deleting: false, reason: nil)))
+    #expect(
+        ErrorText.friendly(JMAPAccountSync.ChangeRefused(count: 2, deleting: true, reason: "forbidden"))
+            == "The server refused to delete 2 messages (forbidden).")
+}

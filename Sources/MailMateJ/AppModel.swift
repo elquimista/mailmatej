@@ -52,6 +52,9 @@ final class AppModel {
             },
             onArrived: { accountId, remoteIds in
                 Task { @MainActor in AppModel.shared?.runRules(accountId: accountId, remoteIds: remoteIds) }
+            },
+            onQueuedChangeRefused: { _, error in
+                Task { @MainActor in AppModel.shared?.reportRefusedQueuedChange(error) }
             })
     }
 
@@ -198,14 +201,27 @@ final class AppModel {
         #endif
     }
 
-    /// The sidebar warning for an account that failed to sync, if any.
+    /// The sidebar warning for an account that failed to sync, if any, with the changes waiting for it.
     func syncWarning(accountId: String) -> String? {
-        guard let status = statuses[accountId], case .failed(let message) = status.phase else { return nil }
+        guard let status = statuses[accountId], case .failed(var message) = status.phase else { return nil }
+        if status.queuedChanges > 0 {
+            let changes = status.queuedChanges == 1 ? "1 change" : "\(status.queuedChanges) changes"
+            message += "\n\n\(changes) will be made on the server once it can be reached."
+        }
         #if DEBUG
             return status.errorDetail.map { message + "\n\n" + $0 } ?? message
         #else
             return message
         #endif
+    }
+
+    /// A change made while offline that the server refused once reachable; its messages show the
+    /// server's state again.
+    func reportRefusedQueuedChange(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "A change made while offline couldn’t be made on the server."
+        alert.informativeText = Self.describe(error) + "\n\nThe messages show the server’s state again."
+        present(alert)
     }
 
     // MARK: Message actions
@@ -604,21 +620,22 @@ final class AppModel {
             var failed: [(Pending, Error)] = []
             for item in pending {
                 do {
-                    var raw = store.blobs.read(accountId: item.ref.accountId, blobId: item.blobId)  // usually on disk
-                    if raw == nil {
-                        raw = try await coordinator.downloadBlob(
+                    // The move works from the raw message on disk (usually there), so it can wait in the
+                    // queue while a server can't be reached.
+                    if !store.blobs.contains(accountId: item.ref.accountId, blobId: item.blobId) {
+                        let raw = try await coordinator.downloadBlob(
                             accountId: item.ref.accountId, blobId: item.blobId, type: "message/rfc822", name: "message.eml")
+                        try store.blobs.write(raw, accountId: item.ref.accountId, blobId: item.blobId)
                     }
-                    guard let raw else { continue }
                     #if DEBUG
                         if ProcessInfo.processInfo.environment["MMJ_DEBUG_FAIL_IMPORT"] != nil {
                             throw MessageActionError.noMailbox(role: "")  // To test the way back.
                         }
                     #endif
-                    try await coordinator.importMessage(
-                        accountId: target.accountId, raw, mailboxRemoteId: target.remoteId, keywords: item.keywords,
+                    try await coordinator.moveAcross(
+                        accountId: item.ref.accountId, remoteId: item.ref.remoteId, blobId: item.blobId,
+                        toAccount: target.accountId, mailboxRemoteId: target.remoteId, keywords: item.keywords,
                         receivedAt: item.receivedAt)
-                    try await coordinator.destroy(accountId: item.ref.accountId, remoteIds: [item.ref.remoteId])
                 } catch {
                     failed.append((item, error))
                 }

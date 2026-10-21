@@ -464,15 +464,23 @@ public actor JMAPAccountSync {
             "update": .object(Dictionary(uniqueKeysWithValues: remoteIds.map { ($0, JSONValue.object(patch)) })),
         ])
         let failed: [String]
+        let gone: [String]
+        let reason: String?
         do {
-            failed = Array(try await client.send(request).arguments(set)["notUpdated"]?.objectValue?.keys ?? [:].keys)
+            let notUpdated = try await client.send(request).arguments(set)["notUpdated"]?.objectValue ?? [:]
+            // A message already gone (deleted elsewhere) has nothing left to change: it just leaves here.
+            gone = notUpdated.filter { $0.value["type"]?.stringValue == "notFound" }.map(\.key)
+            failed = notUpdated.keys.filter { !gone.contains($0) }
+            reason = failed.first.flatMap { notUpdated[$0] }.map(Self.setErrorText)
         } catch {
-            try? await refetch(remoteIds, accountId)
+            // Unreachable: the change is queued (see SyncCoordinator), so the local copy stays as it is.
+            if !ErrorText.isUnreachable(error) { try? await refetch(remoteIds, accountId) }
             throw error
         }
+        if !gone.isEmpty { try? store.deleteMessages(accountId: account.id, remoteIds: gone) }
         guard failed.isEmpty else {
             try? await refetch(failed, accountId)
-            throw JMAPError.invalidResponse("the server didn’t change \(failed.count) message\(failed.count == 1 ? "" : "s")")
+            throw ChangeRefused(count: failed.count, deleting: false, reason: reason)
         }
     }
 
@@ -524,10 +532,13 @@ public actor JMAPAccountSync {
         let accountId = try remoteAccountId(try await client.currentSession())
         var request = JMAPRequest()
         let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(remoteIds)])
-        let failed = Set(try await client.send(request).arguments(set)["notDestroyed"]?.objectValue?.keys ?? [:].keys)
+        // Already gone (deleted elsewhere, or by an earlier try whose reply was lost) counts as done.
+        let refused = (try await client.send(request).arguments(set)["notDestroyed"]?.objectValue ?? [:])
+            .filter { $0.value["type"]?.stringValue != "notFound" }
+        let failed = Set(refused.keys)
         try store.deleteMessages(accountId: account.id, remoteIds: remoteIds.filter { !failed.contains($0) })
         if !failed.isEmpty {
-            throw JMAPError.invalidResponse("the server didn’t delete \(failed.count) message\(failed.count == 1 ? "" : "s")")
+            throw ChangeRefused(count: failed.count, deleting: true, reason: refused.values.first.map(Self.setErrorText))
         }
     }
 
@@ -675,6 +686,20 @@ public actor JMAPAccountSync {
     private static func setErrorText(_ error: JSONValue) -> String {
         let type = error["type"]?.stringValue ?? "unknown"
         return error["description"]?.stringValue.map { "\(type): \($0)" } ?? type
+    }
+
+    /// The server answered but wouldn't make a change (Email/set notUpdated or notDestroyed).
+    public struct ChangeRefused: Error, LocalizedError {
+        public var count: Int
+        public var deleting: Bool
+        /// The SetError's type and description.
+        public var reason: String?
+
+        public var errorDescription: String? {
+            let what = "\(deleting ? "delete" : "change") \(count == 1 ? "the message" : "\(count) messages")"
+            let why = reason.map { $0.hasSuffix(".") ? String($0.dropLast()) : $0 }
+            return "The server refused to \(what)" + (why.map { " (\($0))." } ?? ".")
+        }
     }
 
     public enum SendError: Error, LocalizedError {

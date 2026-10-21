@@ -516,6 +516,43 @@ public final class MailStore: Sendable {
         }
     }
 
+    // MARK: Change queue
+
+    /// Keeps a change for the account's server, after any already queued.
+    public func enqueueChange(accountId: String, _ change: Data) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "INSERT INTO change_queue (accountId, change, createdAt) VALUES (?, ?, ?)",
+                arguments: [accountId, change, Date().timeIntervalSince1970])
+        }
+    }
+
+    /// The account's queued changes, oldest first.
+    public func queuedChanges(accountId: String) throws -> [(id: Int64, change: Data)] {
+        try dbPool.read { db in
+            try Row.fetchAll(
+                db, sql: "SELECT id, change FROM change_queue WHERE accountId = ? ORDER BY id", arguments: [accountId]
+            ).map { ($0["id"], $0["change"]) }
+        }
+    }
+
+    public func queuedChangeCount(accountId: String) throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM change_queue WHERE accountId = ?", arguments: [accountId]) ?? 0
+        }
+    }
+
+    public func removeQueuedChange(id: Int64) throws {
+        try dbPool.write { db in try db.execute(sql: "DELETE FROM change_queue WHERE id = ?", arguments: [id]) }
+    }
+
+    /// Replaces a queued change in place (what's left of it after part went through).
+    public func replaceQueuedChange(id: Int64, with change: Data) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE change_queue SET change = ? WHERE id = ?", arguments: [change, id])
+        }
+    }
+
     /// Messages whose recipient groups haven't been fetched (see the v10 migration).
     public func remoteIDsMissingRecipientGroups(accountId: String, limit: Int) throws -> [String] {
         try dbPool.read { db in

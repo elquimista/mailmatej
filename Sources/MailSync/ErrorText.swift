@@ -20,6 +20,19 @@ public enum ErrorText {
 
     public static func technical(_ error: Error) -> String { String(describing: error) }
 
+    /// Whether the server couldn't be reached at all (offline, connection lost, timed out, server
+    /// temporarily unavailable), so the same request may work later, as opposed to being refused.
+    public static func isUnreachable(_ error: Error) -> Bool {
+        if case JMAPError.http(let status, _, _) = error { return [502, 503, 504].contains(status) }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return false }
+        let codes: [URLError.Code] = [
+            .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotConnectToHost, .cannotFindHost,
+            .dnsLookupFailed, .dataNotAllowed, .internationalRoamingOff, .callIsActive,
+        ]
+        return codes.map(\.rawValue).contains(ns.code)
+    }
+
     /// The human-readable part of an RFC 7807 problem body (`detail`, else `title`), as JMAP servers send.
     static func problemDetail(_ body: String) -> String? {
         guard let data = body.data(using: .utf8),

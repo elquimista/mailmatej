@@ -1,6 +1,7 @@
 import Foundation
 import JMAPKit
 import MailStore
+import Network
 import os
 
 let syncLog = Logger(subsystem: "app.mailmatej", category: "sync")
@@ -24,6 +25,8 @@ public struct AccountSyncStatus: Sendable {
     public var isDownloading = false
     /// Local mailbox ids the download is working on right now.
     public var busyMailboxes: Set<Int64> = []
+    /// Changes made while the server couldn't be reached, waiting to be made there.
+    public var queuedChanges = 0
 }
 
 /// Runs sync for all accounts: a bounded number at a time, triggered by push, polling and the user.
@@ -36,7 +39,10 @@ public actor SyncCoordinator {
     /// New messages of an account, by remote id, after a sync (for rules).
     private let onArrived: @Sendable (String, [String]) -> Void
     private let onStatus: @Sendable (AccountSyncStatus) -> Void
+    /// A queued change the server refused once it could be reached (its messages show the server's state).
+    private let onQueuedChangeRefused: @Sendable (_ accountId: String, _ error: Error) -> Void
     private let limiter: AsyncLimiter
+    private var pathMonitor: NWPathMonitor?
     private let urlSession: URLSession
 
     private var engines: [String: JMAPAccountSync] = [:]
@@ -57,9 +63,11 @@ public actor SyncCoordinator {
     public init(
         store: MailStore, maxConcurrentSyncs: Int = 6, credentials: @escaping CredentialsProvider,
         onStatus: @escaping @Sendable (AccountSyncStatus) -> Void = { _ in },
-        onArrived: @escaping @Sendable (_ accountId: String, _ remoteIds: [String]) -> Void = { _, _ in }
+        onArrived: @escaping @Sendable (_ accountId: String, _ remoteIds: [String]) -> Void = { _, _ in },
+        onQueuedChangeRefused: @escaping @Sendable (_ accountId: String, _ error: Error) -> Void = { _, _ in }
     ) {
         self.store = store
+        self.onQueuedChangeRefused = onQueuedChangeRefused
         self.credentials = credentials
         self.onStatus = onStatus
         self.onArrived = onArrived
@@ -83,6 +91,18 @@ public actor SyncCoordinator {
                 await self?.syncAll()
             }
         }
+        // Back online: sync now, which first makes the changes queued meanwhile.
+        pathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        nonisolated(unsafe) var wasSatisfied = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            defer { wasSatisfied = satisfied }
+            guard satisfied, !wasSatisfied else { return }
+            Task { await self?.syncAll() }
+        }
+        monitor.start(queue: DispatchQueue(label: "app.mailmatej.path"))
+        pathMonitor = monitor
     }
 
     /// Creates engines for all enabled accounts without syncing them.
@@ -94,6 +114,7 @@ public actor SyncCoordinator {
 
     public func stop() {
         pollTask?.cancel()
+        pathMonitor?.cancel()
         for task in downloadTasks.values { task.cancel() }
         downloadTasks.removeAll()
         for task in fastPollTasks.values { task.cancel() }
@@ -147,10 +168,11 @@ public actor SyncCoordinator {
     }
 
     /// Changes emails on the server (see `JMAPAccountSync.update`), then syncs so mailbox counts follow.
+    /// Changes messages on the server (Email/set), or queues the change while it can't be reached.
     public func update(accountId: String, remoteIds: [String], patch: [String: JSONValue]) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard !remoteIds.isEmpty else { return }
         defer { requestSync(accountId) }
-        try await engine.update(remoteIds: remoteIds, patch: patch)
+        try await makeOrQueue(.update(remoteIds: remoteIds, patch: patch), accountId: accountId)
     }
 
     /// See `JMAPAccountSync.ensureIdentities`.
@@ -179,10 +201,112 @@ public actor SyncCoordinator {
         try await engine.restore(remoteIds: remoteIds)
     }
 
+    /// Deletes messages for good, or queues that while the server can't be reached.
     public func destroy(accountId: String, remoteIds: [String]) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard !remoteIds.isEmpty else { return }
         defer { requestSync(accountId) }
-        try await engine.destroy(remoteIds: remoteIds)
+        try await makeOrQueue(.destroy(remoteIds: remoteIds), accountId: accountId)
+    }
+
+    /// Moves a message to another account: imports its raw message (which must be stored locally, so
+    /// the move can wait in the queue) into the target mailbox, then deletes the original. Queued while
+    /// either server can't be reached.
+    public func moveAcross(
+        accountId: String, remoteId: String, blobId: String, toAccount targetAccountId: String, mailboxRemoteId: String,
+        keywords: [String], receivedAt: Date
+    ) async throws {
+        defer { requestSync(accountId) }
+        try await makeOrQueue(
+            .moveAcross(
+                remoteId: remoteId, blobId: blobId, targetAccountId: targetAccountId, mailboxRemoteId: mailboxRemoteId,
+                keywords: keywords, receivedAt: receivedAt),
+            accountId: accountId)
+    }
+
+    // MARK: Change queue
+
+    /// Makes a change on the server now, unless older changes are still queued (it waits behind them, so
+    /// changes reach the server in the order they were made) or the server can't be reached.
+    private func makeOrQueue(_ change: QueuedChange, accountId: String) async throws {
+        if try store.queuedChangeCount(accountId: accountId) > 0 { return try enqueue(change, accountId: accountId) }
+        do {
+            if let rest = try await make(change, accountId: accountId) { try enqueue(rest, accountId: accountId) }
+        } catch where ErrorText.isUnreachable(error) {
+            try enqueue(change, accountId: accountId)
+        }
+    }
+
+    private func enqueue(_ change: QueuedChange, accountId: String) throws {
+        try store.enqueueChange(accountId: accountId, try JSONEncoder().encode(change))
+        syncLog.notice("Queued a change for \(accountId, privacy: .public): the server can't be reached")
+        reportQueue(accountId)
+    }
+
+    /// Makes one change. Returns what's left of it when part went through and the rest couldn't (a move's
+    /// delete after its copy was confirmed), so a retry doesn't copy the message twice.
+    private func make(_ change: QueuedChange, accountId: String) async throws -> QueuedChange? {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        switch change {
+        case .update(let remoteIds, let patch):
+            try await engine.update(remoteIds: remoteIds, patch: patch)
+        case .destroy(let remoteIds):
+            try await engine.destroy(remoteIds: remoteIds)
+        case .moveAcross(let remoteId, let blobId, let targetAccountId, let mailboxRemoteId, let keywords, let receivedAt):
+            guard let target = engines[targetAccountId] else { throw JMAPError.invalidResponse("account not loaded") }
+            guard let raw = store.blobs.read(accountId: accountId, blobId: blobId) else {
+                throw JMAPError.invalidResponse("the message isn’t stored locally")
+            }
+            try await target.importMessage(raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+            requestSync(targetAccountId)
+            do {
+                try await engine.destroy(remoteIds: [remoteId])
+            } catch where ErrorText.isUnreachable(error) {
+                return .destroy(remoteIds: [remoteId])
+            }
+        }
+        return nil
+    }
+
+    /// Makes the account's queued changes, oldest first. Throws at the first one the server still can't
+    /// be reached for (the sync waits too, so it can't bring back the server's older state over local
+    /// changes). One the server refuses is dropped, its messages back to the server's state, and reported.
+    private func flushQueue(_ accountId: String) async throws {
+        let queued = try store.queuedChanges(accountId: accountId)
+        guard !queued.isEmpty else { return }
+        defer { reportQueue(accountId) }
+        for item in queued {
+            guard let change = try? JSONDecoder().decode(QueuedChange.self, from: item.change) else {
+                try store.removeQueuedChange(id: item.id)
+                continue
+            }
+            do {
+                if let rest = try await make(change, accountId: accountId) {
+                    try store.replaceQueuedChange(id: item.id, with: try JSONEncoder().encode(rest))
+                    throw URLError(.networkConnectionLost)
+                }
+                try store.removeQueuedChange(id: item.id)
+            } catch where ErrorText.isUnreachable(error) {
+                throw error
+            } catch {
+                syncLog.error("A queued change was refused: \(ErrorText.technical(error), privacy: .public)")
+                try store.removeQueuedChange(id: item.id)
+                // Back to the server's state: refused updates are fetched again by the engine; messages
+                // not deleted, or not moved, come back.
+                switch change {
+                case .update: break
+                case .destroy(let remoteIds): try? await engines[accountId]?.restore(remoteIds: remoteIds)
+                case .moveAcross(let remoteId, _, _, _, _, _): try? await engines[accountId]?.restore(remoteIds: [remoteId])
+                }
+                onQueuedChangeRefused(accountId, error)
+            }
+        }
+    }
+
+    private func reportQueue(_ accountId: String) {
+        var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .idle, lastSuccess: nil)
+        status.queuedChanges = (try? store.queuedChangeCount(accountId: accountId)) ?? 0
+        statuses[accountId] = status
+        onStatus(status)
     }
 
     /// Sends a message from the account (see `JMAPAccountSync.send`), then syncs so it shows in Sent.
@@ -222,6 +346,7 @@ public actor SyncCoordinator {
             await limiter.acquire()
             update(accountId, .syncing)
             do {
+                try await flushQueue(accountId)
                 let result = try await engine.sync()
                 if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                 update(accountId, .idle, success: true)

@@ -249,6 +249,18 @@ enum Schema {
             // MailMate's subrules: a rule inside another, run on the messages its parent matched.
             try db.execute(sql: "ALTER TABLE rule ADD COLUMN parentId INTEGER REFERENCES rule(id) ON DELETE CASCADE")
         }
+        m.registerMigration("v13-change-queue") { db in
+            // Changes made while an account's server couldn't be reached, in order, until it can be.
+            try db.execute(sql: """
+                CREATE TABLE change_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    accountId TEXT NOT NULL,
+                    change BLOB NOT NULL,            -- JSON, see MailSync's QueuedChange
+                    createdAt REAL NOT NULL
+                );
+                CREATE INDEX change_queue_account ON change_queue(accountId, id);
+                """)
+        }
 
         return m
     }
