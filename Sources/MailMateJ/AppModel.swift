@@ -211,6 +211,8 @@ final class AppModel {
         case archive, junk, delete, markRead, markUnread, flag, unflag
         /// Into one mailbox of the messages' account.
         case move(toMailboxId: Int64)
+        /// Into each message's account's mailbox with this role (a Unified mailbox, such as Sent Messages).
+        case moveToRole(String)
         /// Each message back into the mailboxes it was in (undo of a move).
         case restoreMailboxes([Int64: [Int64]], clearJunk: Bool)
     }
@@ -285,6 +287,11 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: "")
             }
             try move(refs, to: target)
+        case .moveToRole(let role):
+            guard let target = try store.mailbox(accountId: accountId, role: role) else {
+                throw MessageActionError.noMailbox(role: role)
+            }
+            try move(refs, to: target)
         case .restoreMailboxes(let saved, let clearJunk):
             let remote = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.id, $0.remoteId) })
             // One request per set of mailboxes (usually all the same).
@@ -335,7 +342,17 @@ final class AppModel {
         let alert = NSAlert()
         alert.messageText = "Couldn’t change \(count == 1 ? "the message" : "\(count) messages") on the server."
         alert.informativeText = Self.describe(error)
-        alert.runModal()
+        present(alert)
+    }
+
+    /// Shows an error as a sheet on the main window, so the lists can still update behind it (a modal
+    /// alert would hold them until it's dismissed).
+    private func present(_ alert: NSAlert) {
+        if let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
     }
 
     /// Refreshes the UI from the store now, skipping the debounce meant for sync bursts.
@@ -353,6 +370,77 @@ final class AppModel {
             case .noMailbox(let role):
                 let name = ["archive": "Archive", "junk": "Junk", "trash": "Deleted Messages"][role] ?? "matching"
                 return "This account has no \(name) mailbox."
+            }
+        }
+    }
+
+    /// Moves messages into a mailbox of another account, as MailMate does, and as instantly: they leave
+    /// the lists at once, then in the background each is copied whole (raw message, keywords, date) into
+    /// the mailbox, and only once that account has confirmed the copy is the original deleted for good.
+    /// A message that fails to copy comes back where it was.
+    func moveAcrossAccounts(_ refs: [MailStore.MessageRef], toMailboxId mailboxId: Int64) {
+        guard let target = try? store.mailboxes().first(where: { $0.id == mailboxId }) else { return }
+        struct Pending { var ref: MailStore.MessageRef; var blobId: String; var keywords: [String]; var receivedAt: Date }
+        let pending: [Pending] = refs.compactMap { ref in
+            guard let detail = try? store.detail(id: ref.id) else { return nil }
+            return Pending(
+                ref: ref, blobId: detail.blobId, keywords: (try? store.keywords(messageId: ref.id)) ?? [],
+                receivedAt: detail.receivedAt)
+        }
+        // Out of the lists now; the server catches up.
+        for (accountId, group) in Dictionary(grouping: pending, by: \.ref.accountId) {
+            try? store.deleteMessages(accountId: accountId, remoteIds: group.map(\.ref.remoteId))
+        }
+        refreshNow()
+        Task {
+            var failed: [(Pending, Error)] = []
+            for item in pending {
+                do {
+                    var raw = store.blobs.read(accountId: item.ref.accountId, blobId: item.blobId)  // usually on disk
+                    if raw == nil {
+                        raw = try await coordinator.downloadBlob(
+                            accountId: item.ref.accountId, blobId: item.blobId, type: "message/rfc822", name: "message.eml")
+                    }
+                    guard let raw else { continue }
+                    #if DEBUG
+                        if ProcessInfo.processInfo.environment["MMJ_DEBUG_FAIL_IMPORT"] != nil {
+                            throw MessageActionError.noMailbox(role: "")  // To test the way back.
+                        }
+                    #endif
+                    try await coordinator.importMessage(
+                        accountId: target.accountId, raw, mailboxRemoteId: target.remoteId, keywords: item.keywords,
+                        receivedAt: item.receivedAt)
+                    try await coordinator.destroy(accountId: item.ref.accountId, remoteIds: [item.ref.remoteId])
+                } catch {
+                    failed.append((item, error))
+                }
+            }
+            guard let (_, error) = failed.first else { return }
+            for (accountId, group) in Dictionary(grouping: failed.map(\.0), by: \.ref.accountId) {
+                try? await coordinator.restore(accountId: accountId, remoteIds: group.map(\.ref.remoteId))
+            }
+            refreshNow()
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t move \(failed.count == 1 ? "a message" : "\(failed.count) messages") to the other account."
+            alert.informativeText = Self.describe(error) + (failed.count == 1
+                ? "\n\nIt’s back where it was." : "\n\nThey’re back where they were.")
+            present(alert)
+        }
+    }
+
+    /// Creates a mailbox inside `parentId` (in its account), then moves the messages there.
+    func moveToNewMailbox(named name: String, inside parentId: Int64, messages ids: [Int64], then perform: @escaping (MessageAction) -> Void) {
+        guard let parent = try? store.mailboxes().first(where: { $0.id == parentId }) else { return }
+        Task {
+            do {
+                try await coordinator.createMailbox(accountId: parent.accountId, name: name, role: nil, parentRemoteId: parent.remoteId)
+                guard let created = try store.mailboxes().first(where: {
+                    $0.accountId == parent.accountId && $0.parentRemoteId == parent.remoteId && $0.name == name
+                }) else { throw MessageActionError.noMailbox(role: "") }
+                refreshNow()
+                perform(.move(toMailboxId: created.id))
+            } catch {
+                report(error, count: ids.count)
             }
         }
     }

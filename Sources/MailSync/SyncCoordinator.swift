@@ -157,9 +157,22 @@ public actor SyncCoordinator {
         return try await engine.ensureIdentities(addresses, name: name)
     }
 
-    public func createMailbox(accountId: String, name: String, role: String?) async throws {
+    public func createMailbox(accountId: String, name: String, role: String?, parentRemoteId: String? = nil) async throws {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
-        try await engine.createMailbox(name: name, role: role)
+        try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId)
+    }
+
+    /// Copies a whole message into a mailbox of `accountId` (see `JMAPAccountSync.importMessage`).
+    public func importMessage(
+        accountId: String, _ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date
+    ) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.importMessage(raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+    }
+
+    public func restore(accountId: String, remoteIds: [String]) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.restore(remoteIds: remoteIds)
     }
 
     public func destroy(accountId: String, remoteIds: [String]) async throws {

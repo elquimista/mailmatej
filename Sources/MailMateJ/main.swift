@@ -111,8 +111,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_KEYS"] {
                     // Keys typed as a user would; "|filter" after a v or gl chooses in the mailbox picker.
                     for part in keys.split(separator: " ") {
-                        if part.hasPrefix("|") {
-                            MailboxPicker.debugChoose(filter: String(part.dropFirst()))
+                        if part == "|snap", let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] {
+                            writeSnapshot(of: MailboxPicker.debugPanel, to: path.replacingOccurrences(of: ".png", with: "-picker.png"))
+                            NSLog("MMJ picker rows: \(MailboxPicker.debugFirstRows) frame \(NSStringFromRect(MailboxPicker.debugPanel?.frame ?? .zero)) content \(NSStringFromRect(MailboxPicker.debugPanel?.contentLayoutRect ?? .zero))")
+                            // As a click in the main window would: does the picker stay in front?
+                            windowController?.window?.makeKeyAndOrderFront(nil)
+                            try? await Task.sleep(for: .milliseconds(300))
+                            let panel = MailboxPicker.debugPanel
+                            let order = NSApp.orderedWindows.map { $0 === panel ? "picker" : $0 === windowController?.window ? "main" : "other" }
+                            NSLog("MMJ picker after main window front: visible=\(panel?.isVisible ?? false) level=\(panel?.level.rawValue ?? -1) order=\(order)")
+                        } else if part.hasPrefix("|") {
+                            // "|filter" chooses the first match; "|filter>Name" makes a submailbox Name inside it.
+                            let spec = part.dropFirst().split(separator: ">", maxSplits: 1).map(String.init)
+                            MailboxPicker.debugChoose(  // "+" stands for a space in the filter
+                                filter: spec[0].replacingOccurrences(of: "+", with: " "), create: spec.count > 1 ? spec[1] : nil)
                             try? await Task.sleep(for: .seconds(1))
                         } else {
                             await windowController?.debugType(String(part))

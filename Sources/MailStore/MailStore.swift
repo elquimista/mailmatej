@@ -508,6 +508,13 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// A message's keywords ("$seen", "$flagged", ...).
+    public func keywords(messageId: Int64) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(db, sql: "SELECT keyword FROM message_keyword WHERE messageId = ?", arguments: [messageId])
+        }
+    }
+
     private static func placeholders(_ count: Int) -> String {
         Array(repeating: "?", count: count).joined(separator: ", ")
     }

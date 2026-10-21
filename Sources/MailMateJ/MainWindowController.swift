@@ -21,7 +21,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// The newest message as of the last load, to tell whether the user is "following" new mail.
     private var lastNewestID: Int64?
     /// The message to select once moved messages have left the list (Archive, Junk, Delete).
-    private var selectAfterMove: Int64?
+    /// Waits until the moved messages have left the list (at once for a move within an account; after
+    /// the copy for one to another account), then selects `next`. Dropped on a new selection or mailbox.
+    private var selectAfterMove: (next: Int64, moved: Set<Int64>)?
     private var correspondent: String?
     private var correspondenceTask: Task<Void, Never>?
     private var lastSelectionChange: CFAbsoluteTime = 0
@@ -231,10 +233,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 displayed: messageView.displayedMessageID)
             self.scope = scope
             self.scopeTitle = node.title
+            selectAfterMove = nil
             self.reloadList(.scopeChanged)
         }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
+            selectAfterMove = nil  // The user moved on.
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: selection reported \(id ?? -1)") }
             #endif
@@ -320,12 +324,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 // Keep the selection if it is still in the list; otherwise show the newest message.
                 let kept = before.filter(ids.contains)
                 list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newestEnd) : .toSelection)
-            case .dataChanged where selectAfterMove != nil:
-                // Right after Archive/Junk/Delete: if the messages left the list, select the next one.
-                let next = selectAfterMove!
+            case .dataChanged where selectAfterMove.map { pending in !pending.moved.contains(where: ids.contains) } == true:
+                // After Archive/Junk/Delete/Move, once the messages have left the list: the next one.
+                let next = selectAfterMove!.next
                 selectAfterMove = nil
-                let left = !before.isEmpty && !before.contains(where: ids.contains)
-                list.setIDs(ids, selecting: left && ids.contains(next) ? [next] : nil, scroll: .keepPosition)
+                list.setIDs(ids, selecting: ids.contains(next) ? [next] : nil, scroll: .keepPosition)
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
                 // When sorted by date and the end new mail arrives at (the top, or the bottom when oldest
@@ -1073,15 +1076,32 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
     private func moveAway(_ action: AppModel.MessageAction) {
         let ids = targetIDs
-        if ids == list.selectedIDs {
-            let selected = Set(ids)
-            let rows = list.ids.indices.filter { selected.contains(list.ids[$0]) }
-            if let last = rows.last, let first = rows.first {
-                selectAfterMove = list.ids[(last + 1)...].first { !selected.contains($0) }
-                    ?? list.ids[..<first].last
-            }
-        }
+        selectNextAfterMoving(ids)
         perform(action, on: ids)
+    }
+
+    private func selectNextAfterMoving(_ ids: [Int64]) {
+        guard ids == list.selectedIDs else { return }
+        let selected = Set(ids)
+        let rows = list.ids.indices.filter { selected.contains(list.ids[$0]) }
+        if let last = rows.last, let first = rows.first,
+            let next = list.ids[(last + 1)...].first(where: { !selected.contains($0) }) ?? list.ids[..<first].last
+        {
+            selectAfterMove = (next, selected)
+        }
+    }
+
+    /// Moves the messages into a mailbox: as usual within its account, and for messages of other accounts
+    /// by copying them there and deleting the originals once the copy is confirmed (not undoable).
+    fileprivate func move(_ ids: [Int64], toMailboxId mailboxId: Int64) {
+        guard let target = (try? model.store.mailboxes())?.first(where: { $0.id == mailboxId }),
+            let refs = try? model.store.refs(ids: ids), !refs.isEmpty
+        else { return NSSound.beep() }
+        selectNextAfterMoving(ids)
+        let same = refs.filter { $0.accountId == target.accountId }
+        let other = refs.filter { $0.accountId != target.accountId }
+        if !same.isEmpty { perform(.move(toMailboxId: mailboxId), on: same.map(\.id)) }
+        if !other.isEmpty { model.moveAcrossAccounts(other, toMailboxId: mailboxId) }
     }
 
     private func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
@@ -1126,7 +1146,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case .markUnread: keyword("Mark as Unread", \.isSeen, set: .markRead, clear: .markUnread)
         case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
         case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
-        case .archive, .junk, .delete, .move, .restoreMailboxes:
+        case .archive, .junk, .delete, .move, .moveToRole, .restoreMailboxes:
             let inTrash: Set<Int64>
             if case .delete = action { inTrash = (try? model.store.messageIDs(ids, inRole: "trash")) ?? [] } else { inTrash = [] }
             let movable = ids.filter { !inTrash.contains($0) }  // Those deleted for good stay deleted.
@@ -1403,26 +1423,78 @@ extension MainWindowController {
         sidebar.select(key: key)
     }
 
-    /// v: moves the selected messages to a mailbox of their account; g then l: shows a mailbox.
+    /// v: moves the selected messages to a mailbox (a Unified one moves each into its account's); g then l:
+    /// shows a mailbox. Lists as MailMate's picker does: Unified mailboxes, then each account's mailboxes
+    /// alphabetically (recently chosen ones first, see `MailboxPicker`).
     fileprivate func pickMailbox(move: Bool) {
         guard let window else { return }
         let roots = SidebarViewController.buildTree(model: model)
+        let boxes = (try? model.store.mailboxes()) ?? []
+        let boxByID = Dictionary(boxes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let ids = targetIDs
+        let accounts = Set(((try? model.store.refs(ids: ids)) ?? []).map(\.accountId))
+        if move && accounts.isEmpty { return NSSound.beep() }
+
+        var choices: [MailboxPicker.Choice] = []
+        for node in roots.first(where: { $0.key == "header.mailboxes" })?.children ?? [] {
+            guard let scope = node.scope else { continue }
+            if move {
+                // Moving into a Unified mailbox means its role's mailbox in each message's account.
+                guard case .role(let role) = scope, scope != self.scope else { continue }
+                let count = boxes.filter { $0.role == role }.reduce(0) { $0 + $1.totalEmails }
+                choices.append(.init(node: node, title: node.title, subtitle: "Unified", isUnified: true, path: "Unified ▸ \(node.title)", count: count))
+            } else {
+                choices.append(.init(node: node, title: node.title, subtitle: "Unified", isUnified: true, path: "Unified ▸ \(node.title)", count: nil))
+            }
+        }
+        for account in roots.first(where: { $0.key == "header.sources" })?.children ?? [] {
+            if !move {
+                choices.append(.init(node: account, title: account.title, subtitle: "Account", isUnified: false, path: account.title, count: nil))
+            }
+            var mailboxes: [(path: [String], node: SidebarNode)] = []
+            func walk(_ nodes: [SidebarNode], _ path: [String]) {
+                for node in nodes where node.kind == .mailbox {
+                    mailboxes.append((path + [node.title], node))
+                    walk(node.children, path + [node.title])
+                }
+            }
+            walk(account.children, [])
+            for (path, node) in mailboxes.sorted(by: { $0.path.joined(separator: "/").localizedCaseInsensitiveCompare($1.path.joined(separator: "/")) == .orderedAscending }) {
+                if move, node.scope == self.scope { continue }
+                var count: Int?
+                if case .mailbox(let id)? = node.scope { count = boxByID[id]?.totalEmails }
+                choices.append(.init(
+                    node: node, title: node.title, subtitle: account.title, isUnified: false,
+                    path: ([account.title] + path).joined(separator: " ▸ "), count: count))
+            }
+        }
+
         if move {
-            let ids = targetIDs
-            let accounts = Set(((try? model.store.refs(ids: ids)) ?? []).map(\.accountId))
-            // A mailbox belongs to one account, so the messages must too.
-            guard accounts.count == 1, let account = accounts.first else { return NSSound.beep() }
             MailboxPicker.show(
-                over: window, title: "Move to Mailbox", roots: roots,
-                include: { $0.kind == .mailbox && $0.accountId == account }
-            ) { [weak self] node in
-                guard case .mailbox(let id)? = node.scope else { return }
-                self?.moveAway(.move(toMailboxId: id))
-            }
+                over: window, title: "Move to Mailbox", choices: choices, recentsKey: "RecentMoveMailboxes",
+                onChoose: { [weak self] choice in
+                    guard let self, let scope = choice.node.scope else { return }
+                    switch scope {
+                    case .mailbox(let id): self.move(targetIDs, toMailboxId: id)
+                    case .role("archive"): moveAway(.archive)
+                    case .role("junk"): moveAway(.junk)
+                    case .role("trash"): moveAway(.delete)
+                    case .role(let role): moveAway(.moveToRole(role))
+                    default: NSSound.beep()
+                    }
+                },
+                onCreate: { [weak self] name, parent in
+                    guard let self, case .mailbox(let parentId)? = parent.node.scope else { return }
+                    let ids = targetIDs
+                    model.moveToNewMailbox(named: name, inside: parentId, messages: ids) { [weak self] action in
+                        guard case .move(let created) = action else { return }
+                        self?.move(ids, toMailboxId: created)
+                    }
+                })
         } else {
-            MailboxPicker.show(over: window, title: "Go to Mailbox", roots: roots, include: { _ in true }) { [weak self] node in
-                _ = self?.sidebar.select(key: node.key)
-            }
+            MailboxPicker.show(
+                over: window, title: "Go to Mailbox", choices: choices, recentsKey: "RecentGoToMailboxes",
+                onChoose: { [weak self] choice in _ = self?.sidebar.select(key: choice.node.key) })
         }
     }
 

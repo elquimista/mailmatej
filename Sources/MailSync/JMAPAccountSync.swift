@@ -448,10 +448,10 @@ public actor JMAPAccountSync {
 
     /// Creates a top-level mailbox (Mailbox/set), with `role` if the server accepts it, and syncs the
     /// mailbox list so it's in the store.
-    public func createMailbox(name: String, role: String?) async throws {
+    public func createMailbox(name: String, role: String?, parentRemoteId: String? = nil) async throws {
         let accountId = try remoteAccountId(try await client.currentSession())
         func create(withRole: Bool) async throws -> JSONValue? {
-            var mailbox: [String: JSONValue] = ["name": .string(name), "parentId": .null]
+            var mailbox: [String: JSONValue] = ["name": .string(name), "parentId": parentRemoteId.map { .string($0) } ?? .null]
             if withRole, let role { mailbox["role"] = .string(role) }
             var request = JMAPRequest()
             let set = request.call("Mailbox/set", ["accountId": .string(accountId), "create": ["new": .object(mailbox)]])
@@ -462,6 +462,30 @@ public actor JMAPAccountSync {
             if error != .null { throw SendError.rejected(Self.setErrorText(error)) }
         }
         _ = try await syncMailboxes(accountId)
+    }
+
+    /// Puts a whole message (its raw RFC 5322 bytes) into a mailbox of this account (blob upload, then
+    /// Email/import), keeping its keywords and received date: the copy half of a move from another
+    /// account. Returns once the server has confirmed it, then syncs it in.
+    public func importMessage(_ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        let blobId = try await client.upload(accountId: accountId, data: raw, type: "message/rfc822")
+        var request = JMAPRequest()
+        let formatter = ISO8601DateFormatter()
+        let imported = request.call("Email/import", [
+            "accountId": .string(accountId),
+            "emails": .object(["m": .object([
+                "blobId": .string(blobId),
+                "mailboxIds": .object([mailboxRemoteId: .bool(true)]),
+                "keywords": .object(Dictionary(uniqueKeysWithValues: keywords.map { ($0, JSONValue.bool(true)) })),
+                "receivedAt": .string(formatter.string(from: receivedAt)),
+            ])]),
+        ])
+        let result = try await client.send(request).arguments(imported)
+        guard result["created"]?["m"]?["id"]?.stringValue != nil else {
+            throw SendError.rejected(Self.setErrorText(result["notCreated"]?["m"] ?? .null))
+        }
+        _ = try await sync()
     }
 
     /// Deletes emails for good (Email/set destroy), here and on the server.
@@ -609,6 +633,12 @@ public actor JMAPAccountSync {
             case .rejected(let why): "The server didn’t send the message (\(why))."
             }
         }
+    }
+
+    /// Puts emails removed from the store back from the server (a move that failed after the UI moved on).
+    public func restore(remoteIds: [String]) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        try await refetch(remoteIds, accountId)
     }
 
     /// Stores the server's current copy of these emails (and forgets ones it no longer has).

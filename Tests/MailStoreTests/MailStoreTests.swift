@@ -163,6 +163,19 @@ import Testing
         #expect(Set(MailStore.thread(loop, expanded: [l[1]!]).map(\.id)) == [1, 2])
     }
 
+    @Test func fuzzyMatchFindsLettersInOrder() {
+        let postmasterInbox = ["postmaster@mail.example Inbox", "Inbox postmaster@mail.example"]
+        #expect(FuzzyMatch.score("postin", in: postmasterInbox) != nil)  // MailMate's example
+        #expect(FuzzyMatch.score("post in", in: postmasterInbox) != nil)
+        #expect(FuzzyMatch.score("inpost", in: postmasterInbox) != nil)  // either order of account and name
+        #expect(FuzzyMatch.score("postzin", in: postmasterInbox) == nil)  // no z anywhere
+        // Tighter matches rank first: postmaster's Inbox before an Inbox whose account just has the letters.
+        let loose = ["peter.ostwald@xample.com Inbox", "Inbox peter.ostwald@xample.com"]
+        #expect(FuzzyMatch.score("postin", in: postmasterInbox)! < FuzzyMatch.score("postin", in: loose)!)
+        #expect(FuzzyMatch.score("arch", in: ["Unified Archive"])! < FuzzyMatch.score("arch", in: ["Unified Search Results"])!)
+        #expect(FuzzyMatch.score("", in: ["x"]) == 0)
+    }
+
     @Test func ancestorsLeadFromTheFirstMessage() {
         typealias T = MailStore.ThreadInput
         let rows = [
