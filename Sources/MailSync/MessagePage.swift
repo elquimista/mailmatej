@@ -117,11 +117,26 @@ public enum MessagePage {
         return Action(rawValue: String(parts[1]))
     }
 
-    /// Whether HTML leaves all colours to the reader (no colour, background or bgcolor anywhere), so it can
-    /// be shown light-on-dark without losing anything.
+    /// Whether HTML leaves all colours to the reader, so it can be shown light-on-dark as MailMate does.
+    /// Any colour counts, as in MailMate: colour, background or bgcolor, but also a colour value in any
+    /// other style (Gmail's quote bar, `border-left: 1px solid rgb(204,204,204)`, keeps a reply on white).
     static func hasNoColors(_ html: String) -> Bool {
-        html.range(of: #"(?i)(color|background)\s*[:=]|bgcolor|<body[^>]*\btext\s*="#, options: .regularExpression) == nil
+        html.range(of: colorPattern, options: .regularExpression) == nil
     }
+
+    private static let namedColors =
+        "black|white|gr[ae]y|silver|red|maroon|blue|navy|green|lime|olive|teal|aqua|cyan|yellow|orange|purple|fuchsia|"
+        + "magenta|pink|brown|gold|beige|ivory|indigo|violet|crimson|coral|salmon|khaki|tan|lavender|turquoise|"
+        + "(?:light|dark|dim|slate|steel|royal|sky|dodger|cornflower|midnight|forest|sea|hot|deep)[a-z]+"
+    private static let colorPattern =
+        #"(?i)(color|background)\s*[:=]|bgcolor|<body[^>]*\btext\s*="#
+        // A colour value in a style declaration (a property name, then no "/", so not a URL): rgb(), hsl()
+        // and the like, or a hex code.
+        + #"|[a-z-]+\s*:[^;"'{}<>/]*\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\s*\("#
+        + #"|[a-z-]+\s*:[^;"'{}<>/]*#[0-9a-f]{3,8}\b"#
+        // A named colour in a border, outline, shadow, underline or SVG paint.
+        + #"|(?:border|outline|shadow|decoration|column-rule|fill|stroke)[a-z-]*\s*:[^;"'{}<>]*\b(?:"#
+        + namedColors + #")\b"#
 
     /// A plain-text body as HTML: one block per line, and runs of quoted lines ("> ...") as quote blocks
     /// with the markers removed, nested per level, as MailMate shows them.

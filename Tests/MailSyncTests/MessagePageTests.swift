@@ -58,5 +58,14 @@ import Testing
         #expect(!MessagePage.hasNoColors(##"<td bgcolor="#fff">Hi</td>"##))
         #expect(!MessagePage.hasNoColors("<style>body { background:#fff }</style>"))
         #expect(!MessagePage.hasNoColors(#"<font color=red>Hi</font>"#))
+        // Any colour value counts, as in MailMate: Gmail's quote bar keeps a reply on white.
+        #expect(!MessagePage.hasNoColors(#"<blockquote style="margin:0px;border-left:1px solid rgb(204,204,204);padding-left:1ex">x</blockquote>"#))
+        #expect(!MessagePage.hasNoColors(##"<div style="border-top: 1px solid #ccc">x</div>"##))
+        #expect(!MessagePage.hasNoColors(#"<hr style="border: 0; border-top: 1px dotted grey">"#))
+        #expect(!MessagePage.hasNoColors(#"<p style="text-shadow: 0 1px 1px hsla(0,0%,0%,.2)">x</p>"#))
+        // ...but not markup that only looks similar: a bare tracking pixel, links with #anchors, border widths.
+        #expect(MessagePage.hasNoColors(#"<p>Hello Ellie,</p><img src="https://x.example/open?m=1" border="0" width="1" height="1">"#))
+        #expect(MessagePage.hasNoColors(##"<a href="https://x.example/page#abc123">link</a> <table border="1"><td>x</td></table>"##))
+        #expect(MessagePage.hasNoColors(#"<div style="border: 1px solid; margin: 0">x</div>"#))
     }
 }
