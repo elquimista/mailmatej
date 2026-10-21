@@ -68,7 +68,7 @@ The server listens on 127.0.0.1 only: the admin and test passwords are in this r
 docker compose restart && python3 seed.py
 ```
 
-`seed.py` creates alice/bob/carol (password `<name>-dev-pass`) with 300 messages each. `--accounts 100 --messages 50` is for scale tests, and `--live alice` delivers a message every 10 s for push testing. Test messages for one user: `--rich` (embedded, remote and tracker images), `--attachments`, `--invite` (an unnamed calendar part) and `--thread` (a three-message conversation).
+`seed.py` creates alice/bob/carol (password `<name>-dev-pass`) with 300 messages each. `--accounts 100 --messages 50` is for scale tests, and `--live alice` delivers a message every 10 s for push testing. Test messages for one user: `--rich` (embedded, remote and tracker images), `--attachments`, `--invite` (an unnamed calendar part), `--thread` (a three-message conversation), `--undisclosed` (To `undisclosed-recipients:;`, the user in Bcc, an HTML link) and `--reply` (a new reply to the user's oldest inbox message).
 
 Then:
 
@@ -82,9 +82,9 @@ Stalwart always advertises `https://<hostname>` endpoints. For session URLs on l
 ## Status
 
 - [x] M0 – JMAPKit, schema, initial + incremental sync, push (WebSocket, EventSource fallback, fast polling when push stalls), full download of every message
-- [x] M1 – window: unified mailboxes with submailboxes, account trees, virtualized lists with threads, Correspondence layout, HTML/plain rendering with remote content blocked, attachments (Quick Look, save, drag out), search, Dock counters
-- [ ] M2 – smart mailboxes: submailboxes of the unified mailboxes are done; user-defined smart mailboxes with conditions are not (tables exist: `smart_mailbox`, `smart_membership`)
-- [ ] M3 – actions: archive, junk, delete, read/unread and flag are done (local change at once, then `Email/set`); an offline queue for changes made without a connection and rules are not
+- [x] M1 – window: unified mailboxes with submailboxes, account trees, virtualized lists threaded by reply headers (a closed thread shows and sorts by its newest message), Correspondence layout, HTML/plain rendering with remote content blocked and a link preview on hover, attachment rows (Quick Look, save, drag out), search, Dock counters, MailMate's toolbar and Go to Mailbox panel
+- [x] M2 – smart mailboxes: unified mailboxes' submailboxes, and user-defined smart mailboxes (mailboxes, nested conditions compiled to SQL, submailboxes split by a field) in MailMate's mailbox editor
+- [ ] M3 – actions: archive, junk, delete, read/unread, flag and move (to any account; the copy is confirmed before the original goes) are done, instant with undo, plus Gmail+Vimium keys and MailMate's Message menu; rules on new mail (move/copy, delete, redirect, forward, keywords) are done. Not done: an offline queue for changes made without a connection
 - [x] M4 – compose and send (`EmailSubmission`): new message, reply, reply all, forward with attachments, Bcc, several From addresses per account
 - [ ] M5 – 100-account soak test, Instruments pass
 - [ ] M6 – IMAP + SMTP backend
