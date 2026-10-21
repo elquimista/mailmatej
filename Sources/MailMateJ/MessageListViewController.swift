@@ -349,6 +349,15 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return thread.size > 1 && thread.anyUnread && !expandedThreads.contains(thread.thread)
     }
 
+    /// A closed thread shows when its newest message arrived, where the thread sorts by date; any other
+    /// row its own date.
+    private func shownDate(_ row: MessageRow) -> Date {
+        guard let thread = threadRows[row.id], thread.size > 1, !expandedThreads.contains(thread.thread) else {
+            return row.receivedAt
+        }
+        return Date(timeIntervalSince1970: thread.newestAt)
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row index: Int) -> NSView? {
         guard let tableColumn, let column = Column(rawValue: tableColumn.identifier.rawValue),
             let row = row(at: index)
@@ -372,8 +381,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .subject:
             return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: unread)
         case .date:
-            if relativeDates { return textCell(tableView, column, Formatters.relative(row.receivedAt), bold: unread) }
-            return dateCell(tableView, row.receivedAt, bold: unread)
+            let date = shownDate(row)
+            if relativeDates { return textCell(tableView, column, Formatters.relative(date), bold: unread) }
+            return dateCell(tableView, date, bold: unread)
         case .source:
             return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: unread)
         }

@@ -136,6 +136,22 @@ import Testing
         #expect(MailStore.thread(rows, expanded: []).map(\.id) == [3, 2, 1])  // threads start collapsed
     }
 
+    @Test func threadsSortedByDateGoWhereTheirNewestMessageIs() {
+        typealias T = MailStore.ThreadInput
+        // Oldest first: a (answered today by a3), b, c, a3. The new reply brings thread a to the bottom,
+        // next to the new mail, not up where a was.
+        let rows = [
+            T(id: 1, at: 10, seen: true, messageId: "a"), T(id: 2, at: 20, seen: true, messageId: "b"),
+            T(id: 3, at: 30, seen: true, messageId: "c"), T(id: 4, at: 40, seen: false, messageId: "a3", inReplyTo: "a"),
+        ]
+        #expect(MailStore.thread(rows, expanded: [], placeAtNewest: true).map(\.id) == [2, 3, 1])
+        #expect(MailStore.thread(rows, expanded: []).map(\.id) == [1, 2, 3])
+        // A closed thread shows its newest message's date.
+        #expect(MailStore.thread(rows, expanded: []).first { $0.id == 1 }?.newestAt == 40)
+        // Newest first it already sorts there.
+        #expect(MailStore.thread(rows.reversed(), expanded: [], placeAtNewest: true).map(\.id) == [1, 3, 2])
+    }
+
     @Test func threadsNestReplies() {
         typealias T = MailStore.ThreadInput
         // a ← b ← d, a ← c (by References only), and e replying to a message not in the list.

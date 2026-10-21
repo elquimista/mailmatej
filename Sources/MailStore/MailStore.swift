@@ -628,14 +628,20 @@ public final class MailStore: Sendable {
         public var anyUnread: Bool
         /// Whether replies hang under this message (it gets a chevron).
         public var hasReplies: Bool
+        /// When the thread's newest message arrived (on its first row; the row's own date elsewhere): a
+        /// closed thread shows this date, so a new reply doesn't look like old mail.
+        public var newestAt: Double
 
-        public init(id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, hasReplies: Bool = false) {
+        public init(
+            id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, hasReplies: Bool = false, newestAt: Double = 0
+        ) {
             self.id = id
             self.thread = thread
             self.depth = depth
             self.size = size
             self.anyUnread = anyUnread
             self.hasReplies = hasReplies
+            self.newestAt = newestAt
         }
     }
 
@@ -682,7 +688,8 @@ public final class MailStore: Sendable {
     }
 
     /// A list's messages grouped into conversations, as MailMate shows threads: each thread where its
-    /// first message in `sort` order would be, as a reply tree (see `thread`). Threads start collapsed,
+    /// first message in `sort` order would be (by date: where its newest message is, so a new reply
+    /// brings the thread to the new mail in either direction), as a reply tree (see `thread`). Threads start collapsed,
     /// as in MailMate, at every level: replies show only for threads in `expanded`, and replies to a
     /// reply only under messages in `opened`.
     public func threadedMessages(
@@ -692,7 +699,9 @@ public final class MailStore: Sendable {
         let (filter, args) = Self.filter(scope: scope, search: search)
         let sql = "SELECT \(Self.threadColumns) FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         let rows = try dbPool.read { db in try Row.fetchAll(db, sql: sql, arguments: args).map(ThreadInput.init) }
-        return ThreadedList(rows: Self.thread(rows, expanded: expanded, opened: opened), threadOf: Self.threadKeys(rows))
+        return ThreadedList(
+            rows: Self.thread(rows, expanded: expanded, opened: opened, placeAtNewest: sort.key == .receivedAt),
+            threadOf: Self.threadKeys(rows))
     }
 
     /// What threading needs to know of these messages, in the given order (missing ones left out).
@@ -764,9 +773,12 @@ public final class MailStore: Sendable {
         return chain.reversed()
     }
 
-    /// Groups rows (in list order) into threads (see `parents`). Each thread goes where its first row is,
-    /// as a reply tree: every message under the one it answers, one level deeper, siblings oldest first.
-    public static func thread(_ rows: [ThreadInput], expanded: Set<String>, opened: Set<Int64> = []) -> [ThreadedRow] {
+    /// Groups rows (in list order) into threads (see `parents`). Each thread goes where its first row is
+    /// (with `placeAtNewest`, where its newest message is), as a reply tree: every message under the one
+    /// it answers, one level deeper, siblings oldest first.
+    public static func thread(
+        _ rows: [ThreadInput], expanded: Set<String>, opened: Set<Int64> = [], placeAtNewest: Bool = false
+    ) -> [ThreadedRow] {
         let keys = threadKeys(rows)
         let parents = parents(rows)
         var order: [String] = []
@@ -776,6 +788,15 @@ public final class MailStore: Sendable {
             if members[key] == nil { order.append(key) }
             members[key, default: []].append(row)
         }
+        if placeAtNewest {
+            var position: [Int64: Int] = [:]
+            for (index, row) in rows.enumerated() { position[row.id] = index }
+            func anchor(_ key: String) -> Int {
+                position[members[key]!.max { ($0.at, $0.id) < ($1.at, $1.id) }!.id]!
+            }
+            let anchors = Dictionary(uniqueKeysWithValues: order.map { ($0, anchor($0)) })
+            order.sort { anchors[$0]! < anchors[$1]! }
+        }
         var result: [ThreadedRow] = []
         result.reserveCapacity(rows.count)
         for thread in order {
@@ -783,7 +804,8 @@ public final class MailStore: Sendable {
             let anyUnread = messages.contains { !$0.seen }
             let size = messages.count
             guard size > 1 else {
-                result.append(ThreadedRow(id: messages[0].id, thread: thread, depth: 0, size: 1, anyUnread: anyUnread))
+                result.append(ThreadedRow(
+                    id: messages[0].id, thread: thread, depth: 0, size: 1, anyUnread: anyUnread, newestAt: messages[0].at))
                 continue
             }
             let topID = Int64(thread.split(separator: ":").last.map(String.init) ?? "") ?? messages[0].id
@@ -800,14 +822,17 @@ public final class MailStore: Sendable {
             children[topID, default: []].append(contentsOf: messages.filter { !reachable.contains($0.id) })
             for key in children.keys { children[key]?.sort { ($0.at, $0.id) < ($1.at, $1.id) } }
 
-            result.append(ThreadedRow(id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true))
+            result.append(ThreadedRow(
+                id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true,
+                newestAt: messages.last!.at))
             guard expanded.contains(thread) else { continue }
             var placed: Set<Int64> = [topID]
             func walk(_ id: Int64, depth: Int) {
                 for child in children[id] ?? [] where placed.insert(child.id).inserted {
                     let replies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
                     result.append(ThreadedRow(
-                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, hasReplies: replies))
+                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, hasReplies: replies,
+                        newestAt: child.at))
                     if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
                 }
             }

@@ -347,6 +347,27 @@ def undisclosed(name):
     print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} undisclosed-recipients message")
 
 
+def reply(name):
+    """A new reply to the user's oldest inbox message, as if just delivered: its thread should come to the new mail."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    r = jmap(auth, ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"], [
+        ["Email/query", {"accountId": account, "filter": {"inMailbox": inbox}, "sort": [{"property": "receivedAt"}],
+                         "limit": 1}, "q"],
+        ["Email/get", {"accountId": account, "#ids": {"resultOf": "q", "name": "Email/query", "path": "/ids"},
+                       "properties": ["messageId", "subject", "from"]}, "g"]])
+    old = r["g"]["list"][0]
+    parent = old["messageId"][0]
+    who = old["from"][0]
+    now = datetime.now(timezone.utc)
+    raw = "\r\n".join([
+        f"From: {who.get('name') or ''} <{who['email']}>", f"To: {name}@{DOMAIN}", f"Subject: Re: {old['subject']}",
+        f"Date: {format_datetime(now)}", f"Message-ID: {make_msgid(domain='seed.mmj.test')}",
+        f"In-Reply-To: <{parent}>", f"References: <{parent}>", "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8", "", "A new reply to an old conversation.", ""])
+    print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} reply to {old['subject']!r}")
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -369,6 +390,7 @@ def main():
     p.add_argument("--invite", metavar="USER")
     p.add_argument("--thread", metavar="USER")
     p.add_argument("--undisclosed", metavar="USER")
+    p.add_argument("--reply", metavar="USER")
     args = p.parse_args()
     random.seed(42)
     if args.live:
@@ -383,6 +405,8 @@ def main():
         return thread(args.thread)
     if args.undisclosed:
         return undisclosed(args.undisclosed)
+    if args.reply:
+        return reply(args.reply)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)
