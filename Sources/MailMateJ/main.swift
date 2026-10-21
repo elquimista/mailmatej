@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ menu: \(controller.debugMessageMenu())")
                 }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ROWS"] != nil { windowController?.debugRowFrames() }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_UNREAD_THREADS"] != nil {
+                    NSLog("MMJ unread threads: \(windowController?.debugUnreadThreads.prefix(5) ?? [])")
+                }
                 if let mode = ProcessInfo.processInfo.environment["MMJ_DEBUG_HEADER"] {
                     windowController?.debugHeader(toggle: mode == "toggle")
                     try? await Task.sleep(for: .seconds(1))

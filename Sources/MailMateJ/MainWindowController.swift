@@ -500,6 +500,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
         func debugHeader(toggle: Bool) { sidebar.debugHeader(toggle: toggle) }
         func debugRowFrames() { sidebar.debugRowFrames() }
+        var debugUnreadThreads: [String] { list.debugUnreadThreads() }
         var debugInboxBadge: Int { sidebar.debugInboxBadge }
 
         var debugCorrespondenceThreads: String {

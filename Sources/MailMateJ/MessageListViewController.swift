@@ -326,20 +326,38 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     // MARK: NSTableViewDataSource / Delegate
 
+    #if DEBUG
+        /// Closed threads whose first message is read but which have unread replies, with their text weight.
+        func debugUnreadThreads() -> [String] {
+            ids.indices.compactMap { index in
+                guard let row = row(at: index), row.isSeen, let thread = threadRows[row.id], thread.size > 1, thread.anyUnread
+                else { return nil }
+                let cell = tableView(tableView, viewFor: tableView.tableColumns.first { $0.identifier.rawValue == Column.subject.rawValue }, row: index) as? NSTableCellView
+                let weight = cell?.textField?.font.map { NSFontManager.shared.weight(of: $0) } ?? -1
+                return "\(row.id) open=\(expandedThreads.contains(thread.thread)) dot=\(showsUnread(row)) weight=\(weight)"
+            }
+        }
+    #endif
+
     func numberOfRows(in tableView: NSTableView) -> Int { ids.count }
+
+    /// Unread dot and bold text, as MailMate shows them: a closed thread is unread if any of its messages
+    /// is; any other row goes by its own message (which `showSeen` changes at once).
+    private func showsUnread(_ row: MessageRow) -> Bool {
+        if !row.isSeen { return true }
+        guard let thread = threadRows[row.id] else { return false }
+        return thread.size > 1 && thread.anyUnread && !expandedThreads.contains(thread.thread)
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row index: Int) -> NSView? {
         guard let tableColumn, let column = Column(rawValue: tableColumn.identifier.rawValue),
             let row = row(at: index)
         else { return nil }
 
+        let unread = showsUnread(row)
         switch column {
         case .unread:
-            // A collapsed thread is unread if any of its messages is; read and replied shows the arrow. A
-            // lone message goes by its own state, which `showSeen` changes at once.
-            let thread = threadRows[row.id]
-            let unread = !row.isSeen
-                || (thread.map { $0.size > 1 && $0.anyUnread && !expandedThreads.contains($0.thread) } ?? false)
+            // Read and replied shows the arrow.
             if unread { return iconCell(tableView, column, image: Self.unreadDot, tint: .controlAccentColor) }
             return iconCell(tableView, column, image: row.isAnswered ? Self.repliedArrow : nil, tint: .labelColor)
         case .flag:
@@ -348,16 +366,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
         case threadColumn where showsThreads:
             let text = column == .from ? row.fromDisplay : (row.subject.isEmpty ? "(no subject)" : row.subject)
-            return threadCell(tableView, row, text: text, thread: threadRows[row.id])
+            return threadCell(tableView, row, text: text, thread: threadRows[row.id], bold: unread)
         case .from:
-            return textCell(tableView, column, row.fromDisplay, bold: !row.isSeen)
+            return textCell(tableView, column, row.fromDisplay, bold: unread)
         case .subject:
-            return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: !row.isSeen)
+            return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: unread)
         case .date:
-            if relativeDates { return textCell(tableView, column, Formatters.relative(row.receivedAt), bold: !row.isSeen) }
-            return dateCell(tableView, row.receivedAt, bold: !row.isSeen)
+            if relativeDates { return textCell(tableView, column, Formatters.relative(row.receivedAt), bold: unread) }
+            return dateCell(tableView, row.receivedAt, bold: unread)
         case .source:
-            return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: !row.isSeen)
+            return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: unread)
         }
     }
 
@@ -582,10 +600,12 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     /// MailMate's From cell in a threaded list (measured at 1x): text 20 px past the column's left edge,
     /// 8 px further per level of replies, and an 8 × 5 px chevron 16 px before the text on every message
     /// with replies.
-    private func threadCell(_ tableView: NSTableView, _ row: MessageRow, text: String, thread: MailStore.ThreadedRow?) -> NSView {
+    private func threadCell(
+        _ tableView: NSTableView, _ row: MessageRow, text: String, thread: MailStore.ThreadedRow?, bold: Bool
+    ) -> NSView {
         let id = NSUserInterfaceItemIdentifier("thread")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? ThreadFromCell ?? ThreadFromCell(identifier: id)
-        cell.textField?.font = Self.font(bold: !row.isSeen)
+        cell.textField?.font = Self.font(bold: bold)
         cell.textField?.stringValue = text
         cell.depth = thread?.depth ?? 0
         if let thread, thread.hasReplies {
