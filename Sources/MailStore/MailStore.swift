@@ -496,6 +496,33 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Messages whose recipient groups haven't been fetched (see the v10 migration).
+    public func remoteIDsMissingRecipientGroups(accountId: String, limit: Int) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(
+                db, sql: "SELECT remoteId FROM message WHERE accountId = ? AND recipientGroupsFetched = 0 LIMIT ?",
+                arguments: [accountId, limit])
+        }
+    }
+
+    /// Adds empty recipient groups' names to messages by remote id, and marks them fetched.
+    public func addRecipientGroups(accountId: String, _ groups: [String: [IncomingMessage.Address]]) throws {
+        guard !groups.isEmpty else { return }
+        try dbPool.write { db in
+            for (remoteId, names) in groups {
+                guard let id = try Int64.fetchOne(
+                    db, sql: "SELECT id FROM message WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
+                else { continue }
+                for (position, a) in names.enumerated() {
+                    try db.execute(
+                        sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, '')",
+                        arguments: [id, a.role.rawValue, position, a.name])
+                }
+                try db.execute(sql: "UPDATE message SET recipientGroupsFetched = 1 WHERE id = ?", arguments: [id])
+            }
+        }
+    }
+
     /// Stores References for messages by remote id ([] for none, so they aren't asked for again).
     public func setReferences(accountId: String, _ references: [String: [String]]) throws {
         guard !references.isEmpty else { return }

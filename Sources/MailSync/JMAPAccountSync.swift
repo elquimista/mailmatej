@@ -40,6 +40,7 @@ public actor JMAPAccountSync {
         }
         try await syncEmails(accountId, session: session, into: &result)
         try await fillInReferences(accountId)
+        try await fillInRecipientGroups(accountId)
         return result
     }
 
@@ -420,6 +421,31 @@ public actor JMAPAccountSync {
         }
     }
 
+    /// Recipient groups of messages stored before they were kept (once, 500 per request): only
+    /// messages with no To or Cc address can have an empty group worth showing.
+    private func fillInRecipientGroups(_ accountId: String) async throws {
+        while true {
+            let missing = try store.remoteIDsMissingRecipientGroups(accountId: account.id, limit: 500)
+            guard !missing.isEmpty else { return }
+            var request = JMAPRequest()
+            let get = request.call("Email/get", [
+                "accountId": .string(accountId), "ids": .strings(missing),
+                "properties": .strings(["id", Email.groupedTo, Email.groupedCc]),
+            ])
+            struct Groups: Decodable {
+                let id: String
+                let to: [EmailAddressGroup]?
+                let cc: [EmailAddressGroup]?
+                enum CodingKeys: String, CodingKey { case id, to = "header:To:asGroupedAddresses", cc = "header:Cc:asGroupedAddresses" }
+            }
+            let list = try await client.send(request).decode(GetResponse<Groups>.self, get).list
+            var found: [String: [IncomingMessage.Address]] = Dictionary(uniqueKeysWithValues: missing.map { ($0, []) })
+            for email in list { found[email.id] = Self.groupNames(email.to, .toGroup) + Self.groupNames(email.cc, .ccGroup) }
+            try store.addRecipientGroups(accountId: account.id, found)
+            if missing.count < 500 { return }
+        }
+    }
+
     // MARK: Changes
 
     /// Applies one patch to every email (Email/set update), e.g. `["keywords/$seen": true]` or
@@ -666,6 +692,15 @@ public actor JMAPAccountSync {
             sortOrder: m.sortOrder ?? 0, totalEmails: m.totalEmails ?? 0, unreadEmails: m.unreadEmails ?? 0)
     }
 
+    /// Empty groups' names, which MailMate shows as recipients ("undisclosed-recipients"); members of
+    /// other groups are already in `to` and `cc`.
+    static func groupNames(_ groups: [EmailAddressGroup]?, _ role: AddressRole) -> [IncomingMessage.Address] {
+        (groups ?? []).compactMap { g in
+            guard let name = g.name, !name.isEmpty, g.addresses.isEmpty else { return nil }
+            return .init(role: role, name: name, email: "")
+        }
+    }
+
     static func incoming(_ e: Email) -> IncomingMessage {
         var addresses: [IncomingMessage.Address] = []
         func add(_ role: AddressRole, _ list: [EmailAddress]?) {
@@ -680,6 +715,7 @@ public actor JMAPAccountSync {
         add(.cc, e.cc)
         add(.bcc, e.bcc)
         add(.replyTo, e.replyTo)
+        addresses += groupNames(e.toGroups, .toGroup) + groupNames(e.ccGroups, .ccGroup)
 
         return IncomingMessage(
             remoteId: e.id, threadId: e.threadId, blobId: e.blobId,

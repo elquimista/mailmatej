@@ -59,6 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelect(subject: subject)
                     try? await Task.sleep(for: .seconds(2))
                 }
+                if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_HOVER_LINK"] {
+                    await windowController?.debugHoverLink(containing: text)
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
                 if let file = ProcessInfo.processInfo.environment["MMJ_RENDER_HTML_FILE"],
                     let html = try? String(contentsOfFile: file, encoding: .utf8)
                 {

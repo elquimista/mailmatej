@@ -224,6 +224,15 @@ enum Schema {
             // NULL until fetched: messages stored before this are filled in by the next sync.
             try db.execute(sql: "ALTER TABLE message ADD COLUMN referencesHeader TEXT")
         }
+        m.registerMigration("v10-recipient-groups") { db in
+            // Empty groups in To/Cc ("undisclosed-recipients:;") are now kept as names. Messages stored
+            // before, with no To or Cc address, get them from the next sync; new messages come with them.
+            try db.execute(sql: "ALTER TABLE message ADD COLUMN recipientGroupsFetched INTEGER NOT NULL DEFAULT 1")
+            try db.execute(sql: """
+                UPDATE message SET recipientGroupsFetched = 0
+                WHERE id NOT IN (SELECT messageId FROM address WHERE role IN (2, 3))
+                """)
+        }
 
         return m
     }

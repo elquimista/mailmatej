@@ -98,6 +98,8 @@ public struct MailboxRecord: Codable, FetchableRecord, Sendable, Hashable {
 
 public enum AddressRole: Int, Sendable, CaseIterable {
     case from = 0, sender, to, cc, bcc, replyTo
+    /// The name of an empty group in To or Cc ("undisclosed-recipients"), stored with an empty email.
+    case toGroup, ccGroup
 }
 
 /// Protocol-neutral input for upserting a message. JMAP and (later) IMAP sync both map into this.

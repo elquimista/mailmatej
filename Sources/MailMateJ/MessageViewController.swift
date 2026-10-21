@@ -12,6 +12,7 @@ import WebKit
 final class MessageViewController: NSViewController, WKNavigationDelegate {
     private let model: AppModel
     private let placeholder = NSTextField(labelWithString: "No Message Selected")
+    private let linkPreview = LinkPreviewView()
     private var webView: MessageWebView!
     private let partHandler: EmbeddedPartSchemeHandler
 
@@ -86,13 +87,15 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(syncOptionKey), name: name, object: nil)
         }
         webView.onPointerMoved = { [weak self] in self?.syncOptionKey() }
+        webView.onHoverLink = { [weak self] in self?.showLinkPreview($0) }
 
         placeholder.font = .systemFont(ofSize: 15, weight: .medium)
         placeholder.textColor = .tertiaryLabelColor
         placeholder.alignment = .center
 
         let root = NSView()
-        for v in [webView!, placeholder] as [NSView] {
+        linkPreview.isHidden = true
+        for v in [webView!, placeholder, linkPreview] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -104,6 +107,10 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             placeholder.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             root.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
+            // MailMate's: at the pane's bottom, 2 px left of the body text (14 px margin).
+            linkPreview.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            linkPreview.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
+            linkPreview.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -12),
         ])
         view = root
         showPlaceholder("No Message Selected")
@@ -161,28 +168,37 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         webView.loadHTMLString("", baseURL: nil)
     }
 
+    /// The address of the link under the pointer, as MailMate shows it, so it can be checked before
+    /// clicking. Shown and hidden at once (no fade).
+    private func showLinkPreview(_ href: String?) {
+        linkPreview.text = href ?? ""
+        linkPreview.isHidden = href?.isEmpty ?? true
+    }
+
     // MARK: Rendering
 
     private var currentSender: String? { currentDetail?.addresses(.from).first?.email }
 
     private var headerFields: [MessagePage.HeaderField] {
         guard let detail = currentDetail else { return [] }
-        func list(_ role: AddressRole) -> String {
-            detail.addresses(role).map { a in
+        func list(_ role: AddressRole, groups: AddressRole? = nil) -> String {
+            // Empty groups show by name, as MailMate shows "undisclosed-recipients".
+            (detail.addresses(role).map { a in
                 // A name that's just the address again is left out, as MailMate does.
                 if let name = a.name, !name.isEmpty, name.caseInsensitiveCompare(a.email) != .orderedSame {
                     "\(name) <\(a.email)>"
                 } else {
                     a.email
                 }
-            }.joined(separator: ", ")
+            } + (groups.map { detail.addresses($0).compactMap(\.name) } ?? [])).joined(separator: ", ")
         }
         return [
             .init(label: "From:", value: list(.from)),
             .init(label: "Subject:", value: detail.subject, emphasized: true),
             .init(label: "Date:", value: Formatters.fullDate(detail.sentAt ?? detail.receivedAt)),
-            .init(label: "To:", value: list(.to)),
-            .init(label: "Cc:", value: list(.cc)),
+            .init(label: "To:", value: list(.to, groups: .toGroup)),
+            .init(label: "Cc:", value: list(.cc, groups: .ccGroup)),
+            .init(label: "Bcc:", value: list(.bcc)),
         ]
     }
 
@@ -687,6 +703,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
 
         /// Shows arbitrary HTML through the normal pipeline (prepare, page, content rules).
+        func debugHoverLink(containing text: String) async { await webView.debugHoverLink(containing: text) }
+
         func debugRender(html: String) {
             currentID = -1  // Keeps the selected message's header, if any.
             partHandler.allowedMessageID = -1
@@ -801,4 +819,46 @@ final class AttachmentPromiseDelegate: NSObject, NSFilePromiseProviderDelegate, 
             }
         }
     }
+}
+
+/// MailMate's link preview: the URL in black 13 pt on a light rounded box, 25 px tall, in light and
+/// dark mode alike (measured at 1x: top 240, bottom 228, 4 px corners, text 6 px in from the edge).
+/// AppKit draws these greys lighter on this display, so the drawn values are lower.
+final class LinkPreviewView: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    var text: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .black
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.usesSingleLineMode = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 25),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),  // the field's inset makes 6
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let gradient = NSGradient(
+            starting: NSColor(srgbRed: 222 / 255, green: 222 / 255, blue: 222 / 255, alpha: 1),
+            ending: NSColor(srgbRed: 238 / 255, green: 238 / 255, blue: 238 / 255, alpha: 1))
+        gradient?.draw(in: NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4), angle: 90)
+    }
+
+    // Clicks and hovering go to the message underneath.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

@@ -23,6 +23,12 @@ public struct EmailAddress: Codable, Sendable, Hashable {
     }
 }
 
+/// A group in an address header ("undisclosed-recipients:;" is one with no members).
+public struct EmailAddressGroup: Decodable, Sendable {
+    public let name: String?
+    public let addresses: [EmailAddress]
+}
+
 public struct Email: Decodable, Sendable {
     public let id: String
     public let blobId: String
@@ -40,6 +46,9 @@ public struct Email: Decodable, Sendable {
     public let cc: [EmailAddress]?
     public let bcc: [EmailAddress]?
     public let replyTo: [EmailAddress]?
+    /// To and Cc with their groups, whose names `to` and `cc` leave out.
+    public let toGroups: [EmailAddressGroup]?
+    public let ccGroups: [EmailAddressGroup]?
     public let subject: String?
     public let sentAt: Date?
     public let hasAttachment: Bool
@@ -49,8 +58,16 @@ public struct Email: Decodable, Sendable {
     public static let properties: [String] = [
         "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt",
         "messageId", "inReplyTo", "references", "sender", "from", "to", "cc", "bcc", "replyTo",
-        "subject", "sentAt", "hasAttachment", "preview",
+        "subject", "sentAt", "hasAttachment", "preview", groupedTo, groupedCc,
     ]
+    public static let groupedTo = "header:To:asGroupedAddresses"
+    public static let groupedCc = "header:Cc:asGroupedAddresses"
+
+    enum CodingKeys: String, CodingKey {
+        case id, blobId, threadId, mailboxIds, keywords, size, receivedAt, messageId, inReplyTo, references
+        case sender, from, to, cc, bcc, replyTo, subject, sentAt, hasAttachment, preview
+        case toGroups = "header:To:asGroupedAddresses", ccGroups = "header:Cc:asGroupedAddresses"
+    }
 }
 
 public struct EmailBodyPart: Decodable, Sendable {

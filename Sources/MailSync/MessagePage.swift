@@ -311,11 +311,19 @@ public enum MessagePage {
         .status { font: 13px -apple-system, sans-serif; color: GrayText; }
         """
 
-    /// Dark mode for HTML without colours: the plain-text page's background (see plainCSS).
+    /// Dark mode for HTML without colours: the plain-text page's background (see plainCSS), and
+    /// MailMate's link blue.
     static let adaptiveCSS = """
 
-        @media (prefers-color-scheme: dark) { html, body { background: #303234 !important; } }
+        @media (prefers-color-scheme: dark) {
+          html, body { background: #303234 !important; }
+          a:link, a:visited { color: \(darkLinkColor); }
+        }
         """
+
+    /// MailMate's links on a dark page show as (70,150,207) at 1x; this CSS colour comes out as that
+    /// (fitted from a rendered colour ladder, see chromeCSS).
+    static let darkLinkColor = "rgb(57, 131, 196)"
 
     static let plainCSS = """
 
@@ -331,6 +339,7 @@ public enum MessagePage {
         @media (prefers-color-scheme: dark) {
           html, body { background: #303234 !important; }
           mmj-quote { border-left-color: #787878; color: #787878; }
+          a:link, a:visited { color: \(darkLinkColor); }
         }
         """
 

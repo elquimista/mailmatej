@@ -331,6 +331,22 @@ def thread(name):
     print(f"  {name}: imported {import_batch(auth, account, items)} thread messages")
 
 
+def undisclosed(name):
+    """A recruiter's mass mail: To undisclosed-recipients, the user in Bcc, and an HTML link without colours."""
+    auth, account = user_session(name)
+    inbox = mailboxes(auth, account)["inbox"]
+    now = datetime.now(timezone.utc)
+    html = ("<p>Hi,</p><p>This is a remote contract opportunity.</p>"
+            '<p><b>Apply Here:</b> <a href="https://jobs.example.com/post/6634c1b6-553f-4d60-a692-be00546">'
+            "Software engineering ( Backend)</a></p>")
+    raw = "\r\n".join([
+        "From: Drashti Patel <drashti.hiring@recruit.example>", "To: undisclosed-recipients:;",
+        f"Bcc: {name}@{DOMAIN}", "Subject: Software Engineering (Backend) - Remote Contract Opportunity",
+        f"Date: {format_datetime(now)}", f"Message-ID: {make_msgid(domain='seed.mmj.test')}", "MIME-Version: 1.0",
+        "Content-Type: text/html; charset=utf-8", "", html, ""])
+    print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} undisclosed-recipients message")
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -352,6 +368,7 @@ def main():
     p.add_argument("--attachments", metavar="USER")
     p.add_argument("--invite", metavar="USER")
     p.add_argument("--thread", metavar="USER")
+    p.add_argument("--undisclosed", metavar="USER")
     args = p.parse_args()
     random.seed(42)
     if args.live:
@@ -364,6 +381,8 @@ def main():
         return invite(args.invite)
     if args.thread:
         return thread(args.thread)
+    if args.undisclosed:
+        return undisclosed(args.undisclosed)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)

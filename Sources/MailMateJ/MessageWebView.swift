@@ -15,11 +15,16 @@ final class MessageWebView: WKWebView {
     var onButton: (Int, String, NSEvent.ModifierFlags) -> Void = { _, _, _ in }
     var menuForAttachment: (Int) -> NSMenu? = { _ in nil }
     var onPointerMoved: () -> Void = {}
+    /// The link under the pointer changed (its href, or nil when off links), for the URL preview.
+    var onHoverLink: (String?) -> Void = { _ in }
     var dragItem: (Int) -> NSDraggingItem? = { _ in nil }
 
     /// The attachment under the pointer, as of the last hit test, and the button under it, if any.
     private(set) var hoveredAttachment: Int?
     private(set) var hoveredButton: String?
+    private(set) var hoveredLink: String? {
+        didSet { if hoveredLink != oldValue { onHoverLink(hoveredLink) } }
+    }
     private var hitTestPending = false
     private var hitTestAgain = false
     private var lastPointer = NSPoint.zero
@@ -30,6 +35,7 @@ final class MessageWebView: WKWebView {
     func resetAttachmentTracking() {
         hoveredAttachment = nil
         hoveredButton = nil
+        hoveredLink = nil
         press = nil
     }
 
@@ -52,6 +58,7 @@ final class MessageWebView: WKWebView {
         super.mouseExited(with: event)
         hoveredAttachment = nil
         hoveredButton = nil
+        hoveredLink = nil
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -99,7 +106,7 @@ final class MessageWebView: WKWebView {
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
-    /// Asks the page which attachment item is at the pointer. One query at a time; a move during a
+    /// Asks the page which attachment item, and which link, is at the pointer. One query at a time; a move during a
     /// query triggers one more, so the answer follows the pointer without piling up.
     private func hitTest(_ event: NSEvent) {
         lastPointer = event.locationInWindow
@@ -117,7 +124,12 @@ final class MessageWebView: WKWebView {
             const e = document.elementFromPoint(x, y);
             const item = e && e.closest('mmj-attachments mmj-att');
             const button = e && e.closest('mmj-att mmj-btn');
-            return item ? item.getAttribute('data-mmj-att') + (button ? ':' + button.getAttribute('data-mmj-btn') : '') : null;
+            // The email's links only: not our header's (the first element; an email can't hide its own
+            // links by wrapping them in a fake <mmj-chrome>).
+            const link = e && e.closest('a[href]');
+            const ours = link && document.body.firstElementChild.contains(link);
+            return [item ? item.getAttribute('data-mmj-att') + (button ? ':' + button.getAttribute('data-mmj-btn') : '') : null,
+                    link && !ours ? link.getAttribute('href').trim() : null];
             """,
             arguments: ["x": point.x, "y": y], in: nil, in: .defaultClient
         ) { [weak self] result in
@@ -125,7 +137,9 @@ final class MessageWebView: WKWebView {
             hitTestPending = false
             var hovered: Int?
             var button: String?
-            if case .success(let value) = result, let value = value as? String {
+            let values = (try? result.get()) as? [Any]
+            let link = values?.last as? String
+            if let value = values?.first as? String {
                 let parts = value.split(separator: ":").map(String.init)
                 if parts.count >= 2, parts[0] == token {
                     hovered = Int(parts[1])
@@ -135,6 +149,7 @@ final class MessageWebView: WKWebView {
             if token == self.token {
                 hoveredAttachment = hovered
                 hoveredButton = button
+                hoveredLink = link
             }
             if hitTestAgain {
                 hitTestAgain = false
@@ -143,6 +158,24 @@ final class MessageWebView: WKWebView {
         }
     }
 }
+
+#if DEBUG
+    extension MessageWebView {
+        /// Hit-tests the middle of the first link whose text contains `text`, as a pointer move there would.
+        func debugHoverLink(containing text: String) async {
+            let result = try? await callAsyncJavaScript(
+                """
+                const a = [...document.querySelectorAll('a')].find(a => a.textContent.includes(t));
+                if (!a) return null;
+                const b = a.getBoundingClientRect();
+                return [b.x + b.width / 2, b.y + b.height / 2];
+                """, arguments: ["t": text], in: nil, contentWorld: .defaultClient)
+            guard let point = result as? [Double], point.count == 2 else { return NSLog("MMJ hover: no link \(text)") }
+            lastPointer = convert(NSPoint(x: point[0], y: isFlipped ? point[1] : bounds.height - point[1]), to: nil)
+            hitTest()
+        }
+    }
+#endif
 
 extension MessageWebView: NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
