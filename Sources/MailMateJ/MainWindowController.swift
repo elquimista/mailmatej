@@ -48,6 +48,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var expandedThreads: Set<String> = []
     /// Messages inside open threads whose replies show, for this run of the app (all levels start folded).
     private var openedMessages: Set<Int64> = []
+    /// The same for the Correspondence pane, which threads its own messages (so the first message of a
+    /// conversation can differ from the main list's).
+    private var correspondenceExpanded: Set<String> = []
+    private var correspondenceOpened: Set<Int64> = []
     /// The selection to restore after threads were collapsed, expanded or switched on or off.
     private var selectAfterThreads: [Int64]?
     /// The row whose replies were just opened or closed, so the change can animate.
@@ -388,7 +392,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         // Only mail with this person through the address of mine this message used.
         let mine = try? model.store.myAddress(in: id, myAddresses: model.myAddresses)
         let flat = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort, keeping: id)) ?? []
-        let ids = threadCorrespondence(flat)
+        // The main list's message is shown in its thread: opened down to it, unless the pane is just
+        // refreshing (new mail, re-sorting) and keeps what the user opened or closed.
+        let ids = threadCorrespondence(flat, revealing: keepSelection ? nil : id)
         // A message inside a collapsed thread is selected through its thread's first row.
         let selectable: (Int64) -> Int64 = { [correspondence] id in
             if correspondence.threadRows.isEmpty || flat.isEmpty { return id }
@@ -422,17 +428,24 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var selectAfterCorrespondenceThreads: [Int64]?
 
     /// The Correspondence pane's rows, grouped into threads when threads are shown (as in the main list).
-    private func threadCorrespondence(_ flat: [Int64]) -> [Int64] {
+    private func threadCorrespondence(_ flat: [Int64], revealing reveal: Int64? = nil) -> [Int64] {
         correspondence.showsThreads = showsThreads
-        correspondence.expandedThreads = expandedThreads
-        correspondence.openedMessages = openedMessages
         guard showsThreads, let info = try? model.store.threadInfo(ids: flat) else {
             correspondence.threadRows = [:]
             correspondenceThreadOf = [:]
             return flat
         }
         correspondenceThreadOf = MailStore.threadKeys(info)
-        let rows = MailStore.thread(info, expanded: expandedThreads, opened: openedMessages)
+        if let reveal, let thread = correspondenceThreadOf[reveal] {
+            let above = MailStore.ancestors(of: reveal, in: info)
+            if !above.isEmpty {
+                correspondenceExpanded.insert(thread)
+                correspondenceOpened.formUnion(above.dropFirst())  // The branches between the first message and it.
+            }
+        }
+        correspondence.expandedThreads = correspondenceExpanded
+        correspondence.openedMessages = correspondenceOpened
+        let rows = MailStore.thread(info, expanded: correspondenceExpanded, opened: correspondenceOpened)
         correspondence.threadRows = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return rows.map(\.id)
     }
@@ -501,6 +514,20 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugHeader(toggle: Bool) { sidebar.debugHeader(toggle: toggle) }
         func debugRowFrames() { sidebar.debugRowFrames() }
         var debugUnreadThreads: [String] { list.debugUnreadThreads() }
+
+        /// Selects main-list rows one by one and checks the Correspondence pane selects the same message.
+        func debugCheckCorrespondenceSelection(rows count: Int) async {
+            var checked = 0, nested = 0, wrong: [Int64] = []
+            for index in 0..<min(count, list.ids.count) {
+                list.tableView.selectRowIndexes([index], byExtendingSelection: false)
+                try? await Task.sleep(for: .milliseconds(120))
+                guard let id = list.selectedID, correspondent != nil, !correspondence.ids.isEmpty else { continue }
+                checked += 1
+                if (correspondence.threadRows[id]?.depth ?? 0) > 0 { nested += 1 }
+                if correspondence.selectedIDs != [id] { wrong.append(id) }
+            }
+            NSLog("MMJ correspondence selection: checked \(checked), nested \(nested), wrong \(wrong.prefix(10))")
+        }
         var debugInboxBadge: Int { sidebar.debugInboxBadge }
 
         var debugCorrespondenceThreads: String {
@@ -622,7 +649,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private func toggle(_ row: MailStore.ThreadedRow, collapse: Bool, inCorrespondence: Bool = false) {
         if inCorrespondence { toggledCorrespondenceRow = row.id } else { toggledRow = row.id }
         if row.depth == 0 { return setThread(row.thread, collapsed: collapse, inCorrespondence: inCorrespondence) }
-        if collapse { openedMessages.remove(row.id) } else { openedMessages.insert(row.id) }
+        if inCorrespondence {
+            if collapse { correspondenceOpened.remove(row.id) } else { correspondenceOpened.insert(row.id) }
+        } else {
+            if collapse { openedMessages.remove(row.id) } else { openedMessages.insert(row.id) }
+        }
         let source = inCorrespondence ? correspondence : list
         // A selected message inside the folded branch hands the selection to the folded message.
         if collapse, source.selectedIDs.contains(where: { isInside($0, branchOf: row.id, rows: source) }) {
@@ -648,8 +679,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return false
     }
 
-    /// Collapses or expands a thread in both lists (they share which threads are collapsed).
+    /// Collapses or expands a thread of the main list or of the Correspondence pane.
     private func setThread(_ thread: String, collapsed: Bool, inCorrespondence: Bool = false) {
+        if inCorrespondence {
+            if collapsed { correspondenceExpanded.remove(thread) } else { correspondenceExpanded.insert(thread) }
+            selectAfterCorrespondenceThreads = correspondence.selectedIDs
+            return reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
+        }
         if collapsed {
             expandedThreads.remove(thread)
             let root = list.threadRows.values.first { $0.thread == thread && $0.depth == 0 }?.id
@@ -660,14 +696,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         } else {
             expandedThreads.insert(thread)
         }
-        if inCorrespondence {
-            // Only the pane: the main list follows on its next reload, keeping the user's place there.
-            selectAfterCorrespondenceThreads = correspondence.selectedIDs
-            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
-        } else {
-            reloadList(.threadsChanged)
-            if correspondent != nil { reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true) }
-        }
+        reloadList(.threadsChanged)
     }
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -1356,7 +1385,10 @@ extension MainWindowController {
     private func toggleSelectedThread() {
         let rows = activeList
         guard let id = rows.selectedID, let row = rows.threadRows[id], row.size > 1 || row.hasReplies else { return NSSound.beep() }
-        let open = row.depth == 0 ? expandedThreads.contains(row.thread) : openedMessages.contains(id)
+        let inCorrespondence = rows === correspondence
+        let open = row.depth == 0
+            ? (inCorrespondence ? correspondenceExpanded : expandedThreads).contains(row.thread)
+            : (inCorrespondence ? correspondenceOpened : openedMessages).contains(id)
         toggle(row, collapse: open, inCorrespondence: rows === correspondence)
     }
 

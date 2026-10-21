@@ -98,6 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ menu: \(controller.debugMessageMenu())")
                 }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ROWS"] != nil { windowController?.debugRowFrames() }
+                if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_CORR_SELECTION"] ?? "") {
+                    await windowController?.debugCheckCorrespondenceSelection(rows: count)
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_UNREAD_THREADS"] != nil {
                     NSLog("MMJ unread threads: \(windowController?.debugUnreadThreads.prefix(5) ?? [])")
                 }

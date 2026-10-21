@@ -163,6 +163,20 @@ import Testing
         #expect(Set(MailStore.thread(loop, expanded: [l[1]!]).map(\.id)) == [1, 2])
     }
 
+    @Test func ancestorsLeadFromTheFirstMessage() {
+        typealias T = MailStore.ThreadInput
+        let rows = [
+            T(id: 1, at: 10, seen: true, messageId: "a"),
+            T(id: 2, at: 20, seen: true, messageId: "b", inReplyTo: "a"),
+            T(id: 3, at: 30, seen: true, messageId: "c", inReplyTo: "b"),
+            T(id: 4, at: 40, seen: true, messageId: "x", inReplyTo: "y"),
+            T(id: 5, at: 50, seen: true, messageId: "y", inReplyTo: "x"),
+        ]
+        #expect(MailStore.ancestors(of: 3, in: rows) == [1, 2])
+        #expect(MailStore.ancestors(of: 1, in: rows).isEmpty)
+        #expect(MailStore.ancestors(of: 4, in: rows) == [5])  // a loop stops where it comes back
+    }
+
     @Test func threadsFollowOnlyTheDirectParentInTheList() {
         typealias T = MailStore.ThreadInput
         // The Inbox of the MailMate example: Phil's message (a), your reply in Sent (b, not listed), and

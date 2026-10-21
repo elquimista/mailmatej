@@ -717,6 +717,19 @@ public final class MailStore: Sendable {
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, "\(account[$0.id] ?? ""):\(root[$0.id] ?? $0.id)") })
     }
 
+    /// The messages above `id` in its thread, from the thread's first message down to its parent.
+    public static func ancestors(of id: Int64, in rows: [ThreadInput]) -> [Int64] {
+        let parents = parents(rows)
+        var chain: [Int64] = []
+        var seen: Set<Int64> = [id]
+        var current = id
+        while let parent = parents[current], seen.insert(parent).inserted {
+            chain.append(parent)
+            current = parent
+        }
+        return chain.reversed()
+    }
+
     /// Groups rows (in list order) into threads (see `parents`). Each thread goes where its first row is,
     /// as a reply tree: every message under the one it answers, one level deeper, siblings oldest first.
     public static func thread(_ rows: [ThreadInput], expanded: Set<String>, opened: Set<Int64> = []) -> [ThreadedRow] {
