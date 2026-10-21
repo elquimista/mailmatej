@@ -428,6 +428,19 @@ final class AppModel {
         }
     }
 
+    /// Creates a mailbox inside `parentId` (in its account) and returns it once synced.
+    func createSubmailbox(named name: String, inside parentId: Int64) async throws -> MailboxRecord {
+        guard let parent = try store.mailboxes().first(where: { $0.id == parentId }) else {
+            throw MessageActionError.noMailbox(role: "")
+        }
+        try await coordinator.createMailbox(accountId: parent.accountId, name: name, role: nil, parentRemoteId: parent.remoteId)
+        guard let created = try store.mailboxes().first(where: {
+            $0.accountId == parent.accountId && $0.parentRemoteId == parent.remoteId && $0.name == name
+        }) else { throw MessageActionError.noMailbox(role: "") }
+        refreshNow()
+        return created
+    }
+
     /// Creates a mailbox inside `parentId` (in its account), then moves the messages there.
     func moveToNewMailbox(named name: String, inside parentId: Int64, messages ids: [Int64], then perform: @escaping (MessageAction) -> Void) {
         guard let parent = try? store.mailboxes().first(where: { $0.id == parentId }) else { return }

@@ -147,8 +147,9 @@ final class MailboxPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            countLabel.leadingAnchor.constraint(equalTo: pathLabel.trailingAnchor, constant: 12),
-            countLabel.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -20),
+            // The count at the right, as MailMate places it (before its Edit button).
+            countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: pathLabel.trailingAnchor, constant: 12),
+            countLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             countLabel.firstBaselineAnchor.constraint(equalTo: pathLabel.firstBaselineAnchor),
         ])
         panel.contentView = content
@@ -274,7 +275,7 @@ final class MailboxPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         var recents = UserDefaults.standard.stringArray(forKey: recentsKey) ?? []
         recents.removeAll { $0 == choice.node.key }
         recents.insert(choice.node.key, at: 0)
-        UserDefaults.standard.set(Array(recents.prefix(3)), forKey: recentsKey)
+        UserDefaults.standard.set(Array(recents.prefix(50)), forKey: recentsKey)  // MailMate lists by recent use
     }
 
     private func close() {
@@ -346,12 +347,18 @@ private final class OutlinedField: NSView {
     }
 }
 
-/// The selection 37 px tall, leaving the 1 px between rows, as MailMate draws it.
+/// The selection as MailMate draws it (measured at 1x): with the list focused, a full-width bar 37 px
+/// tall (the 1 px between rows left out); otherwise a grey box with 5 px corners, 10 px in from each side.
 private final class PickerRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        (isEmphasized ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor).setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 1).fill()
+        if isEmphasized {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - 1).fill()
+        } else {
+            NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 0), xRadius: 5, yRadius: 5).fill()
+        }
     }
 }
 

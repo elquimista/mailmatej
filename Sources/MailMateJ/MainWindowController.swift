@@ -1444,12 +1444,20 @@ extension MainWindowController {
                 let count = boxes.filter { $0.role == role }.reduce(0) { $0 + $1.totalEmails }
                 choices.append(.init(node: node, title: node.title, subtitle: "Unified", isUnified: true, path: "Unified ▸ \(node.title)", count: count))
             } else {
-                choices.append(.init(node: node, title: node.title, subtitle: "Unified", isUnified: true, path: "Unified ▸ \(node.title)", count: nil))
+                // Only the role mailboxes say "Unified" (Flagged, All Messages and the like don't), as in MailMate.
+                var isRole = false
+                if case .role = scope { isRole = true }
+                choices.append(.init(
+                    node: node, title: node.title, subtitle: isRole ? "Unified" : "", isUnified: isRole,
+                    path: isRole ? "Unified ▸ \(node.title)" : node.title,
+                    count: try? model.store.count(scope: scope, counting: .all)))
             }
         }
         for account in roots.first(where: { $0.key == "header.sources" })?.children ?? [] {
             if !move {
-                choices.append(.init(node: account, title: account.title, subtitle: "Account", isUnified: false, path: account.title, count: nil))
+                choices.append(.init(
+                    node: account, title: account.title, subtitle: "", isUnified: false, path: account.title,
+                    count: account.scope.flatMap { try? model.store.count(scope: $0, counting: .all) }))
             }
             var mailboxes: [(path: [String], node: SidebarNode)] = []
             func walk(_ nodes: [SidebarNode], _ path: [String]) {
@@ -1494,7 +1502,19 @@ extension MainWindowController {
         } else {
             MailboxPicker.show(
                 over: window, title: "Go to Mailbox", choices: choices, recentsKey: "RecentGoToMailboxes",
-                onChoose: { [weak self] choice in _ = self?.sidebar.select(key: choice.node.key) })
+                onChoose: { [weak self] choice in _ = self?.sidebar.select(key: choice.node.key) },
+                onCreate: { [weak self] name, parent in
+                    // A new submailbox inside the selected one, then shown.
+                    guard let self, case .mailbox(let parentId)? = parent.node.scope else { return }
+                    Task {
+                        do {
+                            let created = try await self.model.createSubmailbox(named: name, inside: parentId)
+                            _ = self.sidebar.select(key: "mailbox.\(created.accountId).\(created.remoteId)")
+                        } catch {
+                            NSSound.beep()
+                        }
+                    }
+                })
         }
     }
 
