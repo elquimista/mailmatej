@@ -33,6 +33,7 @@ public struct Email: Decodable, Sendable {
     public let receivedAt: Date
     public let messageId: [String]?
     public let inReplyTo: [String]?
+    public let references: [String]?
     public let sender: [EmailAddress]?
     public let from: [EmailAddress]?
     public let to: [EmailAddress]?
@@ -47,7 +48,7 @@ public struct Email: Decodable, Sendable {
     /// The properties to request so the response decodes into `Email`.
     public static let properties: [String] = [
         "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt",
-        "messageId", "inReplyTo", "sender", "from", "to", "cc", "bcc", "replyTo",
+        "messageId", "inReplyTo", "references", "sender", "from", "to", "cc", "bcc", "replyTo",
         "subject", "sentAt", "hasAttachment", "preview",
     ]
 }

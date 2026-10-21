@@ -118,43 +118,70 @@ import Testing
 
     @Test func threadsGroupConversations() {
         typealias T = MailStore.ThreadInput
-        // Sorted newest first: c2 (t2), b2 (t1, reply), c1 (t2's first), a (t1's first), d (alone).
+        // Sorted newest first: c2 (replies to c1), b2 (replies to a), c1, a, d (alone).
         let rows = [
-            T(id: 5, thread: "t2", at: 50, seen: true), T(id: 4, thread: "t1", at: 40, seen: false),
-            T(id: 3, thread: "t2", at: 30, seen: true), T(id: 2, thread: "t1", at: 20, seen: true),
-            T(id: 1, thread: "t3", at: 10, seen: true),
+            T(id: 5, at: 50, seen: true, messageId: "c2", inReplyTo: "c1"), T(id: 4, at: 40, seen: false, messageId: "b2", inReplyTo: "a"),
+            T(id: 3, at: 30, seen: true, messageId: "c1"), T(id: 2, at: 20, seen: true, messageId: "a"),
+            T(id: 1, at: 10, seen: true, messageId: "d"),
         ]
-        let open = MailStore.thread(rows, expanded: ["t1", "t2", "t3"])
+        let keys = MailStore.threadKeys(rows)
+        let (t1, t2, t3) = (keys[2]!, keys[3]!, keys[1]!)
+        #expect(keys[4] == t1 && keys[5] == t2 && Set([t1, t2, t3]).count == 3)
+        let open = MailStore.thread(rows, expanded: [t1, t2, t3])
         #expect(open.map(\.id) == [3, 5, 2, 4, 1])  // each thread where it first sorts, oldest message first
-        #expect(open.map(\.depth) == [0, 1, 0, 1, 0])  // no In-Reply-To: replies under the first
+        #expect(open.map(\.depth) == [0, 1, 0, 1, 0])
         #expect(open.map(\.size) == [2, 1, 2, 1, 1])
         #expect(open.first { $0.id == 2 }?.anyUnread == true)  // its reply is unread
-        #expect(MailStore.thread(rows, expanded: ["t2"]).map(\.id) == [3, 5, 2, 1])
+        #expect(MailStore.thread(rows, expanded: [t2]).map(\.id) == [3, 5, 2, 1])
         #expect(MailStore.thread(rows, expanded: []).map(\.id) == [3, 2, 1])  // threads start collapsed
     }
 
     @Test func threadsNestReplies() {
         typealias T = MailStore.ThreadInput
-        // a ← b ← d, a ← c, and e replying to a message not in the list.
+        // a ← b ← d, a ← c (by References only), and e replying to a message not in the list.
         let rows = [
-            T(id: 1, thread: "t", at: 10, seen: true, messageId: "a"),
-            T(id: 2, thread: "t", at: 20, seen: true, messageId: "b", inReplyTo: "a"),
-            T(id: 3, thread: "t", at: 30, seen: true, messageId: "c", inReplyTo: "a"),
-            T(id: 4, thread: "t", at: 40, seen: true, messageId: "d", inReplyTo: "b"),
-            T(id: 5, thread: "t", at: 50, seen: true, messageId: "e", inReplyTo: "missing"),
+            T(id: 1, at: 10, seen: true, messageId: "a"),
+            T(id: 2, at: 20, seen: true, messageId: "b", inReplyTo: "a"),
+            T(id: 3, at: 30, seen: true, messageId: "c", references: ["a"]),
+            T(id: 4, at: 40, seen: true, messageId: "d", inReplyTo: "b"),
+            T(id: 5, at: 50, seen: true, messageId: "e", inReplyTo: "missing"),
         ]
-        let tree = MailStore.thread(rows.reversed(), expanded: ["t"], opened: [2])
-        #expect(tree.map(\.id) == [1, 2, 4, 3, 5])
-        #expect(tree.map(\.depth) == [0, 1, 2, 1, 1])
-        #expect(tree.map(\.hasReplies) == [true, true, false, false, false])  // chevrons on 1 and 2
+        let t = MailStore.threadKeys(rows)[1]!
+        let tree = MailStore.thread(rows.reversed(), expanded: [t], opened: [2])
+        #expect(tree.map(\.id) == [5, 1, 2, 4, 3])  // e, whose parent isn't listed, is a thread of its own
+        #expect(tree.map(\.depth) == [0, 0, 1, 2, 1])
+        #expect(tree.map(\.hasReplies) == [false, true, true, false, false])  // chevrons on 1 and 2
         // Branches start folded too: without opening 2, its reply (4) is hidden, not its siblings.
-        #expect(MailStore.thread(rows, expanded: ["t"]).map(\.id) == [1, 2, 3, 5])
-        // A loop of In-Reply-To headers still lists every message once.
+        #expect(MailStore.thread(rows, expanded: [t]).map(\.id) == [1, 2, 3, 5])
+        // A loop of In-Reply-To headers still lists every message once, as one thread.
         let loop = [
-            T(id: 1, thread: "l", at: 10, seen: true, messageId: "x", inReplyTo: "y"),
-            T(id: 2, thread: "l", at: 20, seen: true, messageId: "y", inReplyTo: "x"),
+            T(id: 1, at: 10, seen: true, messageId: "x", inReplyTo: "y"),
+            T(id: 2, at: 20, seen: true, messageId: "y", inReplyTo: "x"),
         ]
-        #expect(Set(MailStore.thread(loop, expanded: ["l"]).map(\.id)) == [1, 2])
+        let l = MailStore.threadKeys(loop)
+        #expect(l[1] == l[2])
+        #expect(Set(MailStore.thread(loop, expanded: [l[1]!]).map(\.id)) == [1, 2])
+    }
+
+    @Test func threadsFollowOnlyTheDirectParentInTheList() {
+        typealias T = MailStore.ThreadInput
+        // The Inbox of the MailMate example: Phil's message (a), your reply in Sent (b, not listed), and
+        // Phil's answer (c) whose References name both. MailMate keeps a and c apart in the Inbox.
+        let inbox = [
+            T(id: 1, account: "x", at: 10, seen: true, messageId: "a"),
+            T(id: 3, account: "x", at: 30, seen: true, messageId: "c", inReplyTo: "b", references: ["a", "b"]),
+        ]
+        let keys = MailStore.threadKeys(inbox)
+        #expect(keys[1] != keys[3])
+        // With the reply listed (as in the Correspondence pane), all three are one thread.
+        let all = inbox + [T(id: 2, account: "x", at: 20, seen: true, messageId: "b", inReplyTo: "a", references: ["a"])]
+        let allKeys = MailStore.threadKeys(all)
+        #expect(Set(allKeys.values).count == 1)
+        #expect(MailStore.thread(all, expanded: [allKeys[1]!], opened: [2]).map(\.depth) == [0, 1, 2])
+        // The same Message-ID in another account doesn't link across accounts.
+        let other = [T(id: 1, account: "x", at: 10, seen: true, messageId: "a"), T(id: 2, account: "y", at: 20, seen: true, inReplyTo: "a")]
+        let otherKeys = MailStore.threadKeys(other)
+        #expect(otherKeys[1] != otherKeys[2])
     }
 
     @Test func submailboxScopes() throws {

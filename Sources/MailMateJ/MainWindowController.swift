@@ -265,16 +265,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
         Task {
             let (rows, newest) = await Task.detached(priority: .userInitiated) {
-                let rows = threaded
-                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened)) ?? []
-                    : ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
-                        MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
-                    }
+                let list = threaded
+                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
+                    : nil
+                let rows = list?.rows ?? ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
+                    MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
+                }
                 var newest = try? store.newestMessageID(scope: scope, search: search)
                 // New mail inside a collapsed thread is followed to the thread's row.
-                if threaded, let id = newest, !rows.contains(where: { $0.id == id }),
-                    let thread = (try? store.threadInfo(ids: [id]))?.first?.thread
-                {
+                if let list, let id = newest, !rows.contains(where: { $0.id == id }), let thread = list.threadOf[id] {
                     newest = rows.first { $0.thread == thread }?.id ?? id
                 }
                 return (rows, newest)
@@ -432,7 +431,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             correspondenceThreadOf = [:]
             return flat
         }
-        correspondenceThreadOf = Dictionary(info.map { ($0.id, $0.thread) }, uniquingKeysWith: { a, _ in a })
+        correspondenceThreadOf = MailStore.threadKeys(info)
         let rows = MailStore.thread(info, expanded: expandedThreads, opened: openedMessages)
         correspondence.threadRows = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return rows.map(\.id)

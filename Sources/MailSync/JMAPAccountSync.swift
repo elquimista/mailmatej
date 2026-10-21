@@ -39,6 +39,7 @@ public actor JMAPAccountSync {
             lastIdentitySync = Date()
         }
         try await syncEmails(accountId, session: session, into: &result)
+        try await fillInReferences(accountId)
         return result
     }
 
@@ -400,6 +401,25 @@ public actor JMAPAccountSync {
         }
     }
 
+    /// References of messages stored before they were kept (once, 500 per request): threads are built
+    /// from reply headers.
+    private func fillInReferences(_ accountId: String) async throws {
+        while true {
+            let missing = try store.remoteIDsMissingReferences(accountId: account.id, limit: 500)
+            guard !missing.isEmpty else { return }
+            var request = JMAPRequest()
+            let get = request.call("Email/get", [
+                "accountId": .string(accountId), "ids": .strings(missing), "properties": ["id", "references"],
+            ])
+            struct Refs: Decodable { let id: String; let references: [String]? }
+            let list = try await client.send(request).decode(GetResponse<Refs>.self, get).list
+            var found: [String: [String]] = Dictionary(uniqueKeysWithValues: missing.map { ($0, []) })  // gone ones too
+            for email in list { found[email.id] = email.references ?? [] }
+            try store.setReferences(accountId: account.id, found)
+            if missing.count < 500 { return }
+        }
+    }
+
     // MARK: Changes
 
     /// Applies one patch to every email (Email/set update), e.g. `["keywords/$seen": true]` or
@@ -638,7 +658,7 @@ public actor JMAPAccountSync {
             size: e.size, receivedAt: e.receivedAt, sentAt: e.sentAt,
             messageIdHeader: e.messageId?.first, inReplyTo: e.inReplyTo?.first,
             subject: e.subject ?? "", preview: e.preview ?? "", hasAttachment: e.hasAttachment,
-            addresses: addresses)
+            addresses: addresses, references: e.references ?? [])
     }
 
     /// Parts worth keeping a reference to: body parts with a Content-ID (embedded images) and everything

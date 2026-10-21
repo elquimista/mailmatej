@@ -124,6 +124,8 @@ public struct IncomingMessage: Sendable {
     public var sentAt: Date?
     public var messageIdHeader: String?
     public var inReplyTo: String?
+    /// The References header's Message-IDs, oldest first.
+    public var references: [String]
     public var subject: String
     public var preview: String
     public var hasAttachment: Bool
@@ -132,8 +134,9 @@ public struct IncomingMessage: Sendable {
     public init(
         remoteId: String, threadId: String, blobId: String, mailboxRemoteIds: [String], keywords: [String],
         size: Int, receivedAt: Date, sentAt: Date?, messageIdHeader: String?, inReplyTo: String?,
-        subject: String, preview: String, hasAttachment: Bool, addresses: [Address]
+        subject: String, preview: String, hasAttachment: Bool, addresses: [Address], references: [String] = []
     ) {
+        self.references = references
         self.remoteId = remoteId
         self.threadId = threadId
         self.blobId = blobId

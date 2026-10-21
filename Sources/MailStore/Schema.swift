@@ -219,6 +219,12 @@ enum Schema {
             }
         }
 
+        m.registerMigration("v9-references") { db in
+            // The References header (Message-IDs, space-separated), for threading by reply headers.
+            // NULL until fetched: messages stored before this are filled in by the next sync.
+            try db.execute(sql: "ALTER TABLE message ADD COLUMN referencesHeader TEXT")
+        }
+
         return m
     }
 }

@@ -216,11 +216,12 @@ public final class MailStore: Sendable {
             let upsert = try db.cachedStatement(sql: """
                 INSERT INTO message (accountId, remoteId, threadId, blobId, messageIdHeader, inReplyTo, subject,
                     sortSubject, fromDisplay, fromEmail, preview, size, receivedAt, sentAt, hasAttachment,
-                    isSeen, isFlagged, isAnswered, isDraft)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isSeen, isFlagged, isAnswered, isDraft, referencesHeader)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (accountId, remoteId) DO UPDATE SET
                     threadId = excluded.threadId, blobId = excluded.blobId,
                     messageIdHeader = excluded.messageIdHeader, inReplyTo = excluded.inReplyTo,
+                    referencesHeader = excluded.referencesHeader,
                     subject = excluded.subject, sortSubject = excluded.sortSubject,
                     fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
                     size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
@@ -251,7 +252,7 @@ public final class MailStore: Sendable {
                     Self.sortSubject(m.subject), fromDisplay, from?.email.lowercased() ?? "", m.preview, m.size,
                     m.receivedAt.timeIntervalSince1970, m.sentAt?.timeIntervalSince1970, m.hasAttachment,
                     keywords.contains("$seen"), keywords.contains("$flagged"), keywords.contains("$answered"),
-                    keywords.contains("$draft"),
+                    keywords.contains("$draft"), m.references.joined(separator: " "),
                 ]
                 guard let id = try Int64.fetchOne(upsert, arguments: StatementArguments(args)) else { continue }
 
@@ -486,6 +487,27 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Messages stored before References were (remote ids), for the sync to fill in.
+    public func remoteIDsMissingReferences(accountId: String, limit: Int) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(
+                db, sql: "SELECT remoteId FROM message WHERE accountId = ? AND referencesHeader IS NULL LIMIT ?",
+                arguments: [accountId, limit])
+        }
+    }
+
+    /// Stores References for messages by remote id ([] for none, so they aren't asked for again).
+    public func setReferences(accountId: String, _ references: [String: [String]]) throws {
+        guard !references.isEmpty else { return }
+        try dbPool.write { db in
+            for (remoteId, ids) in references {
+                try db.execute(
+                    sql: "UPDATE message SET referencesHeader = ? WHERE accountId = ? AND remoteId = ?",
+                    arguments: [ids.joined(separator: " "), accountId, remoteId])
+            }
+        }
+    }
+
     private static func placeholders(_ count: Int) -> String {
         Array(repeating: "?", count: count).joined(separator: ", ")
     }
@@ -562,7 +584,7 @@ public final class MailStore: Sendable {
     /// One row of a threaded list.
     public struct ThreadedRow: Sendable, Hashable {
         public var id: Int64
-        /// Identifies the conversation: the account and its JMAP thread id.
+        /// Identifies the conversation in this list: the account and its first message (see `threadKeys`).
         public var thread: String
         /// 0 for a thread's first message, 1 for its replies.
         public var depth: Int
@@ -586,31 +608,44 @@ public final class MailStore: Sendable {
     /// What threading needs to know of a message.
     public struct ThreadInput: Sendable {
         public var id: Int64
-        public var thread: String
+        public var account: String
         public var at: Double
         public var seen: Bool
-        /// Its Message-ID and the Message-ID it replies to, which place it in the reply tree.
+        /// Its Message-ID and the reply headers that place it in a conversation.
         public var messageId: String?
         public var inReplyTo: String?
+        public var references: [String]
 
-        public init(id: Int64, thread: String, at: Double, seen: Bool, messageId: String? = nil, inReplyTo: String? = nil) {
+        public init(
+            id: Int64, account: String = "", at: Double, seen: Bool, messageId: String? = nil, inReplyTo: String? = nil,
+            references: [String] = []
+        ) {
             self.id = id
-            self.thread = thread
+            self.account = account
             self.at = at
             self.seen = seen
             self.messageId = messageId
             self.inReplyTo = inReplyTo
+            self.references = references
         }
 
         init(_ row: Row) {
+            let references: String? = row["referencesHeader"]
             self.init(
-                id: row["id"], thread: row["thread"], at: row["receivedAt"], seen: row["isSeen"],
-                messageId: row["messageIdHeader"], inReplyTo: row["inReplyTo"])
+                id: row["id"], account: row["accountId"], at: row["receivedAt"], seen: row["isSeen"],
+                messageId: row["messageIdHeader"], inReplyTo: row["inReplyTo"],
+                references: references.map { $0.split(separator: " ").map(String.init) } ?? [])
         }
     }
 
     private static let threadColumns =
-        "m.id, m.accountId || ':' || m.threadId AS thread, m.receivedAt, m.isSeen, m.messageIdHeader, m.inReplyTo"
+        "m.id, m.accountId, m.receivedAt, m.isSeen, m.messageIdHeader, m.inReplyTo, m.referencesHeader"
+
+    /// A threaded list: its rows, and the thread of every message in it (those inside closed threads too).
+    public struct ThreadedList: Sendable {
+        public var rows: [ThreadedRow]
+        public var threadOf: [Int64: String]
+    }
 
     /// A list's messages grouped into conversations, as MailMate shows threads: each thread where its
     /// first message in `sort` order would be, as a reply tree (see `thread`). Threads start collapsed,
@@ -619,11 +654,11 @@ public final class MailStore: Sendable {
     public func threadedMessages(
         scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, expanded: Set<String> = [],
         opened: Set<Int64> = []
-    ) throws -> [ThreadedRow] {
+    ) throws -> ThreadedList {
         let (filter, args) = Self.filter(scope: scope, search: search)
         let sql = "SELECT \(Self.threadColumns) FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         let rows = try dbPool.read { db in try Row.fetchAll(db, sql: sql, arguments: args).map(ThreadInput.init) }
-        return Self.thread(rows, expanded: expanded, opened: opened)
+        return ThreadedList(rows: Self.thread(rows, expanded: expanded, opened: opened), threadOf: Self.threadKeys(rows))
     }
 
     /// What threading needs to know of these messages, in the given order (missing ones left out).
@@ -639,16 +674,60 @@ public final class MailStore: Sendable {
         return ids.compactMap { byID[$0] }
     }
 
-    /// Groups rows (in list order) into threads. Each thread goes where its first row is, as a reply
-    /// tree: every message under the one it replies to (In-Reply-To), one level deeper, siblings oldest
-    /// first. The oldest message without a parent in the list heads the thread; other parentless ones
-    /// (their parent isn't in this list) hang directly under it.
+    /// Each message's parent in this list, as MailMate links replies: the message it answers directly
+    /// (its In-Reply-To, or without one the last of its References), when that message is in the list.
+    /// Nothing further up the References counts, so where the message in between isn't listed (a reply
+    /// of yours, in Sent, between two messages in the Inbox) the thread splits, as in MailMate.
+    static func parents(_ rows: [ThreadInput]) -> [Int64: Int64] {
+        var byMessageId: [String: Int64] = [:]
+        for row in rows {
+            if let mid = row.messageId, byMessageId[row.account + " " + mid] == nil { byMessageId[row.account + " " + mid] = row.id }
+        }
+        var parents: [Int64: Int64] = [:]
+        for row in rows {
+            guard let direct = row.inReplyTo ?? row.references.last,
+                let parent = byMessageId[row.account + " " + direct], parent != row.id
+            else { continue }
+            parents[row.id] = parent
+        }
+        return parents
+    }
+
+    /// Each message's thread in this list: "<account>:<id of the thread's first message>". Messages caught
+    /// in a loop of reply headers get the loop's lowest id as their first message.
+    public static func threadKeys(_ rows: [ThreadInput]) -> [Int64: String] {
+        let parents = parents(rows)
+        let account = Dictionary(rows.map { ($0.id, $0.account) }, uniquingKeysWith: { a, _ in a })
+        var root: [Int64: Int64] = [:]
+        for row in rows where root[row.id] == nil {
+            var path: [Int64] = [row.id]
+            var seen: Set<Int64> = [row.id]
+            var top = row.id
+            while let parent = parents[top] {
+                if let known = root[parent] { top = known; break }
+                if !seen.insert(parent).inserted {
+                    top = path[path.firstIndex(of: parent)!...].min()!  // A loop: its lowest id heads it.
+                    break
+                }
+                path.append(parent)
+                top = parent
+            }
+            for id in path { root[id] = top }
+        }
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, "\(account[$0.id] ?? ""):\(root[$0.id] ?? $0.id)") })
+    }
+
+    /// Groups rows (in list order) into threads (see `parents`). Each thread goes where its first row is,
+    /// as a reply tree: every message under the one it answers, one level deeper, siblings oldest first.
     public static func thread(_ rows: [ThreadInput], expanded: Set<String>, opened: Set<Int64> = []) -> [ThreadedRow] {
+        let keys = threadKeys(rows)
+        let parents = parents(rows)
         var order: [String] = []
         var members: [String: [ThreadInput]] = [:]
         for row in rows {
-            if members[row.thread] == nil { order.append(row.thread) }
-            members[row.thread, default: []].append(row)
+            let key = keys[row.id]!
+            if members[key] == nil { order.append(key) }
+            members[key, default: []].append(row)
         }
         var result: [ThreadedRow] = []
         result.reserveCapacity(rows.count)
@@ -660,32 +739,23 @@ public final class MailStore: Sendable {
                 result.append(ThreadedRow(id: messages[0].id, thread: thread, depth: 0, size: 1, anyUnread: anyUnread))
                 continue
             }
-            var byMessageId: [String: Int64] = [:]
-            for m in messages { if let mid = m.messageId, byMessageId[mid] == nil { byMessageId[mid] = m.id } }
+            let topID = Int64(thread.split(separator: ":").last.map(String.init) ?? "") ?? messages[0].id
             var children: [Int64: [ThreadInput]] = [:]
-            var roots: [ThreadInput] = []
-            for m in messages {
-                if let parent = m.inReplyTo.flatMap({ byMessageId[$0] }), parent != m.id {
-                    children[parent, default: []].append(m)
-                } else {
-                    roots.append(m)
-                }
+            for m in messages where m.id != topID {
+                if let parent = parents[m.id] { children[parent, default: []].append(m) }
             }
-            let top = roots.first ?? messages[0]
-            children[top.id, default: []].append(contentsOf: roots.dropFirst())
-            children[top.id]?.sort { ($0.at, $0.id) < ($1.at, $1.id) }
-
-            // Replies caught in a loop of In-Reply-To headers aren't reachable from the top; they go under it.
-            var reachable: Set<Int64> = [top.id]
-            var queue = [top.id]
+            // Replies a loop of headers keeps out of reach of the first message go under it.
+            var reachable: Set<Int64> = [topID]
+            var queue = [topID]
             while let id = queue.popLast() {
                 for child in children[id] ?? [] where reachable.insert(child.id).inserted { queue.append(child.id) }
             }
-            children[top.id, default: []].append(contentsOf: messages.filter { !reachable.contains($0.id) })
+            children[topID, default: []].append(contentsOf: messages.filter { !reachable.contains($0.id) })
+            for key in children.keys { children[key]?.sort { ($0.at, $0.id) < ($1.at, $1.id) } }
 
-            result.append(ThreadedRow(id: top.id, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true))
+            result.append(ThreadedRow(id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true))
             guard expanded.contains(thread) else { continue }
-            var placed: Set<Int64> = [top.id]
+            var placed: Set<Int64> = [topID]
             func walk(_ id: Int64, depth: Int) {
                 for child in children[id] ?? [] where placed.insert(child.id).inserted {
                     let replies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
@@ -694,7 +764,7 @@ public final class MailStore: Sendable {
                     if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
                 }
             }
-            walk(top.id, depth: 1)
+            walk(topID, depth: 1)
         }
         return result
     }
