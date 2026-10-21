@@ -61,6 +61,21 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
         }
+        NotificationCenter.default.addObserver(forName: MailboxColors.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restyleVisibleRows() }
+        }
+    }
+
+    /// Shows changed mailbox colors without rebuilding the tree.
+    private func restyleVisibleRows() {
+        let rows = outline.rows(in: outline.visibleRect)
+        guard rows.length > 0 else { return }
+        for row in rows.location..<(rows.location + rows.length) {
+            guard let node = outline.item(atRow: row) as? SidebarNode,
+                let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell
+            else { continue }
+            cell.configure(node, plain: isInEditor)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -163,6 +178,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Rebuilds the tree from the store, keeping expansion and selection.
     func reload() {
         let fresh = Self.buildTree(model: model)
+        func record(_ nodes: [SidebarNode], parent: String?) {
+            for n in nodes {
+                if let scope = n.scope { MailboxColors.scopes[n.key] = scope }
+                MailboxColors.parents[n.key] = parent
+                record(n.children, parent: n.key)
+            }
+        }
+        record(fresh, parent: nil)
         // Usually only counts and states changed: update the rows in place, so nothing is reloaded or
         // re-expanded (which made expanding a row stutter while mail synced). Rebuild when rows come or go.
         if Self.keys(fresh) == Self.keys(roots) {
@@ -595,6 +618,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             add("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))
             menu.addItem(.separator())
         }
+        if node.kind != .header {
+            let color = menu.addItem(withTitle: "Color", action: nil, keyEquivalent: "")
+            color.submenu = colorMenu(for: node)
+            menu.addItem(.separator())
+        }
         if node.kind == .smart {
             add("Edit Smart Mailbox…", #selector(editMailboxClicked(_:)))
             add("Rename Smart Mailbox", #selector(renameClicked(_:)))
@@ -625,6 +653,78 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             remove.representedObject = node
             remove.target = self
         }
+    }
+
+    // MARK: Color
+
+    /// MailMate's Color submenu: Accent, Text, Multicolor and Custom…, then the system colors under
+    /// their heading, the chosen one checked.
+    private func colorMenu(for node: SidebarNode) -> NSMenu {
+        let menu = NSMenu()
+        let current = MailboxColors.color(for: node.key) ?? (node.kind == .account ? nil : .accent)
+        func add(_ title: String, _ image: NSImage, _ color: MailboxColor?, indented: Bool = false) {
+            let item = menu.addItem(withTitle: title, action: #selector(colorChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = image
+            item.representedObject = ColorChoice(key: node.key, color: color)
+            item.indentationLevel = indented ? 1 : 0
+            if let color, color == current { item.state = .on }
+            if case .custom = current, case .custom = color ?? .accent { item.state = .on }
+        }
+        add("Accent Color", MailboxColors.swatch { .controlAccentColor }, .accent)
+        add("Text Color", MailboxColors.swatch { .labelColor }, .text)
+        add("Multicolor", MailboxColors.multicolorSwatch, .multicolor)
+        add("Custom…", MailboxColors.customSwatch, nil)
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "System Colors"))
+        for (name, title) in MailboxColor.systemColors {
+            add(title, MailboxColors.swatch { MailboxColor.systemColor(name) ?? .gray }, .system(name), indented: true)
+        }
+        menu.addItem(.separator())
+        let inList = menu.addItem(withTitle: "Use Color in Message List", action: #selector(toggleColorInList(_:)), keyEquivalent: "")
+        inList.target = self
+        inList.representedObject = node.key
+        inList.state = MailboxColors.usesColorInList(node.key) ? .on : .off
+        // As in MailMate: not for the accent color (the default), which the selection already uses.
+        let chosen = MailboxColors.color(for: node.key)
+        if chosen == nil || chosen == .accent { inList.action = nil }
+        return menu
+    }
+
+    private final class ColorChoice: NSObject {
+        let key: String
+        /// nil: Custom…, which asks.
+        let color: MailboxColor?
+        init(key: String, color: MailboxColor?) {
+            self.key = key
+            self.color = color
+        }
+    }
+
+    /// Messages in the mailbox show their text in its color.
+    @objc private func toggleColorInList(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        MailboxColors.setUsesColorInList(!MailboxColors.usesColorInList(key), for: key)
+    }
+
+    /// The mailbox whose color the color panel is choosing (Custom…).
+    private var customColorKey: String?
+
+    @objc private func colorChosen(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? ColorChoice else { return }
+        if let color = choice.color { return MailboxColors.set(color, for: choice.key) }
+        customColorKey = choice.key
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        if case .custom(let color)? = MailboxColors.color(for: choice.key) { panel.color = color }
+        panel.setTarget(self)
+        panel.setAction(#selector(customColorChanged(_:)))
+        panel.orderFront(nil)
+    }
+
+    @objc private func customColorChanged(_ panel: NSColorPanel) {
+        guard let key = customColorKey else { return }
+        MailboxColors.set(.custom(panel.color), for: key)
     }
 
     @objc private func editMailboxClicked(_ sender: NSMenuItem) {
@@ -802,8 +902,11 @@ final class SidebarCell: NSTableCellView {
             imageView?.contentTintColor = .systemOrange
             toolTip = warning
         } else {
-            imageView?.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
-            imageView?.contentTintColor = node.kind == .account ? .secondaryLabelColor : .controlAccentColor
+            if let imageView {
+                MailboxColors.style(
+                    imageView, key: node.key, symbol: node.symbol,
+                    fallback: node.kind == .account ? .secondaryLabelColor : .controlAccentColor)
+            }
             toolTip = plain ? nil : node.info
         }
         badge.count = plain ? 0 : node.badge

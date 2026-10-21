@@ -920,6 +920,16 @@ public final class MailStore: Sendable {
         return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: args) ?? 0 }
     }
 
+    /// Which of these messages are in a list.
+    public func ids(_ ids: [Int64], in scope: MessageScope) throws -> Set<Int64> {
+        guard !ids.isEmpty else { return [] }
+        let (filter, args) = self.filter(scope: scope, search: nil)
+        var arguments = args
+        arguments += StatementArguments(ids)
+        let sql = "SELECT m.id FROM message m WHERE \(filter) AND m.id IN (\(Self.placeholders(ids.count)))"
+        return Set(try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: arguments) })
+    }
+
     /// The most recently received message in a list, whatever the list's sort order.
     public func newestMessageID(scope: MessageScope, search: String? = nil) throws -> Int64? {
         let (filter, args) = self.filter(scope: scope, search: search)

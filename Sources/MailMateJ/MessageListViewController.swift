@@ -78,6 +78,14 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         self.relativeDates = relativeDates
         sort = Self.savedSort(autosaveName) ?? defaultSort
         super.init(nibName: nil, bundle: nil)
+        NotificationCenter.default.addObserver(forName: MailboxColors.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {  // Rows take their mailboxes' new colors.
+                guard let self, self.isViewLoaded else { return }
+                self.rowColors.removeAll()
+                self.cache.removeAll()
+                self.tableView.reloadData()
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -258,6 +266,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
         ids = newIDs
         cache.removeAll(keepingCapacity: true)
+        rowColors.removeAll(keepingCapacity: true)
         suppressSelection = true
         tableView.reloadData()
         let indexes = IndexSet(wanted.compactMap { newIDs.firstIndex(of: $0) })
@@ -315,14 +324,24 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private func row(at index: Int) -> MessageRow? {
         guard index < ids.count else { return nil }
         if let row = cache[ids[index]] { return row }
-        if cache.count > Self.cacheLimit { cache.removeAll(keepingCapacity: true) }
+        if cache.count > Self.cacheLimit {
+            cache.removeAll(keepingCapacity: true)
+            rowColors.removeAll(keepingCapacity: true)
+        }
         let lower = max(0, index - Self.blockSize / 3)
         let upper = min(ids.count, lower + Self.blockSize)
-        for row in (try? store.rows(ids: Array(ids[lower..<upper]))) ?? [] {
+        let block = Array(ids[lower..<upper])
+        for row in (try? store.rows(ids: block)) ?? [] {
             cache[row.id] = row
         }
+        rowColors.merge(MailboxColors.listColors(for: block, store: store, viewing: colorKey)) { _, new in new }
         return cache[ids[index]]
     }
+
+    /// Text colors of rows in mailboxes that use their color in the message list (fetched with the rows).
+    private var rowColors: [Int64: NSColor] = [:]
+    /// The sidebar mailbox this list shows, whose colored submailboxes color its rows (nil: none).
+    var colorKey: String?
 
     // MARK: NSTableViewDataSource / Delegate
 
@@ -373,19 +392,28 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             return iconCell(tableView, column, image: row.isFlagged ? Self.rowFlag : nil, tint: .systemRed)
         case .attachment:
             return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
+        default:
+            let cell = textColumnCell(tableView, column, row, bold: unread)
+            (cell as? ColoredCell)?.rowColor = rowColors[row.id]
+            return cell
+        }
+    }
+
+    private func textColumnCell(_ tableView: NSTableView, _ column: Column, _ row: MessageRow, bold unread: Bool) -> NSView {
+        switch column {
         case threadColumn where showsThreads:
             let text = column == .from ? row.fromDisplay : (row.subject.isEmpty ? "(no subject)" : row.subject)
             return threadCell(tableView, row, text: text, thread: threadRows[row.id], bold: unread)
-        case .from:
-            return textCell(tableView, column, row.fromDisplay, bold: unread)
-        case .subject:
-            return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: unread)
         case .date:
             let date = shownDate(row)
             if relativeDates { return textCell(tableView, column, Formatters.relative(date), bold: unread) }
             return dateCell(tableView, date, bold: unread)
         case .source:
             return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: unread)
+        case .subject:
+            return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: unread)
+        default:
+            return textCell(tableView, column, row.fromDisplay, bold: unread)
         }
     }
 
@@ -469,8 +497,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         _ tableView: NSTableView, _ column: Column, _ text: String, bold: Bool
     ) -> NSView {
         let id = NSUserInterfaceItemIdentifier("text")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let cell = NSTableCellView()
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? ColoredCell ?? {
+            let cell = ColoredCell()
             cell.identifier = id
             let field = NSTextField(labelWithString: "")
             field.lineBreakMode = .byTruncatingTail
@@ -787,7 +815,20 @@ enum Formatters {
 }
 
 /// Two labels in one cell: the date at the leading edge, the time at the trailing edge.
-final class DateCell: NSTableCellView {
+/// A list cell whose text takes the row's mailbox color (Use Color in Message List), white when selected.
+class ColoredCell: NSTableCellView {
+    var rowColor: NSColor? { didSet { applyColor() } }
+    var coloredFields: [NSTextField] { textField.map { [$0] } ?? [] }
+
+    override var backgroundStyle: NSView.BackgroundStyle { didSet { applyColor() } }
+
+    func applyColor() {
+        let color = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : rowColor ?? .labelColor
+        for field in coloredFields { field.textColor = color }
+    }
+}
+
+final class DateCell: ColoredCell {
     let dateField = NSTextField(labelWithString: "")
     let timeField = NSTextField(labelWithString: "")
 
@@ -800,7 +841,7 @@ final class DateCell: NSTableCellView {
             field.lineBreakMode = .byClipping
             addSubview(field)
         }
-        textField = dateField  // Lets the table adjust colors for selected rows.
+        textField = dateField
         NSLayoutConstraint.activate([
             dateField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             dateField.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -812,13 +853,7 @@ final class DateCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var backgroundStyle: NSView.BackgroundStyle {
-        didSet {
-            let color: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
-            dateField.textColor = color
-            timeField.textColor = color
-        }
-    }
+    override var coloredFields: [NSTextField] { [dateField, timeField] }
 }
 
 /// The message table, passing ← and → to the list for collapsing and expanding threads.
@@ -835,7 +870,7 @@ final class MessageTableView: NSTableView {
 }
 
 /// From cell of a threaded list: a chevron on a thread's first row and the sender, indented for replies.
-final class ThreadFromCell: NSTableCellView {
+final class ThreadFromCell: ColoredCell {
     let chevron = NSButton()
     var onToggle: (() -> Void)?
     private var leading: NSLayoutConstraint!

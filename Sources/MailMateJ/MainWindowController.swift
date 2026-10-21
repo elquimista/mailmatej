@@ -233,6 +233,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 displayed: messageView.displayedMessageID)
             self.scope = scope
             self.scopeTitle = node.title
+            list.colorKey = node.key
             selectAfterMove = nil
             self.reloadList(.scopeChanged)
         }

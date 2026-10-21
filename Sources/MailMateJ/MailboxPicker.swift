@@ -402,8 +402,11 @@ private final class PickerCell: NSTableCellView {
         account.stringValue = choice.subtitle
         let font = NSFont.systemFont(ofSize: 10)
         account.font = choice.isUnified ? NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) : font
+        color = MailboxColors.color(for: choice.node.key)
+        var configuration = NSImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+        if color == .multicolor { configuration = configuration.applying(MailboxColors.multicolor) }
         icon.image = NSImage(systemSymbolName: choice.node.symbol.isEmpty ? "folder" : choice.node.symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 20, weight: .regular))
+            .withSymbolConfiguration(configuration)
         updateColors()
     }
 
@@ -415,6 +418,9 @@ private final class PickerCell: NSTableCellView {
         let selected = backgroundStyle == .emphasized
         name.textColor = selected ? .alternateSelectedControlTextColor : .labelColor
         account.textColor = selected ? .alternateSelectedControlTextColor : .secondaryLabelColor
-        icon.contentTintColor = selected ? .alternateSelectedControlTextColor : .controlAccentColor
+        // The mailbox's color, as in the sidebar (multicolor draws its own colors).
+        icon.contentTintColor = selected ? .alternateSelectedControlTextColor : color.map { $0.tint } ?? .controlAccentColor
     }
+
+    private var color: MailboxColor?
 }

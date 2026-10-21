@@ -59,6 +59,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelect(subject: subject)
                     try? await Task.sleep(for: .seconds(2))
                 }
+                if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_SWATCHES"] {
+                    // The Color menu's swatches at 1x on the dark menu background, side by side.
+                    let images = [
+                        MailboxColors.swatch { .controlAccentColor }, MailboxColors.swatch { .labelColor },
+                        MailboxColors.multicolorSwatch, MailboxColors.customSwatch, MailboxColors.swatch { .systemRed },
+                        MailboxColors.swatch { .systemGreen },
+                    ]
+                    let rep = NSBitmapImageRep(
+                        bitmapDataPlanes: nil, pixelsWide: 20 * images.count, pixelsHigh: 17, bitsPerSample: 8, samplesPerPixel: 4,
+                        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+                    NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+                        NSGraphicsContext.saveGraphicsState()
+                        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+                        NSColor(srgbRed: 0.21, green: 0.23, blue: 0.24, alpha: 1).setFill()
+                        NSRect(x: 0, y: 0, width: 20 * images.count, height: 17).fill()
+                        for (i, image) in images.enumerated() { image.draw(at: NSPoint(x: i * 20 + 2, y: 2), from: .zero, operation: .sourceOver, fraction: 1) }
+                        NSGraphicsContext.restoreGraphicsState()
+                    }
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                }
                 if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_HOVER_LINK"] {
                     await windowController?.debugHoverLink(containing: text)
                     try? await Task.sleep(for: .milliseconds(500))
