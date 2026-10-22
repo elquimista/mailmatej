@@ -35,6 +35,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     NSTextFieldDelegate
 {
     var onSelect: ((SidebarNode) -> Void)?
+    /// The selected mailbox went away (deleted): nothing is selected, as in MailMate.
+    var onSelectNone: (() -> Void)?
     /// Edit an account's settings (a double-click on it, or Edit Account… in its menu).
     var onEditAccount: ((String) -> Void)?
     /// Unread counts, activity spinners, sync warnings and status tooltips on the rows; MailMate's
@@ -216,7 +218,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             refreshStatuses()
             return
         }
-        let selectedKey = selectedNode?.key ?? "unified.inbox"
+        let previous = selectedNode?.key
+        let selectedKey = previous ?? "unified.inbox"
         roots = fresh
         isReloading = true
         defer { isReloading = false }
@@ -226,11 +229,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.expandItem(root)
             expandRemembered(root.children)
         }
-        if let node = find(selectedKey, in: roots) ?? find("unified.inbox", in: roots) {
+        // Inbox at launch; after the selected mailbox is deleted, nothing (as MailMate does).
+        if let node = find(selectedKey, in: roots) ?? (previous == nil ? find("unified.inbox", in: roots) : nil) {
             let row = outline.row(forItem: node)
             if row >= 0 { outline.selectRowIndexes([row], byExtendingSelection: false) }
+        } else {
+            outline.deselectAll(nil)
         }
         suppressSelection = false
+        if previous != nil, selectedNode == nil { onSelectNone?() }
         refreshStatuses()
     }
 

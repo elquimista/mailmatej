@@ -225,8 +225,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             self?.toggle(row, collapse: collapse, inCorrespondence: true)
         }
         sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
+        sidebar.onSelectNone = { [weak self] in
+            guard let self else { return }
+            hasMailbox = false
+            list.tableView.deselectAll(nil)
+            messageView.show(messageID: nil)
+            reloadList(.scopeChanged)
+        }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
+            hasMailbox = true
             remembered[self.scope] = SavedView(
                 selection: list.selectedIDs, anchor: list.scrollAnchor,
                 correspondenceSelection: correspondence.selectedIDs, correspondenceAnchor: correspondence.scrollAnchor,
@@ -267,10 +275,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     // MARK: Loading
 
+    /// Whether a mailbox is selected (not after the selected one was deleted).
+    private var hasMailbox = true
+
     private func reloadList(_ reason: ReloadReason) {
         loadGeneration += 1
         let generation = loadGeneration
-        let (store, scope, sort) = (model.store, scope, list.sort)
+        let (store, sort) = (model.store, list.sort)
+        // No mailbox: an empty list (a scope that matches nothing).
+        let scope = hasMailbox ? self.scope : MessageScope.smart(-1)
         let search: String? = search.isEmpty ? nil : search
         let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
         Task {
@@ -472,6 +485,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// "Subject — Mailbox (N messages)", as MailMate titles its window.
     private func updateTitle() {
+        guard hasMailbox else {
+            window?.title = "No mailbox selected"  // MailMate's
+            return
+        }
         let count = list.ids.count
         let mailbox = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
         let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
