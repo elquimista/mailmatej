@@ -195,6 +195,28 @@ import Testing
         #expect(try store.rules().isEmpty)
     }
 
+    @Test func specialMailboxConditionsNarrowThemAndTheirSubmailboxes() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "news@shop.com", at: 100, subject: "Sale"),
+            message("2", from: "ann@x.com", at: 200, subject: "Lunch"),
+        ])
+        let inbox = try #require(try store.mailbox(accountId: "acc", role: "inbox"))
+        #expect(try store.messageIDs(scope: .role("inbox")).count == 2)
+        try store.setSpecialCondition(.compound(.none, [.rule(.fromDomain, .is, "shop.com")]), key: "role:inbox")
+        #expect(store.hasSpecialCondition(key: "role:inbox"))
+        #expect(try store.rows(ids: try store.messageIDs(scope: .role("inbox"))).map(\.subject) == ["Lunch"])
+        // Its submailbox (the account's Inbox) is narrowed too; the account's folder itself isn't.
+        let child = MessageScope.within("role:inbox", .mailbox(inbox.id))
+        #expect(MessageScope(key: child.key) == child)
+        #expect(try store.messageIDs(scope: child).count == 1)
+        #expect(try store.messageIDs(scope: .mailbox(inbox.id)).count == 2)
+        // A condition naming its own mailbox doesn't loop.
+        try store.setSpecialCondition(.compound(.all, [.rule(.mailbox, .is, "role:inbox")]), key: "role:inbox")
+        #expect(try store.messageIDs(scope: .role("inbox")).count == 2)
+        try store.setSpecialCondition(.compound(.all, []), key: "role:inbox")
+        #expect(!store.hasSpecialCondition(key: "role:inbox"))
+    }
+
     @Test func scopesAndOrdering() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100),

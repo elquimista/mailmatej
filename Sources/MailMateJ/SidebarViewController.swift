@@ -9,7 +9,7 @@ final class SidebarNode: NSObject {
     let kind: Kind
     var title: String
     let symbol: String
-    let scope: MessageScope?
+    var scope: MessageScope?
     let accountId: String?
     /// JMAP role of a mailbox node ("inbox", "sent", ...).
     var role: String?
@@ -127,7 +127,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             switch node.kind {
             case .account: return node.accountId.map(model.isBusy) ?? false
             case .mailbox:
-                if case .mailbox(let id)? = node.scope { return busyIDs.contains(id) }
+                if case .mailbox(let id)? = node.scope?.base { return busyIDs.contains(id) }
                 return false
             default: return false
             }
@@ -204,6 +204,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                         node.info = n.info
                         node.role = n.role
                         node.title = n.title
+                        node.scope = n.scope  // a special mailbox's conditions wrap its submailboxes
                     }
                     update(n.children)
                 }
@@ -333,16 +334,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
             if role == "inbox" || role == "junk" { node.badge = counts.unreadByRole[role] ?? 0 }
             node.children = submailboxes(of: node, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+            narrow(node, store: store, showsUnread: role == "inbox" || role == "junk")
             unified.children.append(node)
-            if role == "inbox" {
-                let flagged = SidebarNode(key: "unified.flagged", kind: .unified, title: "Flagged", symbol: "flag", scope: .flagged)
-                flagged.badge = counts.flagged
-                flagged.children = submailboxes(of: flagged, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
-                unified.children.append(flagged)
-            }
         }
-        let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "tray.full", scope: .allMessages)
+        let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "envelope", scope: .allMessages)  // MailMate's
         all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+        narrow(all, store: store, showsUnread: false)
         unified.children.append(all)
         unified.children += smartNodes(store: store, accounts: accountsByID)
 
@@ -369,7 +366,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func nodes(_ parent: Int64?) -> [SidebarNode] {
             (byParent[parent] ?? []).map { record in
                 let node = SidebarNode(
-                    key: "smart.\(record.id)", kind: .smart, title: record.name, symbol: smartSymbol, scope: .smart(record.id))
+                    key: "smart.\(record.id)", kind: .smart, title: record.name, symbol: record.definition.icon ?? smartSymbol,
+                    scope: .smart(record.id))
                 node.badge = (try? store.count(scope: .smart(record.id), counting: .unread)) ?? 0
                 node.children = nodes(record.id) + splitNodes(record, store: store, accounts: accounts)
                 return node
@@ -378,8 +376,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return nodes(nil)
     }
 
-    /// Smart mailboxes' icon: a filter (mail chosen by conditions, as the editor's Conditions tab shows).
-    static let smartSymbol = "line.3.horizontal.decrease.circle"
+    /// Smart mailboxes' default icon: a gear, as MailMate's.
+    static let smartSymbol = "gearshape"
 
     /// A smart mailbox's Submailboxes tab as sidebar rows: a child per value, or per account; with both,
     /// the accounts, each with its own values (as unified mailboxes group sources by account).
@@ -394,7 +392,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     ?? .smartValue(record.id, split.field, value)
                 let node = SidebarNode(
                     key: "smart.\(record.id)\(account.map { ".account.\($0)" } ?? "").value.\(value.lowercased())", kind: .mailbox,
-                    title: value.isEmpty ? "Other" : value, symbol: smartSymbol, scope: scope, accountId: account)
+                    title: value.isEmpty ? "Other" : value, symbol: record.definition.icon ?? smartSymbol, scope: scope, accountId: account)
                 node.badge = unread
                 return node
             }
@@ -410,6 +408,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             node.children = valueNodes(account: account.id)
             return node
         }
+    }
+
+    /// A special mailbox whose Conditions tab narrows it: its submailboxes show only what it shows, and
+    /// its counts come from here (the server's count the whole mailboxes).
+    private static func narrow(_ node: SidebarNode, store: MailStore, showsUnread: Bool) {
+        guard let key = node.scope?.key, store.hasSpecialCondition(key: key) else { return }
+        if showsUnread, let scope = node.scope { node.badge = (try? store.count(scope: scope, counting: .unread)) ?? 0 }
+        func wrap(_ nodes: [SidebarNode]) {
+            for child in nodes {
+                if let scope = child.scope {
+                    child.scope = .within(key, scope)
+                    if showsUnread { child.badge = (try? store.count(scope: .within(key, scope), counting: .unread)) ?? 0 }
+                }
+                wrap(child.children)
+            }
+        }
+        wrap(node.children)
     }
 
     /// MailMate's submailboxes of a unified mailbox. For a role (Inbox, Sent, ...) one per account's

@@ -198,7 +198,8 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
                 (try? model.store.smartMailboxes())?.first(where: { $0.id == id })?.definition.sources.includeSubmailboxes == true
             else { return Tab.allCases }
             return Tab.allCases.filter { $0 != .submailboxes }
-        case .unified?: return [.submailboxes, .rules]
+        // The special mailboxes: their messages come from the accounts, so only Mailboxes is greyed out.
+        case .unified?: return [.conditions, .submailboxes, .rules]
         default: return [.rules]
         }
     }
@@ -400,6 +401,8 @@ private final class EditorContentView: NSView {
         let made: EditorPane? = switch (tab, node.scope) {
         case (.mailboxes, .smart(let id)?): SmartRulesPane(kind: .sources, smartID: id, model: model)
         case (.conditions, .smart(let id)?): SmartRulesPane(kind: .conditions, smartID: id, model: model)
+        case (.conditions, let scope?) where node.kind == .unified:
+            SmartRulesPane(kind: .conditions, smartID: -1, model: model, specialKey: scope.key)
         case (.submailboxes, .smart(let id)?): SmartSubmailboxesPane(smartID: id, model: model)
         case (.submailboxes, _) where node.kind == .unified: UnifiedSubmailboxesPane(key: node.key)
         default: node.scope.map { RulesPane(mailboxKey: $0.key, model: model) }
@@ -439,6 +442,8 @@ final class EditorFlippedView: NSView {
 private final class SmartRulesPane: EditorPane {
     let view: NSView = EditorFlippedView()
     private let smartID: Int64
+    /// A special mailbox's key ("role:inbox", "all") when editing its conditions instead of a smart mailbox's.
+    private let specialKey: String?
     private let model: AppModel
     private let kind: SmartRuleEditor.Kind
     private let editor: SmartRuleEditor
@@ -446,11 +451,12 @@ private final class SmartRulesPane: EditorPane {
         checkboxWithTitle: "Include messages in any submailboxes of this mailbox", target: nil, action: nil)
     private var pendingSave: DispatchWorkItem?
 
-    init(kind: SmartRuleEditor.Kind, smartID: Int64, model: AppModel) {
+    init(kind: SmartRuleEditor.Kind, smartID: Int64, model: AppModel, specialKey: String? = nil) {
         self.kind = kind
         self.smartID = smartID
+        self.specialKey = specialKey
         self.model = model
-        editor = SmartRuleEditor(kind: kind, context: SmartRuleContext(model: model, editing: smartID))
+        editor = SmartRuleEditor(kind: kind, context: SmartRuleContext(model: model, editing: smartID, mailboxKey: specialKey))
         let record = (try? model.store.smartMailboxes())?.first { $0.id == smartID }
         let definition = record?.definition ?? SmartDefinition()
 
@@ -478,7 +484,8 @@ private final class SmartRulesPane: EditorPane {
         editor.autoresizingMask = [.width]
         editor.onChange = { [weak self] immediate in self?.scheduleSave(immediate: immediate) }
         view.addSubview(editor)
-        editor.load(kind == .sources ? definition.sources.root : definition.condition)
+        editor.load(specialKey.map { model.store.specialCondition(key: $0) }
+            ?? (kind == .sources ? definition.sources.root : definition.condition))
     }
 
     @objc private func changed() { scheduleSave(immediate: true) }
@@ -501,6 +508,7 @@ private final class SmartRulesPane: EditorPane {
 
     private func save() {
         pendingSave = nil
+        if let specialKey, let tree = editor.tree() { return model.setSpecialCondition(tree, key: specialKey) }
         guard var definition = (try? model.store.smartMailboxes())?.first(where: { $0.id == smartID })?.definition,
             let tree = editor.tree()
         else { return }

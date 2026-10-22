@@ -953,6 +953,15 @@ public final class MailStore: Sendable {
         var clauses: [String] = []
         var args: [(any DatabaseValueConvertible)?] = []
 
+        // A special mailbox's own list, or one of its submailboxes: narrowed by its conditions.
+        if case .within(let parent, let child) = scope {
+            var (clause, args) = filterParts(scope: child, search: search)
+            if let (condition, conditionArgs) = specialFilter(key: parent) {
+                clause = "(\(clause)) AND (\(condition))"
+                args += conditionArgs
+            }
+            return (clause, args)
+        }
         switch scope {
         case .allMessages:
             clauses.append("""
@@ -999,10 +1008,21 @@ public final class MailStore: Sendable {
             let (test, testArgs) = Self.smartValueTest(field, value)
             clauses.append("\(clause) AND m.accountId = ? AND \(test)")
             args += smartArgs + [accountId] + testArgs
+        case .within:
+            break  // handled above
         case .smartAccount(let id, let accountId):
             let (clause, smartArgs) = smartFilter(id: id)
             clauses.append("\(clause) AND m.accountId = ?")
             args += smartArgs + [accountId]
+        }
+
+        switch scope {
+        case .allMessages, .role:
+            if let (condition, conditionArgs) = specialFilter(key: scope.key) {
+                clauses.append("(\(condition))")
+                args += conditionArgs
+            }
+        default: break
         }
 
         if let query = search.flatMap(Self.ftsQuery) {

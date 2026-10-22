@@ -261,6 +261,10 @@ enum Schema {
                 CREATE INDEX change_queue_account ON change_queue(accountId, id);
                 """)
         }
+        m.registerMigration("v14-special-conditions") { db in
+            // Conditions narrowing a special mailbox (Inbox, All Messages, ...), by its MessageScope key.
+            try db.execute(sql: "CREATE TABLE mailbox_condition (key TEXT PRIMARY KEY, condition TEXT NOT NULL)")
+        }
 
         return m
     }

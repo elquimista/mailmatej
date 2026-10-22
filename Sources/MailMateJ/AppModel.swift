@@ -63,6 +63,7 @@ final class AppModel {
             Task { @MainActor in AppModel.shared?.scheduleRefresh() }
         }
         myAddresses = (try? store.myAddresses()) ?? []
+        createDefaultSmartMailboxes()
         dockCounters = DockCounters(store: store)
         dockCounters?.update()
         #if DEBUG
@@ -574,6 +575,49 @@ final class AppModel {
     }
 
     // MARK: Smart mailboxes
+
+    /// Narrows a special mailbox (Inbox, All Messages, ...) by its Conditions tab.
+    func setSpecialCondition(_ condition: SmartCondition, key: String) {
+        do {
+            try store.setSpecialCondition(condition, key: key)
+            refreshNow()
+        } catch {
+            present(error)
+        }
+    }
+
+    private static let flaggedDefaultsKey = "FlaggedSmartMailboxID"
+
+    /// The Flagged smart mailbox MailMateJ offers by default, if it still exists.
+    var flaggedSmartMailboxID: Int64? {
+        let id = Int64(UserDefaults.standard.integer(forKey: Self.flaggedDefaultsKey))
+        return id != 0 && (try? store.smartMailboxes())?.contains(where: { $0.id == id }) == true ? id : nil
+    }
+
+    /// As MailMate: Flagged is an ordinary smart mailbox ("Message is Flagged"), made once, first among
+    /// the smart mailboxes; deleting or editing it sticks. It keeps the Flagged mailbox's submailboxes
+    /// (by account, by source), and a Dock counter that counted Flagged counts it.
+    private func createDefaultSmartMailboxes() {
+        guard UserDefaults.standard.object(forKey: Self.flaggedDefaultsKey) == nil else { return }
+        let old = SubmailboxSettings.settings(for: "unified.flagged")
+        var definition = SmartDefinition(
+            sources: SmartSources(scopes: []), condition: .compound(.all, [.rule(.status, .is, SmartStatus.flagged.rawValue)]),
+            icon: "flag")
+        definition.split.byAccount = old.splitsByAccount
+        if old.splitsBySource {
+            definition.split.byValue = true
+            definition.split.field = .mailbox
+        }
+        definition.split.unlessOnlyOne = old.unlessOnlyOne
+        guard let id = try? store.createSmartMailbox(name: "Flagged", parentId: nil) else { return }
+        try? store.updateSmartMailbox(id: id, definition: definition)
+        try? store.moveSmartMailboxFirst(id: id)
+        UserDefaults.standard.set(Int(id), forKey: Self.flaggedDefaultsKey)
+        let settings = CounterSettings.shared
+        for (corner, config) in settings.counters where config.source == MessageScope.flagged.key {
+            settings.counters[corner]?.source = MessageScope.smart(id).key
+        }
+    }
 
     /// Creates a smart mailbox (inside `parentId`, if given) and shows it at once.
     func createSmartMailbox(name: String, parentId: Int64?) -> Int64? {

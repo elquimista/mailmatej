@@ -456,6 +456,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private func storeDidChange() {
         sidebar.reload()
+        // The selected mailbox's scope can change in place (a special mailbox's conditions now narrow it).
+        if let current = sidebar.selectedNode?.scope, current != scope, current.base == scope.base { scope = current }
         reloadList(.dataChanged)
         if list.selectedID != nil || correspondent != nil {
             reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
@@ -1355,7 +1357,7 @@ extension MainWindowController {
     private func sequence(_ first: String, _ second: String) -> Bool {
         switch (first, second) {
         case ("g", "a"): return goTo("unified.all")
-        case ("g", "s"): return goTo("unified.flagged")
+        case ("g", "s"): return model.flaggedSmartMailboxID.map { goTo("smart.\($0)") } ?? false  // Flagged, if kept
         case ("g", "d"): return goTo("unified.drafts")
         case ("g", "i"): return goTo("unified.inbox")
         case ("g", "t"): return goTo("unified.sent")

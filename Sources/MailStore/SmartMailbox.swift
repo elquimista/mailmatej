@@ -25,11 +25,17 @@ public struct SmartDefinition: Codable, Hashable, Sendable {
     /// The root of the Conditions tab: All (or Any) of its rows; with no rows, every message matches.
     public var condition = SmartCondition.compound(.all, [])
     public var split = SmartSplit()
+    /// Its own icon (an SF Symbol name), when not the smart mailbox default: Flagged's flag.
+    public var icon: String?
 
-    public init(sources: SmartSources = SmartSources(), condition: SmartCondition = .compound(.all, []), split: SmartSplit = SmartSplit()) {
+    public init(
+        sources: SmartSources = SmartSources(), condition: SmartCondition = .compound(.all, []), split: SmartSplit = SmartSplit(),
+        icon: String? = nil
+    ) {
         self.sources = sources
         self.condition = condition
         self.split = split
+        self.icon = icon
     }
 
     public init(from decoder: Decoder) throws {
@@ -37,6 +43,7 @@ public struct SmartDefinition: Codable, Hashable, Sendable {
         sources = try c.decodeIfPresent(SmartSources.self, forKey: .sources) ?? SmartSources()
         condition = try c.decodeIfPresent(SmartCondition.self, forKey: .condition) ?? .compound(.all, [])
         split = try c.decodeIfPresent(SmartSplit.self, forKey: .split) ?? SmartSplit()
+        icon = try c.decodeIfPresent(String.self, forKey: .icon)
     }
 }
 
@@ -392,6 +399,11 @@ public enum SmartStatus: String, CaseIterable, Sendable {
 final class SmartCatalog: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [Int64: SmartMailboxRecord] = [:]
+    private var special: [String: SmartCondition] = [:]
+
+    /// The conditions narrowing special mailboxes, by scope key.
+    func setSpecial(_ conditions: [String: SmartCondition]) { lock.withLock { special = conditions } }
+    func special(_ key: String) -> SmartCondition? { lock.withLock { special[key] } }
 
     func set(_ list: [SmartMailboxRecord]) {
         lock.withLock { records = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) }) }
@@ -573,6 +585,12 @@ extension MailStore {
 }
 
 extension MessageScope {
+    /// The scope itself, or for a special mailbox's submailbox (`within`) the submailbox's own.
+    public var base: MessageScope {
+        if case .within(_, let child) = self { return child.base }
+        return self
+    }
+
     /// The smart mailbox this scope lists (itself, or one of its submailboxes).
     public var smartID: Int64? {
         switch self {
@@ -603,7 +621,51 @@ extension MailStore {
     public func refreshSmartCatalog() throws -> [SmartMailboxRecord] {
         let list = try smartMailboxes()
         smartCatalog.set(list)
+        let rows = try dbPool.read { db in try Row.fetchAll(db, sql: "SELECT key, condition FROM mailbox_condition") }
+        var special: [String: SmartCondition] = [:]
+        for row in rows {
+            let json: String = row["condition"]
+            if let condition = try? JSONDecoder().decode(SmartCondition.self, from: Data(json.utf8)) { special[row["key"]] = condition }
+        }
+        smartCatalog.setSpecial(special)
         return list
+    }
+
+    // MARK: Special mailboxes
+
+    /// The special mailboxes (MailMate's: Inbox, All Messages, Drafts, Sent, Deleted, Archive, Junk):
+    /// their messages come from the accounts, but their Conditions tab can narrow them.
+    public func specialCondition(key: String) -> SmartCondition { smartCatalog.special(key) ?? .compound(.all, []) }
+
+    public func setSpecialCondition(_ condition: SmartCondition, key: String) throws {
+        try dbPool.write { db in
+            if Self.isEmpty(condition) {
+                try db.execute(sql: "DELETE FROM mailbox_condition WHERE key = ?", arguments: [key])
+            } else {
+                let json = String(decoding: try JSONEncoder().encode(condition), as: UTF8.self)
+                try db.execute(sql: "INSERT OR REPLACE INTO mailbox_condition (key, condition) VALUES (?, ?)", arguments: [key, json])
+            }
+        }
+        try refreshSmartCatalog()
+    }
+
+    /// Whether a special mailbox's conditions narrow it (so its counts can't come from the server's).
+    public func hasSpecialCondition(key: String) -> Bool { smartCatalog.special(key).map { !Self.isEmpty($0) } ?? false }
+
+    /// A special mailbox's conditions as SQL, if it has any.
+    /// A condition naming its own mailbox ("Inbox: Mailbox is Inbox") reads it without its conditions.
+    func specialFilter(key: String) -> (String, [(any DatabaseValueConvertible)?])? {
+        guard let condition = smartCatalog.special(key), !Self.isEmpty(condition) else { return nil }
+        let thread = Thread.current.threadDictionary
+        var expanding = thread["MMJSpecialExpanding"] as? Set<String> ?? []
+        guard !expanding.contains(key) else { return nil }
+        expanding.insert(key)
+        thread["MMJSpecialExpanding"] = expanding
+        defer {
+            expanding.remove(key)
+            thread["MMJSpecialExpanding"] = expanding
+        }
+        return sql(condition)
     }
 
     /// A new smart mailbox at the end of its parent's children: a child starts from its parent's
@@ -622,6 +684,17 @@ extension MailStore {
         }
         try refreshSmartCatalog()
         return id
+    }
+
+    /// Puts a smart mailbox first among its siblings.
+    public func moveSmartMailboxFirst(id: Int64) throws {
+        try dbPool.write { db in
+            let parent = try Int64?.fetchOne(db, sql: "SELECT parentId FROM smart_mailbox WHERE id = ?", arguments: [id]) ?? nil
+            let lowest = try Int.fetchOne(
+                db, sql: "SELECT coalesce(min(sortOrder), 0) FROM smart_mailbox WHERE parentId IS ?", arguments: [parent]) ?? 0
+            try db.execute(sql: "UPDATE smart_mailbox SET sortOrder = ? WHERE id = ?", arguments: [lowest - 1, id])
+        }
+        try refreshSmartCatalog()
     }
 
     public func updateSmartMailbox(id: Int64, name: String? = nil, definition: SmartDefinition? = nil) throws {
