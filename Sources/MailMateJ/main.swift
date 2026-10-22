@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] else { return }
             Task {
                 try? await Task.sleep(for: .seconds(Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_DELAY"] ?? "4") ?? 4))
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIDEBAR_MOVE"] {
+                    windowController?.debugMoveSidebar(spec)
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT"] {
                     windowController?.debugSelectSidebar(key: key)  // e.g. account.dev-carol
                     try? await Task.sleep(for: .seconds(1))

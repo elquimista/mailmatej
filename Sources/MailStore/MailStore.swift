@@ -45,6 +45,15 @@ public final class MailStore: Sendable {
         try dbPool.read { db in try AccountRecord.order(Column("sortOrder"), Column("name")).fetchAll(db) }
     }
 
+    /// The accounts' order in the sidebar (dragged there), first to last.
+    public func setAccountOrder(_ ids: [String]) throws {
+        try dbPool.write { db in
+            for (index, id) in ids.enumerated() {
+                try db.execute(sql: "UPDATE account SET sortOrder = ? WHERE id = ?", arguments: [index, id])
+            }
+        }
+    }
+
     public func account(id: String) throws -> AccountRecord? {
         try dbPool.read { db in try AccountRecord.fetchOne(db, key: id) }
     }

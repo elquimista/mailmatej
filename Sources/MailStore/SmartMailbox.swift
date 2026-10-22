@@ -686,6 +686,26 @@ extension MailStore {
         return id
     }
 
+    /// Moves a smart mailbox (dragged in the sidebar) to `index` among `parentId`'s smart mailboxes
+    /// (the top level for nil). A smart mailbox can't go inside itself or one inside it.
+    public func moveSmartMailbox(id: Int64, toParent parentId: Int64?, index: Int) throws {
+        let all = try smartMailboxes()
+        var ancestor = parentId
+        while let current = ancestor {
+            if current == id { return }
+            ancestor = all.first { $0.id == current }?.parentId
+        }
+        var siblings = all.filter { $0.parentId == parentId && $0.id != id }.map(\.id)
+        siblings.insert(id, at: min(max(0, index), siblings.count))
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE smart_mailbox SET parentId = ? WHERE id = ?", arguments: [parentId, id])
+            for (order, sibling) in siblings.enumerated() {
+                try db.execute(sql: "UPDATE smart_mailbox SET sortOrder = ? WHERE id = ?", arguments: [order, sibling])
+            }
+        }
+        try refreshSmartCatalog()
+    }
+
     /// Puts a smart mailbox first among its siblings.
     public func moveSmartMailboxFirst(id: Int64) throws {
         try dbPool.write { db in

@@ -981,7 +981,7 @@ final class AppModel {
                     id: "dev-\(name)", name: "\(name.capitalized) (local)",
                     sessionURL: "http://localhost:\(ProcessInfo.processInfo.environment["MMJ_DEV_PORT"] ?? "18080")/.well-known/jmap",
                     username: "\(name)@mmj.test",
-                    authKind: .basic, sortOrder: 1000 + i,
+                    authKind: .basic, sortOrder: existing?.sortOrder ?? 1000 + i,  // keep a dragged order
                     // Keep what was set in the account window.
                     fullName: existing?.fullName ?? "", emailAddresses: existing?.emailAddresses ?? "")
                 try? store.save(record)  // Upsert, so a changed dev server URL is picked up.

@@ -99,6 +99,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.menu = menu
         outline.target = self
         outline.doubleAction = #selector(rowDoubleClicked(_:))
+        outline.registerForDraggedTypes([Self.dragType])
+        outline.setDraggingSourceOperationMask(.move, forLocal: true)
+        outline.draggingDestinationFeedbackStyle = .sourceList
         outline.onReturn = { [weak self] in
             guard let self, let node = selectedNode, canRename(node) else { return NSSound.beep() }
             beginRename(key: node.key, thenEdit: false)
@@ -260,6 +263,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         var debugInboxBadge: Int { find("unified.inbox", in: roots)?.badge ?? -1 }
 
+        /// Moves rows as drops would: "key>targetKey@index", several separated by ";".
+        func debugMove(_ spec: String) {
+            for step in spec.split(separator: ";") {
+                let parts = step.split(separator: ">").map(String.init)
+                guard parts.count == 2 else { continue }
+                let target = parts[1].split(separator: "@").map(String.init)
+                guard let node = find(parts[0], in: roots), let into = find(target[0], in: roots) else { continue }
+                move(node, into: into, at: Int(target.count > 1 ? target[1] : "-1") ?? -1)
+                reload()
+            }
+            NSLog("MMJ sidebar order: \(roots.map { "\($0.title): " + $0.children.map(\.title).joined(separator: ", ") }.joined(separator: " | "))")
+        }
+
         func debugSelect(key: String) {
             guard let node = find(key, in: roots) else { return }
             let row = outline.row(forItem: node)
@@ -342,6 +358,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         narrow(all, store: store, showsUnread: false)
         unified.children.append(all)
         unified.children += smartNodes(store: store, accounts: accountsByID)
+        unified.children = ordered(unified.children)
 
         let sources = SidebarNode(key: "header.sources", kind: .header, title: "Sources")
         let byAccount = Dictionary(grouping: mailboxes, by: \.accountId)
@@ -408,6 +425,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             node.children = valueNodes(account: account.id)
             return node
         }
+    }
+
+    // MARK: Order
+
+    /// The Mailboxes section's order, as dragged: special and smart mailboxes mixed, by key.
+    private static let orderDefaultsKey = "SidebarMailboxOrder"
+
+    /// `nodes` in the saved order; ones not in it (new smart mailboxes) keep their place after the
+    /// one before them.
+    private static func ordered(_ nodes: [SidebarNode]) -> [SidebarNode] {
+        let saved = UserDefaults.standard.stringArray(forKey: orderDefaultsKey) ?? []
+        guard !saved.isEmpty else { return nodes }
+        let rank = Dictionary(saved.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        var result = nodes.filter { rank[$0.key] != nil }.sorted { rank[$0.key]! < rank[$1.key]! }
+        for (index, node) in nodes.enumerated() where rank[node.key] == nil {
+            let before = nodes[..<index].last { rank[$0.key] != nil || result.contains($0) }
+            let at = before.flatMap { b in result.firstIndex { $0 === b } }.map { $0 + 1 } ?? result.count
+            result.insert(node, at: at)
+        }
+        return result
     }
 
     /// A special mailbox whose Conditions tab narrows it: its submailboxes show only what it shows, and
@@ -519,6 +556,91 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         case "trash": "trash"
         default: "folder"
         }
+    }
+
+    // MARK: Drag and drop
+
+    private static let dragType = NSPasteboard.PasteboardType("com.mailmatej.sidebar-node")
+
+    /// What can be dragged: the special and smart mailboxes (in Mailboxes) and the accounts (in Sources).
+    private func isDraggable(_ node: SidebarNode) -> Bool {
+        guard !isInEditor else { return false }
+        return (node.kind == .unified && roots.first?.children.contains { $0 === node } == true)
+            || node.kind == .smart || node.kind == .account
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let node = item as? SidebarNode, isDraggable(node) else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(node.key, forType: Self.dragType)
+        return item
+    }
+
+    private func dragged(_ info: NSDraggingInfo) -> SidebarNode? {
+        info.draggingPasteboard.string(forType: Self.dragType).flatMap { find($0, in: roots) }
+    }
+
+    /// Where a drop may go: special mailboxes anywhere among Mailboxes; smart mailboxes there too, or
+    /// into (onto, or among the smart mailboxes in) another smart mailbox, not one inside themselves;
+    /// accounts among the accounts.
+    func outlineView(
+        _ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int
+    ) -> NSDragOperation {
+        guard let node = dragged(info), let target = item as? SidebarNode else { return [] }
+        switch node.kind {
+        case .account:
+            return target.key == "header.sources" && index >= 0 ? .move : []
+        case .unified:
+            return target.key == "header.mailboxes" && index >= 0 ? .move : []
+        case .smart:
+            if target.key == "header.mailboxes" { return index >= 0 ? .move : [] }
+            guard target.kind == .smart, target !== node, !Self.contains(node, target) else { return [] }
+            let smartChildren = target.children.filter { $0.kind == .smart }.count
+            return index == -1 || index <= smartChildren ? .move : []
+        default:
+            return []
+        }
+    }
+
+    private static func contains(_ node: SidebarNode, _ other: SidebarNode) -> Bool {
+        node.children.contains { $0 === other || contains($0, other) }
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        guard let node = dragged(info), let target = item as? SidebarNode else { return false }
+        return move(node, into: target, at: index)
+    }
+
+    /// Drops `node` into `target` at child `index` (-1: onto it), saving the new order.
+    @discardableResult
+    private func move(_ node: SidebarNode, into target: SidebarNode, at index: Int) -> Bool {
+        switch node.kind {
+        case .account:
+            var ids = target.children.compactMap(\.accountId).filter { $0 != node.accountId }
+            let old = target.children.firstIndex { $0 === node } ?? Int.max
+            ids.insert(node.accountId ?? "", at: min(index > old ? index - 1 : index, ids.count))
+            try? model.store.setAccountOrder(ids)
+        case .unified, .smart where target.key == "header.mailboxes":
+            var keys = target.children.map(\.key).filter { $0 != node.key }
+            let old = target.children.firstIndex { $0 === node } ?? Int.max
+            keys.insert(node.key, at: min(index > old ? index - 1 : index, keys.count))
+            UserDefaults.standard.set(keys, forKey: Self.orderDefaultsKey)
+            if case .smart(let id)? = node.scope {
+                // Out of any smart mailbox it was in, placed as among the other top-level smart mailboxes.
+                let position = keys.prefix { $0 != node.key }.filter { $0.hasPrefix("smart.") }.count
+                try? model.store.moveSmartMailbox(id: id, toParent: nil, index: position)
+            }
+        case .smart:
+            guard case .smart(let id)? = node.scope, case .smart(let parent)? = target.scope else { return false }
+            let siblings = target.children.filter { $0.kind == .smart }
+            let old = siblings.firstIndex { $0 === node } ?? Int.max
+            let at = index == -1 ? siblings.count : (index > old ? index - 1 : index)
+            try? model.store.moveSmartMailbox(id: id, toParent: parent, index: at)
+        default:
+            return false
+        }
+        model.refreshNow()
+        return true
     }
 
     // MARK: Data source

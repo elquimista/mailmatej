@@ -217,6 +217,18 @@ import Testing
         #expect(!store.hasSpecialCondition(key: "role:inbox"))
     }
 
+    @Test func smartMailboxesMoveAndNest() throws {
+        let a = try store.createSmartMailbox(name: "A", parentId: nil)
+        let b = try store.createSmartMailbox(name: "B", parentId: nil)
+        let c = try store.createSmartMailbox(name: "C", parentId: nil)
+        try store.moveSmartMailbox(id: c, toParent: nil, index: 0)
+        #expect(try store.smartMailboxes().filter { $0.parentId == nil }.map(\.name) == ["C", "A", "B"])
+        try store.moveSmartMailbox(id: a, toParent: b, index: 0)  // into B
+        #expect(try store.smartMailboxes().first { $0.id == a }?.parentId == b)
+        try store.moveSmartMailbox(id: b, toParent: a, index: 0)  // not into its own child
+        #expect(try store.smartMailboxes().first { $0.id == b }?.parentId == nil)
+    }
+
     @Test func scopesAndOrdering() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100),
