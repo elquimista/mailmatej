@@ -12,11 +12,14 @@ public struct OutgoingFile: Sendable {
     public var name: String
     public var type: String
     public var data: Data
+    /// The Content-ID of a picture shown in the HTML body (`cid:` in it): sent inline, not as an attachment.
+    public var cid: String?
 
-    public init(name: String, type: String, data: Data) {
+    public init(name: String, type: String, data: Data, cid: String? = nil) {
         self.name = name
         self.type = type
         self.data = data
+        self.cid = cid
     }
 }
 
@@ -30,6 +33,8 @@ public struct OutgoingMessage: Sendable {
     public var replyTo: [EmailAddress] = []
     public var subject: String
     public var text: String
+    /// An HTML version of the text (composed Markdown), sent with it as alternatives.
+    public var html: String?
     /// Parts of other messages in the same account to attach (Forward), by blob id.
     public var attachments: [MessagePart]
     /// Files from disk to attach.

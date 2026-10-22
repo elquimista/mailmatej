@@ -11,6 +11,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        // Markdown parsing for composed messages (CommonMark + GitHub extensions, via cmark-gfm).
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.5.0"),
     ],
     targets: [
         // Protocol layer: JMAP core + mail. No UI, no storage.
@@ -21,7 +23,10 @@ let package = Package(
             dependencies: [.product(name: "GRDB", package: "GRDB.swift")]
         ),
         // Sync engines (JMAP now, IMAP later) writing into MailStore.
-        .target(name: "MailSync", dependencies: ["JMAPKit", "MailStore"]),
+        .target(
+            name: "MailSync",
+            dependencies: ["JMAPKit", "MailStore", .product(name: "Markdown", package: "swift-markdown")]
+        ),
         // The AppKit app.
         .executableTarget(name: "MailMateJ", dependencies: ["MailSync", "MailStore", "JMAPKit"]),
         // Headless sync tool for development and testing.

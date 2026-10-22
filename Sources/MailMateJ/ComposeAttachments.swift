@@ -324,9 +324,10 @@ private final class AttachmentTableView: NSTableView {
     }
 }
 
-/// The composer's text view: files dropped on it are attached, not inserted as paths, as in MailMate.
+/// The composer's text view: files dropped on it go to the composer (with the text position they were
+/// dropped at), not inserted as paths, as in MailMate.
 final class ComposeTextView: NSTextView {
-    var onDropFiles: ([URL]) -> Void = { _ in }
+    var onDropFiles: ([URL], Int) -> Void = { _, _ in }
 
     private func fileURLs(_ info: NSDraggingInfo) -> [URL] {
         (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
@@ -343,7 +344,7 @@ final class ComposeTextView: NSTextView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let urls = fileURLs(sender)
         guard !urls.isEmpty else { return super.performDragOperation(sender) }
-        onDropFiles(urls)
+        onDropFiles(urls, characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil)))
         return true
     }
 }

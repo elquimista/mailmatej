@@ -585,9 +585,36 @@ public actor JMAPAccountSync {
         var parts = message.attachments
         for file in message.files {
             let blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
-            parts.append(MessagePart(blobId: blobId, cid: nil, type: file.type, name: file.name, size: file.data.count))
+            parts.append(MessagePart(blobId: blobId, cid: file.cid, type: file.type, name: file.name, size: file.data.count))
         }
-        if !parts.isEmpty {
+        if let html = message.html {
+            // Built explicitly, as mail clients expect it (servers given text, HTML and attachments separately
+            // put inline pictures beside the HTML instead):
+            // mixed [ related [ alternative [text, html], inline pictures ], attachments ]
+            email.removeValue(forKey: "textBody")
+            email["bodyValues"] = ["text": ["value": .string(message.text)], "html": ["value": .string(html)]]
+            func leaf(_ part: MessagePart, inline: Bool) -> JSONValue {
+                var item: [String: JSONValue] = [
+                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": inline ? "inline" : "attachment",
+                ]
+                if let name = part.name { item["name"] = .string(name) }
+                if inline, let cid = part.cid { item["cid"] = .string(cid) }
+                return .object(item)
+            }
+            let shown = parts.filter { part in part.cid.map { html.contains("cid:" + $0) } ?? false }
+            let attached = parts.filter { part in !shown.contains { $0.blobId == part.blobId && $0.cid == part.cid } }
+            var body: JSONValue = [
+                "type": "multipart/alternative",
+                "subParts": [["partId": "text", "type": "text/plain"], ["partId": "html", "type": "text/html"]],
+            ]
+            if !shown.isEmpty {
+                body = ["type": "multipart/related", "subParts": .array([body] + shown.map { leaf($0, inline: true) })]
+            }
+            if !attached.isEmpty {
+                body = ["type": "multipart/mixed", "subParts": .array([body] + attached.map { leaf($0, inline: false) })]
+            }
+            email["bodyStructure"] = body
+        } else if !parts.isEmpty {
             email["attachments"] = .array(parts.map { part in
                 var item: [String: JSONValue] = [
                     "blobId": .string(part.blobId), "type": .string(part.type), "disposition": "attachment",

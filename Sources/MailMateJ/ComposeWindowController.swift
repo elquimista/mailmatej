@@ -44,6 +44,10 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     }()
     private let textView = ComposeTextView()
     private let attachmentsView = ComposeAttachmentsView()
+    private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var isMarkdown: Bool { formatPopup.indexOfSelectedItem == 0 }
+    /// The Content-IDs of pictures embedded in the Markdown (dropped on the text), by file.
+    private var contentIDs: [URL: String] = [:]
     /// The format bar's paperclip and total attachment size, shown while there are attachments.
     private let attachedSize = NSTextField(labelWithString: "")
     private let attachedClip = NSImageView()
@@ -150,7 +154,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         attachmentsView.onOpen = { [weak self] row in
             self?.withAttachmentFiles([row]) { urls in urls.forEach { NSWorkspace.shared.open($0) } }
         }
-        textView.onDropFiles = { [weak self] in self?.attach($0) }
+        textView.onDropFiles = { [weak self] urls, index in self?.drop(urls, at: index) }
 
         let content = FileDropView()
         content.onDropFiles = { [weak self] in self?.attach($0) }
@@ -220,9 +224,9 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         signature.addItem(withTitle: "Signature")
         signature.isEnabled = false  // Signatures aren't built yet.
 
-        let format = NSPopUpButton(frame: .zero, pullsDown: false)
-        format.addItems(withTitles: ["Plain Text"])
-        format.isEnabled = false  // Markdown isn't built yet; messages are plain text.
+        // MailMate's formats: Markdown (its default: sent as text plus the HTML it makes) or Plain Text.
+        formatPopup.addItems(withTitles: ["Markdown", "Plain Text"])
+        let format = formatPopup
 
         for popup in [signature, format] {
             popup.isBordered = false
@@ -486,6 +490,28 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// Adds files (from the open panel or dropped on the window). An empty subject takes the first file's
     /// name, as in MailMate.
+    /// Files dropped on the text: in Markdown, pictures are embedded where they're dropped, as MailMate does
+    /// (`![](cid:… "name")`, the picture sent inline with that Content-ID); anything else is attached.
+    private func drop(_ urls: [URL], at index: Int) {
+        guard isMarkdown else { return attach(urls) }
+        let pictures = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+        attach(urls)
+        guard !pictures.isEmpty else { return }
+        let domain = (fromPopup.selectedItem?.representedObject as? IdentityRecord)?.email.split(separator: "@").last
+            .map(String.init) ?? "mailmatej.local"
+        let references = pictures.map { url -> String in
+            let cid = contentIDs[url] ?? "\(UUID().uuidString)@\(domain)"
+            contentIDs[url] = cid
+            let title = url.lastPathComponent.replacingOccurrences(of: "\"", with: "'")
+            return "![](cid:\(cid) \"\(title)\")"
+        }
+        let text = references.joined(separator: "\n\n")
+        let location = min(index, (textView.string as NSString).length)
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+        textView.insertText(text, replacementRange: NSRange(location: location, length: 0))  // undoable, as typing
+        window?.makeFirstResponder(textView)
+    }
+
     private func attach(_ urls: [URL]) {
         let new = urls.filter { url in
             var isDirectory: ObjCBool = false
@@ -729,14 +755,17 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
             to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue, text: textView.string,
             attachments: setup.attachments, inReplyTo: setup.inReplyTo, references: setup.references)
+        if isMarkdown { message.html = MarkdownMail.html(textView.string) }
         message.replyTo = replyTo
         message.mailFrom = identity.envelopeEmail
         do {
+            let shown = isMarkdown ? MarkdownMail.imageContentIDs(textView.string) : []
             message.files = try files.map { url in
                 OutgoingFile(
                     name: url.lastPathComponent,
                     type: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
-                    data: try Data(contentsOf: url))
+                    data: try Data(contentsOf: url),
+                    cid: contentIDs[url].flatMap { shown.contains($0) ? $0 : nil })  // still in the text: inline
             }
         } catch {
             return fail("An attached file couldn’t be read.", detail: AppModel.describe(error))
@@ -846,6 +875,9 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             if let row = Int(env["MMJ_DEBUG_SELECT_ATTACHMENT"] ?? "") { c.attachmentsView.debugSelect(row) }
             if let subject = env["MMJ_DEBUG_SUBJECT"] { c.subjectField.stringValue = subject }
             if let body = env["MMJ_DEBUG_BODY"] { c.textView.string = body + c.textView.string }
+            if let path = env["MMJ_DEBUG_DROP"] {  // a picture dropped at the end of the text
+                c.drop([URL(fileURLWithPath: path)], at: (c.textView.string as NSString).length)
+            }
             NSLog("MMJ compose: from=\(c.fromPopup.titleOfSelectedItem ?? "-") to=\(c.toField.addresses) cc=\(c.ccField.addresses) subject=\(c.subjectField.stringValue) attachments=\(c.setup.attachments.count) inReplyTo=\(c.setup.inReplyTo) references=\(c.setup.references)\n---\n\(c.textView.string)\n---")
             c.updateTitle()
             c.window?.makeFirstResponder(c.textView)
