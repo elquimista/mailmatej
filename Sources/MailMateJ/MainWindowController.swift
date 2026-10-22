@@ -805,7 +805,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         window?.makeFirstResponder(searchField)
     }
 
+    private func clearSearch() {
+        searchField?.stringValue = ""
+        if window?.firstResponder === searchField?.currentEditor() { window?.makeFirstResponder(list.tableView) }
+        search = ""
+        reloadList(.searchChanged)
+    }
+
     @objc private func searchChanged(_ sender: NSSearchField) {
+        guard sender.stringValue != search else { return }
         search = sender.stringValue
         reloadList(.searchChanged)
     }
@@ -871,7 +879,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             item.searchField.placeholderString = "Search All Messages"
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
-            item.searchField.sendsWholeSearchString = false
+            // As MailMate: searches on Return (and when cleared), not on every keystroke.
+            item.searchField.sendsWholeSearchString = true
             item.preferredWidthForSearchField = 320
             searchField = item.searchField
             return item
@@ -1342,6 +1351,17 @@ extension MainWindowController {
             guard modifiers == .command, event.keyCode == 36 || event.keyCode == 76 else { return false }
             compose.sendMessage(nil)
             return true
+        }
+        // Escape clears the search from anywhere in the window, as in MailMate (other text fields keep it
+        // for cancelling their own editing).
+        if let window, event.window === window, window.attachedSheet == nil, modifiers.isEmpty, event.keyCode == 53,
+            !search.isEmpty
+        {
+            let editor = window.firstResponder as? NSText
+            if editor == nil || editor?.delegate === searchField {
+                clearSearch()
+                return true
+            }
         }
         guard let window, event.window === window, window.attachedSheet == nil,
             !(window.firstResponder is NSText), modifiers.isSubset(of: [.control])
