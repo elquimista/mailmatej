@@ -781,6 +781,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if node.kind != .header {
             let color = menu.addItem(withTitle: "Color", action: nil, keyEquivalent: "")
             color.submenu = colorMenu(for: node)
+            let symbol = menu.addItem(withTitle: "Symbol", action: nil, keyEquivalent: "")
+            symbol.submenu = symbolMenu(for: node)
             menu.addItem(.separator())
         }
         if node.kind == .smart {
@@ -887,6 +889,57 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         MailboxColors.set(.custom(panel.color), for: key)
     }
 
+    // MARK: Symbol
+
+    /// MailMate's Symbol submenu: Default (the mailbox's own symbol) and Custom…, then its choices.
+    /// Default is checked while nothing was chosen, and so is the choice showing (Custom… for one from
+    /// the Symbols panel).
+    private func symbolMenu(for node: SidebarNode) -> NSMenu {
+        let menu = NSMenu()
+        let chosen = MailboxSymbols.symbol(for: node.key)
+        let showing = chosen ?? node.symbol
+        func add(_ title: String, _ symbol: String, _ choice: String?, on: Bool) {
+            let item = menu.addItem(withTitle: title, action: #selector(symbolChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.representedObject = SymbolChoice(node: node, symbol: choice)
+            item.state = on ? .on : .off
+        }
+        add("Default", node.symbol, nil, on: chosen == nil)
+        let custom = menu.addItem(withTitle: "Custom…", action: #selector(customSymbolClicked(_:)), keyEquivalent: "")
+        custom.target = self
+        // A symbol chosen in the Symbols panel shows (and is checked) here, as in MailMate.
+        let isCustom = chosen.map { symbol in !MailboxSymbols.presets.contains { $0.symbol == symbol } } ?? false
+        custom.image = NSImage(systemSymbolName: isCustom ? showing : "questionmark.square.dashed", accessibilityDescription: nil)
+        custom.state = isCustom ? .on : .off
+        custom.representedObject = node
+        menu.addItem(.separator())
+        for (title, symbol) in MailboxSymbols.presets {
+            add(title, symbol, symbol, on: symbol == showing)
+        }
+        return menu
+    }
+
+    private final class SymbolChoice: NSObject {
+        let node: SidebarNode
+        /// nil: Default.
+        let symbol: String?
+        init(node: SidebarNode, symbol: String?) {
+            self.node = node
+            self.symbol = symbol
+        }
+    }
+
+    @objc private func symbolChosen(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SymbolChoice else { return }
+        MailboxSymbols.set(choice.symbol, for: choice.node.key)
+    }
+
+    @objc private func customSymbolClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        SymbolPanel.show(key: node.key, defaultSymbol: node.symbol)
+    }
+
     @objc private func editMailboxClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }
         editMailbox(node)
@@ -937,6 +990,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     #if DEBUG
         func debugNewSmartMailbox(inside key: String) { newSmartMailbox(inside: find(key, in: roots)) }
+
+        /// Logs the Symbol submenu for `key` ([x] when checked) and writes its first items' icons, side
+        /// by side, to `path`.
+        func debugSymbolMenu(key: String, path: String) {
+            guard let node = find(key, in: roots) else { return NSLog("MMJ symbol menu: no \(key)") }
+            let items = symbolMenu(for: node).items.filter { !$0.isSeparatorItem }
+            NSLog("MMJ symbol menu: " + items.map { ($0.state == .on ? "[x] " : "") + $0.title }.joined(separator: ", "))
+            let strip = NSImage(size: NSSize(width: 4 * 24, height: 20), flipped: false) { _ in
+                NSColor.white.set()
+                for (i, item) in items.prefix(4).enumerated() { item.image?.draw(in: NSRect(x: i * 24 + 2, y: 2, width: 16, height: 16)) }
+                return true
+            }
+            if let tiff = strip.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+        }
     #endif
 
     @objc private func renameClicked(_ sender: NSMenuItem) {

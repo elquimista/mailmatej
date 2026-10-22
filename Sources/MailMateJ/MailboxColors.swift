@@ -153,7 +153,8 @@ enum MailboxColors {
     /// Puts a mailbox's icon in its color: `image` gets the multicolor configuration where needed,
     /// `fallback` is the tint when no color was chosen.
     static func style(_ imageView: NSImageView, key: String, symbol: String, fallback: NSColor) {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let image = NSImage(systemSymbolName: MailboxSymbols.symbol(for: key) ?? symbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         switch color(for: key) {
         case .multicolor?:
             imageView.image = image?.withSymbolConfiguration(multicolor)
@@ -231,4 +232,40 @@ enum MailboxColors {
         NSBezierPath(ovalIn: NSRect(x: center.x - dot / 2, y: center.y - dot / 2, width: dot, height: dot)).fill()
         return true
     }
+}
+
+/// Mailbox symbols chosen with MailMate's Symbol menu, by sidebar key, kept in the app's preferences.
+enum MailboxSymbols {
+    private static let defaultsKey = "MailboxSymbols"
+
+    /// MailMate's Symbol menu choices, in its order: the menu title and the SF Symbol.
+    static let presets: [(title: String, symbol: String)] = [
+        ("Calendar", "calendar"), ("Calendar with Badge", "calendar.badge.exclamationmark"),
+        ("Envelope", "envelope"), ("Envelope with Badge", "envelope.badge"), ("Flag", "flag"),
+        ("Folder", "folder"), ("Folder for Person", "folder.badge.person.crop"),
+        ("List", "list.bullet.rectangle"), ("Star", "star"), ("Tag", "tag"),
+    ]
+
+    /// The symbol chosen for a mailbox, or nil for its default.
+    static func symbol(for key: String) -> String? {
+        UserDefaults.standard.dictionary(forKey: defaultsKey)?[key] as? String
+    }
+
+    /// nil goes back to the mailbox's default symbol.
+    static func set(_ symbol: String?, for key: String) {
+        var all = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
+        all[key] = symbol
+        UserDefaults.standard.set(all, forKey: defaultsKey)
+        NotificationCenter.default.post(name: MailboxColors.didChange, object: nil)
+    }
+
+    /// Every SF Symbol name this system has, A to Z, as MailMate's Symbols panel lists them.
+    nonisolated(unsafe) static let allNames: [String] = {
+        let url = URL(fileURLWithPath: "/System/Library/CoreServices/CoreGlyphs.bundle/Contents/Resources/name_availability.plist")
+        guard let data = try? Data(contentsOf: url),
+            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            let symbols = plist["symbols"] as? [String: Any]
+        else { return presets.map(\.symbol).sorted() }
+        return symbols.keys.sorted()
+    }()
 }

@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugMoveSidebar(spec)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_SYMBOL_MENU"] {
+                    windowController?.debugSymbolMenu(key: key, path: path.replacingOccurrences(of: ".png", with: "-symbols.png"))
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_NEW_SMART_IN"] {
                     windowController?.debugNewSmartMailbox(inside: key)  // as its New Smart Mailbox does
                     try? await Task.sleep(for: .seconds(1))
@@ -320,6 +323,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.addAccount(nil)
                     try? await Task.sleep(for: .seconds(1.5))
                     target = windowController?.accountSettings?.window
+                }
+                // MMJ_DEBUG_SYMBOL_PANEL=<sidebar key>: Symbol ▸ Custom… on it (=key|list: with its list open,
+                // captured with the list as <snapshot>-list.png).
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SYMBOL_PANEL"] {
+                    let parts = spec.split(separator: "|").map(String.init)
+                    SymbolPanel.show(key: parts[0], defaultSymbol: "folder")
+                    try? await Task.sleep(for: .seconds(1))
+                    target = NSApp.windows.first { $0 is SymbolPanel } ?? target
+                    if parts.count > 1, let frame = target?.frame, let screen = NSScreen.screens.first {
+                        NSApp.activate()
+                        SymbolPanel.debugOpenList()
+                        try? await Task.sleep(for: .seconds(1))
+                        let rect = "\(Int(frame.minX)),\(Int(screen.frame.maxY - frame.maxY)),\(Int(frame.width)),\(Int(frame.height) + 220)"
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-R\(rect)", path.replacingOccurrences(of: ".png", with: "-list.png")]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                    }
                 }
                 writeSnapshot(of: target, to: path)
                 // MMJ_SNAPSHOT_SCREEN: also a real screen capture of that window (<snapshot>-screen.png).
