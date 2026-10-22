@@ -247,6 +247,8 @@ import Testing
         #expect(inbox.count == 2)
         #expect(try store.rows(ids: [inbox[0]]).first?.fromEmail == "c@x.com")  // newest first
         #expect(try store.messageIDs(scope: .allMessages).count == 2)  // trash excluded
+        #expect(try store.messageIDs(scope: .everything).count == 3)  // All / Junk / Deleted: trash too
+        #expect(MessageScope(key: MessageScope.everything.key) == .everything)
         #expect(try store.messageIDs(scope: .flagged).count == 1)
         let bySubject = try store.messageIDs(scope: .role("inbox"), sort: MessageSort(key: .from, ascending: true))
         #expect(try store.newestMessageID(scope: .role("inbox")) == bySubject.last)  // c@x.com, newest

@@ -977,6 +977,8 @@ public final class MailStore: Sendable {
                 NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
                             WHERE mm.messageId = m.id AND b.role IN ('trash', 'junk'))
                 """)
+        case .everything:
+            clauses.append("1")
         case .role(let role):
             clauses.append("""
                 m.id IN (SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
@@ -1026,7 +1028,7 @@ public final class MailStore: Sendable {
         }
 
         switch scope {
-        case .allMessages, .role:
+        case .allMessages, .everything, .role:
             if let (condition, conditionArgs) = specialFilter(key: scope.key) {
                 clauses.append("(\(condition))")
                 args += conditionArgs

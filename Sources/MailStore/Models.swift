@@ -282,6 +282,8 @@ public struct MessagePart: Sendable, Hashable {
 public indirect enum MessageScope: Hashable, Sendable {
     /// Everything except Trash and Junk, across all accounts.
     case allMessages
+    /// Everything, Junk and Deleted Messages included (MailMate's "All / Junk / Deleted").
+    case everything
     /// Unified mailbox by JMAP role ("inbox", "sent", "archive", ...), across all accounts.
     case role(String)
     case flagged
@@ -307,6 +309,7 @@ public indirect enum MessageScope: Hashable, Sendable {
     public var key: String {
         switch self {
         case .allMessages: "all"
+        case .everything: "everything"
         case .flagged: "flagged"
         case .role(let role): "role:\(role)"
         case .mailbox(let id): "mailbox:\(id)"
@@ -327,6 +330,7 @@ public indirect enum MessageScope: Hashable, Sendable {
         let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
         switch (parts.first, parts.count) {
         case ("all", 1): self = .allMessages
+        case ("everything", 1): self = .everything
         case ("flagged", 1): self = .flagged
         case ("role", 2): self = .role(parts[1])
         case ("mailbox", 2): if let id = Int64(parts[1]) { self = .mailbox(id) } else { return nil }

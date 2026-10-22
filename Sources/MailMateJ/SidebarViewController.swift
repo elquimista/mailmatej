@@ -283,11 +283,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             NSLog("MMJ sidebar order: \(roots.map { "\($0.title): " + $0.children.map(\.title).joined(separator: ", ") }.joined(separator: " | "))")
         }
 
-        func debugSelect(key: String) {
-            guard let node = find(key, in: roots) else { return }
-            let row = outline.row(forItem: node)
-            if row >= 0 { outline.selectRowIndexes([row], byExtendingSelection: false) }
-        }
+        func debugSelect(key: String) { select(key: key) }
     #endif
 
     /// Selects a row by key (as a click would), opening the rows above it. Returns whether it exists.
@@ -363,6 +359,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "envelope", scope: .allMessages)  // MailMate's
         all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
         narrow(all, store: store, showsUnread: false)
+        // MailMate's special mailbox for everything, Junk and Deleted Messages included.
+        let everything = SidebarNode(
+            key: "unified.everything", kind: .unified, title: "All / Junk / Deleted", symbol: "envelope", scope: .everything)
+        all.children.insert(everything, at: 0)
         unified.children.append(all)
         unified.children += smartNodes(store: store, accounts: accountsByID)
         unified.children = ordered(unified.children)
