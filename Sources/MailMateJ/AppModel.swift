@@ -612,7 +612,8 @@ final class AppModel {
         guard UserDefaults.standard.object(forKey: Self.flaggedDefaultsKey) == nil else { return }
         let old = SubmailboxSettings.settings(for: "unified.flagged")
         var definition = SmartDefinition(
-            sources: SmartSources(scopes: []), condition: .compound(.all, [.rule(.status, .is, SmartStatus.flagged.rawValue)]),
+            sources: SmartSources(scopes: [MessageScope.allMessages.key]),
+            condition: .compound(.all, [.rule(.status, .is, SmartStatus.flagged.rawValue)]),
             icon: "flag")
         definition.split.byAccount = old.splitsByAccount
         if old.splitsBySource {

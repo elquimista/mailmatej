@@ -423,9 +423,10 @@ extension MailStore {
     func smartFilter(id: Int64, visited: Set<Int64> = []) -> (String, [(any DatabaseValueConvertible)?]) {
         guard let smart = smartCatalog[id], !visited.contains(id) else { return ("0", []) }
         let inside = visited.union([id])
-        // No mailboxes added (MailMate's new smart mailbox) means All Messages.
+        // No mailboxes added (MailMate's new smart mailbox) means no messages: "All Messages" is a choice
+        // of its own. With "Include messages in any submailboxes" its submailboxes' still show.
         let (sources, sourceArgs) = Self.isEmpty(smart.definition.sources.root)
-            ? filterParts(scope: .allMessages, search: nil) : sql(smart.definition.sources.root, visited: inside)
+            ? ("0", []) : sql(smart.definition.sources.root, visited: inside)
         let (condition, conditionArgs) = sql(smart.definition.condition, visited: inside)
         var clause = "(\(sources)) AND (\(condition))"
         var args = sourceArgs + conditionArgs

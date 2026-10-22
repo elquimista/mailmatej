@@ -1,3 +1,4 @@
+import Foundation
 import GRDB
 
 enum Schema {
@@ -264,6 +265,19 @@ enum Schema {
         m.registerMigration("v14-special-conditions") { db in
             // Conditions narrowing a special mailbox (Inbox, All Messages, ...), by its MessageScope key.
             try db.execute(sql: "CREATE TABLE mailbox_condition (key TEXT PRIMARY KEY, condition TEXT NOT NULL)")
+        }
+        m.registerMigration("v15-empty-sources-mean-none") { db in
+            // No mailboxes used to mean All Messages; now it means none. Smart mailboxes that relied on it
+            // (Flagged among them) get All Messages, so they show what they did.
+            for row in try Row.fetchAll(db, sql: "SELECT id, definition FROM smart_mailbox") {
+                let json: String = row["definition"]
+                guard var definition = try? JSONDecoder().decode(SmartDefinition.self, from: Data(json.utf8)),
+                    MailStore.isEmpty(definition.sources.root)
+                else { continue }
+                definition.sources.root = .compound(.any, [.rule(.mailbox, .is, MessageScope.allMessages.key)])
+                let updated = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
+                try db.execute(sql: "UPDATE smart_mailbox SET definition = ? WHERE id = ?", arguments: [updated, row["id"] as Int64])
+            }
         }
 
         return m

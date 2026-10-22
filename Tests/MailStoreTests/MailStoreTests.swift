@@ -217,6 +217,14 @@ import Testing
         #expect(!store.hasSpecialCondition(key: "role:inbox"))
     }
 
+    @Test func noMailboxesMeansNoMessages() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        let id = try store.createSmartMailbox(name: "New", parentId: nil)  // MailMate's new one: no mailboxes
+        #expect(try store.messageIDs(scope: .smart(id)).isEmpty)
+        try store.updateSmartMailbox(id: id, definition: SmartDefinition(sources: SmartSources(scopes: ["all"])))
+        #expect(try store.messageIDs(scope: .smart(id)).count == 1)
+    }
+
     @Test func smartMailboxesMoveAndNest() throws {
         let a = try store.createSmartMailbox(name: "A", parentId: nil)
         let b = try store.createSmartMailbox(name: "B", parentId: nil)
