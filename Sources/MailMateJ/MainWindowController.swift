@@ -257,6 +257,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         for messageList in [list, correspondence] {
             messageList.onShowInFinder = { [weak self] id in self?.model.showInFinder(messageId: id, window: self?.window) }
+            messageList.addContextItems = { [weak self] menu, ids in self?.addMessageItems(to: menu, for: ids) }
         }
         correspondence.onSelectionChange = { [weak self] id in
             guard let self, let id else { return }
@@ -612,6 +613,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugLoadRemote() { messageView.debugLoadRemote() }
 
         func debugRender(html: String) { messageView.debugRender(html: html) }
+
+        func debugContextMenu(row: Int, run: String?) -> [String] {
+            let id = row < list.ids.count ? list.ids[row] : -1
+            return list.debugContextMenu(row: row, run: run) + ["message \(id)"]
+        }
 
         func debugHoverLink(containing text: String) async { await messageView.debugHoverLink(containing: text) }
 
@@ -1069,6 +1075,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     @objc func archiveMessages(_ sender: Any?) { moveAway(.archive) }
     @objc func junkMessages(_ sender: Any?) { moveAway(.junk) }
+    @objc func notJunkMessages(_ sender: Any?) { moveAway(.notJunk) }
     @objc func deleteMessages(_ sender: Any?) { moveAway(.delete) }
     @objc func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
     @objc func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
@@ -1082,6 +1089,20 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     @objc func toggleFlag(_ sender: Any?) {
         let ids = targetIDs
         perform(allFlagged(ids) ? .unflag : .flag, on: ids)
+    }
+
+    /// MailMate's message context menu: Move to Archive, Move to Junk (Move Out of Junk when every
+    /// message is in Junk) and Move to Mailbox…, acting on the selection.
+    private func addMessageItems(to menu: NSMenu, for ids: [Int64]) {
+        let inJunk = (try? model.store.messageIDs(ids, inRole: "junk")) ?? []
+        let allJunk = !ids.isEmpty && ids.allSatisfy(inJunk.contains)
+        for (title, action) in [
+            ("Move to Archive", #selector(archiveMessages(_:))),
+            allJunk ? ("Move Out of Junk", #selector(notJunkMessages(_:))) : ("Move to Junk", #selector(junkMessages(_:))),
+            ("Move to Mailbox…", #selector(moveToMailbox(_:))),
+        ] {
+            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+        }
     }
 
     /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
@@ -1158,19 +1179,21 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
         case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
         case .keyword, .copy, .deletePermanently: break  // only rules do these
-        case .archive, .junk, .delete, .move, .moveToRole, .restoreMailboxes:
+        case .archive, .junk, .notJunk, .delete, .move, .moveToRole, .restoreMailboxes:
             let inTrash: Set<Int64>
             if case .delete = action { inTrash = (try? model.store.messageIDs(ids, inRole: "trash")) ?? [] } else { inTrash = [] }
             let movable = ids.filter { !inTrash.contains($0) }  // Those deleted for good stay deleted.
             guard !movable.isEmpty, let saved = try? model.store.mailboxIDs(messageIds: movable) else { return }
-            var clearJunk = false
-            if case .junk = action { clearJunk = true }
+            var junk: Bool?
+            if case .junk = action { junk = false }
+            if case .notJunk = action { junk = true }
             undo.registerUndo(withTarget: self) { target in
-                target.perform(.restoreMailboxes(saved, clearJunk: clearJunk), on: movable)
+                target.perform(.restoreMailboxes(saved, junk: junk), on: movable)
             }
             switch action {
             case .archive: undo.setActionName("Archive")
             case .junk: undo.setActionName("Mark as Junk")
+            case .notJunk: undo.setActionName("Move Out of Junk")
             case .delete: undo.setActionName("Delete")
             default: undo.setActionName("Move")
             }

@@ -229,6 +229,8 @@ final class AppModel {
 
     enum MessageAction {
         case archive, junk, delete, markRead, markUnread, flag, unflag
+        /// Move Out of Junk: into the Inbox, no longer marked as junk.
+        case notJunk
         /// A rule's Set/Remove Tag/Keyword.
         case keyword(String, Bool)
         /// A rule's Copy to Mailbox (same account: the message is in that mailbox too).
@@ -239,8 +241,9 @@ final class AppModel {
         case move(toMailboxId: Int64)
         /// Into each message's account's mailbox with this role (a Unified mailbox, such as Sent Messages).
         case moveToRole(String)
-        /// Each message back into the mailboxes it was in (undo of a move).
-        case restoreMailboxes([Int64: [Int64]], clearJunk: Bool)
+        /// Each message back into the mailboxes it was in (undo of a move), and back to junk (true) or
+        /// not junk (false) when the move had changed that.
+        case restoreMailboxes([Int64: [Int64]], junk: Bool?)
     }
 
     /// Archives, marks as junk, deletes, marks or flags messages: here at once, then on the server.
@@ -321,6 +324,11 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: "junk")
             }
             try move(refs, to: junk, extra: ["keywords/$junk": .bool(true), "keywords/$notjunk": .null])
+        case .notJunk:
+            guard let inbox = try store.mailbox(accountId: accountId, role: "inbox") else {
+                throw MessageActionError.noMailbox(role: "inbox")
+            }
+            try move(refs, to: inbox, extra: ["keywords/$junk": .null, "keywords/$notjunk": .bool(true)])
         case .move(let mailboxId):
             guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
                 throw MessageActionError.noMailbox(role: "")
@@ -331,7 +339,7 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: role)
             }
             try move(refs, to: target)
-        case .restoreMailboxes(let saved, let clearJunk):
+        case .restoreMailboxes(let saved, let junk):
             let remote = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.id, $0.remoteId) })
             // One request per set of mailboxes (usually all the same).
             for (boxes, group) in Dictionary(grouping: refs, by: { Set(saved[$0.id] ?? []) }) where !boxes.isEmpty {
@@ -339,7 +347,10 @@ final class AppModel {
                 var patch: [String: JSONValue] = [
                     "mailboxIds": .object(Dictionary(uniqueKeysWithValues: boxes.compactMap { remote[$0] }.map { ($0, JSONValue.bool(true)) }))
                 ]
-                if clearJunk { patch["keywords/$junk"] = .null }
+                if let junk {
+                    patch["keywords/$junk"] = junk ? .bool(true) : .null
+                    patch["keywords/$notjunk"] = junk ? .null : .bool(true)
+                }
                 work.updates.append((group.map(\.remoteId), patch))
             }
         case .delete:

@@ -83,6 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_CONTEXT_MENU"] {
+                    // "row" or "row:Item title": logs the row's context menu, then runs that item.
+                    let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+                    let items = windowController?.debugContextMenu(row: Int(parts[0]) ?? 0, run: parts.count > 1 ? parts[1] : nil)
+                    NSLog("MMJ context menu: \(items ?? [])")
+                    try? await Task.sleep(for: .seconds(3))
+                }
                 if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_HOVER_LINK"] {
                     await windowController?.debugHoverLink(containing: text)
                     try? await Task.sleep(for: .milliseconds(500))

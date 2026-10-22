@@ -477,14 +477,39 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     // MARK: Context menu
 
+    /// Adds the window's message actions for these messages to the context menu.
+    var addContextItems: ((NSMenu, [Int64]) -> Void)?
+
     func menuNeedsUpdate(_ menu: NSMenu) {
+        fillContextMenu(menu, row: tableView.clickedRow)
+    }
+
+    private func fillContextMenu(_ menu: NSMenu, row: Int) {
         menu.removeAllItems()
-        let row = tableView.clickedRow
         guard row >= 0, row < ids.count else { return }
+        // The menu acts on the selection: a right-click outside it selects the clicked message first.
+        tableView.window?.makeFirstResponder(tableView)
+        if !tableView.selectedRowIndexes.contains(row) {
+            tableView.selectRowIndexes([row], byExtendingSelection: false)
+        }
+        addContextItems?(menu, selectedIDs)
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
         let item = menu.addItem(withTitle: "Show in Finder", action: #selector(showInFinderClicked(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = ids[row]
     }
+
+    #if DEBUG
+        /// The context menu of a row as a right-click builds it; runs the item titled `run`, if any.
+        func debugContextMenu(row: Int, run: String?) -> [String] {
+            let menu = NSMenu()
+            fillContextMenu(menu, row: row)
+            if let run, let item = menu.items.first(where: { $0.title == run }), let action = item.action {
+                NSApp.sendAction(action, to: item.target, from: item)
+            }
+            return menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
+        }
+    #endif
 
     @objc private func showInFinderClicked(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? Int64 else { return }
