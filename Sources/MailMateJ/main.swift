@@ -265,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_HOVER"] != nil { MailboxEditorWindowController.debugHoverTabs() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] != nil { MailboxEditorWindowController.debugDumpMailboxMenu() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_DUP_UNGROUP"] != nil { MailboxEditorWindowController.debugDuplicateAndUngroup() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_REMOVE_ROW"] != nil { MailboxEditorWindowController.debugRemoveFirstRow() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_SPLIT_MENU"] != nil { MailboxEditorWindowController.debugDumpSplitMenu() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_PRESS_ADD"] != nil { MailboxEditorWindowController.debugPressAddRule() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_ADD_RULE"] != nil {

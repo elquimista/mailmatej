@@ -529,11 +529,10 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         layoutRows()
     }
 
-    /// The Mailboxes tab keeps at least one mailbox and its Any/All row; Conditions can clear its root.
+    /// Any mailbox can go, the last one too (no mailboxes, no messages), but the Mailboxes tab keeps
+    /// its Any/All row; Conditions can clear its root.
     private func canRemove(_ row: Row) -> Bool {
-        if kind == .conditions { return true }
-        guard let parent = row.parent else { return false }
-        return parent.children.count > 1 || parent.parent != nil
+        kind == .conditions || row.parent != nil
     }
 
     /// MailMate's colours as they show on screen (measured at 1x): rows 53, separators 82, border 86.
@@ -762,6 +761,12 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             NSLog("MMJ after ⊕:\n\(describe(tree()!))")
             if let group = root.children.first(where: { $0.isCompound }) { minusClicked(group.minus) }
             NSLog("MMJ after ⊖ group:\n\(describe(tree()!))")
+        }
+
+        /// Clicks ⊖ on the first row inside the root, if it shows one.
+        func debugRemoveFirstRow() {
+            guard let row = root.children.first, !row.minus.isHidden else { return NSLog("MMJ remove: no ⊖") }
+            minusClicked(row.minus)
         }
 
         /// Clicks ⊕ on the root row (with ⌥ for a group) and types `text` into the new row's value.
