@@ -353,6 +353,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
             if role == "inbox" || role == "junk" { node.badge = counts.unreadByRole[role] ?? 0 }
             node.children = submailboxes(of: node, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+            // Smart mailboxes made inside it, before its submailboxes.
+            node.children = smartNodes(store: store, accounts: accountsByID, inside: MessageScope.role(role).key) + node.children
             narrow(node, store: store, showsUnread: role == "inbox" || role == "junk")
             unified.children.append(node)
         }
@@ -362,7 +364,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         // MailMate's special mailbox for everything, Junk and Deleted Messages included.
         let everything = SidebarNode(
             key: "unified.everything", kind: .unified, title: "All / Junk / Deleted", symbol: "envelope", scope: .everything)
-        all.children.insert(everything, at: 0)
+        everything.children = smartNodes(store: store, accounts: accountsByID, inside: MessageScope.everything.key)
+        all.children = [everything] + smartNodes(store: store, accounts: accountsByID, inside: MessageScope.allMessages.key) + all.children
         unified.children.append(all)
         unified.children += smartNodes(store: store, accounts: accountsByID)
         unified.children = ordered(unified.children)
@@ -384,11 +387,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Smart mailboxes, nested as the user arranged them, each with its unread count and the
     /// submailboxes of its Submailboxes tab.
-    static func smartNodes(store: MailStore, accounts: [String: AccountRecord]) -> [SidebarNode] {
+    /// The top-level ones, or with `inside` those inside that special mailbox (by its scope key).
+    static func smartNodes(store: MailStore, accounts: [String: AccountRecord], inside special: String? = nil) -> [SidebarNode] {
         let smart = (try? store.smartMailboxes()) ?? []
         let byParent = Dictionary(grouping: smart, by: \.parentId)
         func nodes(_ parent: Int64?) -> [SidebarNode] {
-            (byParent[parent] ?? []).map { record in
+            (byParent[parent] ?? []).filter { parent != nil || $0.parentKey == special }.map { record in
                 let node = SidebarNode(
                     key: "smart.\(record.id)", kind: .smart, title: record.name, symbol: record.definition.icon ?? smartSymbol,
                     scope: .smart(record.id))
@@ -601,9 +605,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return target.key == "header.mailboxes" && index >= 0 ? .move : []
         case .smart:
             if target.key == "header.mailboxes" { return index >= 0 ? .move : [] }
-            guard target.kind == .smart, target !== node, !Self.contains(node, target) else { return [] }
+            guard target.kind == .smart || target.kind == .unified, target !== node, !Self.contains(node, target) else { return [] }
+            // Among its smart mailboxes, which follow any built-in rows (All / Junk / Deleted).
+            let lead = target.children.prefix { $0.kind != .smart }.count
             let smartChildren = target.children.filter { $0.kind == .smart }.count
-            return index == -1 || index <= smartChildren ? .move : []
+            return index == -1 || (index >= lead && index <= lead + smartChildren) ? .move : []
         default:
             return []
         }
@@ -638,11 +644,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 try? model.store.moveSmartMailbox(id: id, toParent: nil, index: position)
             }
         case .smart:
-            guard case .smart(let id)? = node.scope, case .smart(let parent)? = target.scope else { return false }
+            guard case .smart(let id)? = node.scope, let targetScope = target.scope else { return false }
             let siblings = target.children.filter { $0.kind == .smart }
+            let lead = target.children.prefix { $0.kind != .smart }.count
             let old = siblings.firstIndex { $0 === node } ?? Int.max
-            let at = index == -1 ? siblings.count : (index > old ? index - 1 : index)
-            try? model.store.moveSmartMailbox(id: id, toParent: parent, index: at)
+            let position = index - lead
+            let at = index == -1 ? siblings.count : (position > old ? position - 1 : position)
+            if case .smart(let parent) = targetScope {
+                try? model.store.moveSmartMailbox(id: id, toParent: parent, index: at)
+            } else {  // into a special mailbox
+                try? model.store.moveSmartMailbox(id: id, toParent: nil, parentKey: targetScope.key, index: at)
+            }
         default:
             return false
         }
@@ -907,16 +919,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// MailMate's New Smart Mailbox: "Untitled", inside the given smart mailbox (else at the top level),
     /// selected, with its editor open at once on Conditions.
+    /// On a special mailbox (MailMate's New Smart Mailbox on All Messages) it goes inside that one,
+    /// starting from its messages.
     func newSmartMailbox(inside node: SidebarNode?) {
-        var parentId: Int64?
+        var parentId: Int64?, parentKey: String?
         if case .smart(let id)? = node?.scope { parentId = id }
-        guard let id = model.createSmartMailbox(name: "Untitled", parentId: parentId) else { return }
+        if node?.kind == .unified { parentKey = node?.scope?.key }
+        guard let id = model.createSmartMailbox(name: "Untitled", parentId: parentId, parentKey: parentKey) else { return }
         reload()
-        if let parent = node, parent.kind == .smart { outline.expandItem(parent) }
+        if let parent = node, parent.kind == .smart || parent.kind == .unified, let fresh = find(parent.key, in: roots) {
+            outline.expandItem(fresh)
+        }
         let key = "smart.\(id)"
         guard select(key: key) else { return }
         MailboxEditorWindowController.show(key: key, model: model, over: view.window, tab: .conditions)
     }
+
+    #if DEBUG
+        func debugNewSmartMailbox(inside key: String) { newSmartMailbox(inside: find(key, in: roots)) }
+    #endif
 
     @objc private func renameClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }

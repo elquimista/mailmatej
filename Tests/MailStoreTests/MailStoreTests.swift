@@ -225,6 +225,18 @@ import Testing
         #expect(try store.messageIDs(scope: .smart(id)).count == 1)
     }
 
+    @Test func smartMailboxesInsideSpecialOnes() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", box: "tr", at: 200)])
+        let id = try store.createSmartMailbox(name: "In All", parentId: nil, parentKey: "all")
+        let record = try #require(try store.smartMailboxes().first { $0.id == id })
+        #expect(record.parentKey == "all" && record.definition.sources.scopes == ["all"])  // starts from All Messages
+        #expect(try store.messageIDs(scope: .smart(id)).count == 1)  // not the one in Deleted Messages
+        try store.moveSmartMailbox(id: id, toParent: nil, parentKey: "role:inbox", index: 0)
+        #expect(try store.smartMailboxes().first { $0.id == id }?.parentKey == "role:inbox")
+        try store.moveSmartMailbox(id: id, toParent: nil, index: 0)  // back to the top level
+        #expect(try store.smartMailboxes().first { $0.id == id }?.parentKey == nil)
+    }
+
     @Test func smartMailboxesMoveAndNest() throws {
         let a = try store.createSmartMailbox(name: "A", parentId: nil)
         let b = try store.createSmartMailbox(name: "B", parentId: nil)

@@ -7,13 +7,16 @@ import GRDB
 public struct SmartMailboxRecord: Hashable, Sendable {
     public var id: Int64
     public var parentId: Int64?
+    /// The special mailbox it's inside ("all", "role:inbox"), for a top-level smart mailbox.
+    public var parentKey: String?
     public var name: String
     public var sortOrder: Int
     public var definition: SmartDefinition
 
-    public init(id: Int64, parentId: Int64?, name: String, sortOrder: Int, definition: SmartDefinition) {
+    public init(id: Int64, parentId: Int64?, parentKey: String? = nil, name: String, sortOrder: Int, definition: SmartDefinition) {
         self.id = id
         self.parentId = parentId
+        self.parentKey = parentKey
         self.name = name
         self.sortOrder = sortOrder
         self.definition = definition
@@ -606,12 +609,12 @@ extension MessageScope {
 extension MailStore {
     public func smartMailboxes() throws -> [SmartMailboxRecord] {
         try dbPool.read { db in
-            try Row.fetchAll(db, sql: "SELECT id, parentId, name, sortOrder, definition FROM smart_mailbox ORDER BY sortOrder, id")
+            try Row.fetchAll(db, sql: "SELECT id, parentId, parentKey, name, sortOrder, definition FROM smart_mailbox ORDER BY sortOrder, id")
                 .map { row in
                     let json: String = row["definition"]
                     let definition = (try? JSONDecoder().decode(SmartDefinition.self, from: Data(json.utf8))) ?? SmartDefinition()
                     return SmartMailboxRecord(
-                        id: row["id"], parentId: row["parentId"], name: row["name"], sortOrder: row["sortOrder"],
+                        id: row["id"], parentId: row["parentId"], parentKey: row["parentKey"], name: row["name"], sortOrder: row["sortOrder"],
                         definition: definition)
                 }
         }
@@ -671,16 +674,21 @@ extension MailStore {
 
     /// A new smart mailbox at the end of its parent's children: a child starts from its parent's
     /// messages, a top-level one with no mailboxes added (all messages), as MailMate's.
-    public func createSmartMailbox(name: String, parentId: Int64?) throws -> Int64 {
+    /// Inside a special mailbox (`parentKey`, as MailMate's New Smart Mailbox on All Messages), it
+    /// starts from that mailbox's messages.
+    public func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil) throws -> Int64 {
         var definition = SmartDefinition(sources: SmartSources(scopes: []))
         if let parentId { definition.sources = SmartSources(scopes: [MessageScope.smart(parentId).key]) }
+        if parentId == nil, let parentKey { definition.sources = SmartSources(scopes: [parentKey]) }
+        let key = parentId == nil ? parentKey : nil
         let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
         let id = try dbPool.write { db -> Int64 in
             let order = try Int.fetchOne(
-                db, sql: "SELECT coalesce(max(sortOrder), -1) + 1 FROM smart_mailbox WHERE parentId IS ?", arguments: [parentId]) ?? 0
+                db, sql: "SELECT coalesce(max(sortOrder), -1) + 1 FROM smart_mailbox WHERE parentId IS ? AND parentKey IS ?",
+                arguments: [parentId, key]) ?? 0
             try db.execute(
-                sql: "INSERT INTO smart_mailbox (parentId, name, definition, sortOrder) VALUES (?, ?, ?, ?)",
-                arguments: [parentId, name, json, order])
+                sql: "INSERT INTO smart_mailbox (parentId, parentKey, name, definition, sortOrder) VALUES (?, ?, ?, ?, ?)",
+                arguments: [parentId, key, name, json, order])
             return db.lastInsertedRowID
         }
         try refreshSmartCatalog()
@@ -689,17 +697,19 @@ extension MailStore {
 
     /// Moves a smart mailbox (dragged in the sidebar) to `index` among `parentId`'s smart mailboxes
     /// (the top level for nil). A smart mailbox can't go inside itself or one inside it.
-    public func moveSmartMailbox(id: Int64, toParent parentId: Int64?, index: Int) throws {
+    /// `parentKey` puts it inside a special mailbox instead (for a top-level one).
+    public func moveSmartMailbox(id: Int64, toParent parentId: Int64?, parentKey: String? = nil, index: Int) throws {
         let all = try smartMailboxes()
         var ancestor = parentId
         while let current = ancestor {
             if current == id { return }
             ancestor = all.first { $0.id == current }?.parentId
         }
-        var siblings = all.filter { $0.parentId == parentId && $0.id != id }.map(\.id)
+        let key = parentId == nil ? parentKey : nil
+        var siblings = all.filter { $0.parentId == parentId && $0.parentKey == key && $0.id != id }.map(\.id)
         siblings.insert(id, at: min(max(0, index), siblings.count))
         try dbPool.write { db in
-            try db.execute(sql: "UPDATE smart_mailbox SET parentId = ? WHERE id = ?", arguments: [parentId, id])
+            try db.execute(sql: "UPDATE smart_mailbox SET parentId = ?, parentKey = ? WHERE id = ?", arguments: [parentId, key, id])
             for (order, sibling) in siblings.enumerated() {
                 try db.execute(sql: "UPDATE smart_mailbox SET sortOrder = ? WHERE id = ?", arguments: [order, sibling])
             }

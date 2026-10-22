@@ -279,6 +279,11 @@ enum Schema {
                 try db.execute(sql: "UPDATE smart_mailbox SET definition = ? WHERE id = ?", arguments: [updated, row["id"] as Int64])
             }
         }
+        m.registerMigration("v16-smart-in-special") { db in
+            // A top-level smart mailbox can live inside a special mailbox (MailMate's New Smart Mailbox on
+            // All Messages): that mailbox's MessageScope key.
+            try db.execute(sql: "ALTER TABLE smart_mailbox ADD COLUMN parentKey TEXT")
+        }
 
         return m
     }

@@ -632,9 +632,9 @@ final class AppModel {
     }
 
     /// Creates a smart mailbox (inside `parentId`, if given) and shows it at once.
-    func createSmartMailbox(name: String, parentId: Int64?) -> Int64? {
+    func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil) -> Int64? {
         do {
-            let id = try store.createSmartMailbox(name: name, parentId: parentId)
+            let id = try store.createSmartMailbox(name: name, parentId: parentId, parentKey: parentKey)
             refreshNow()
             return id
         } catch {

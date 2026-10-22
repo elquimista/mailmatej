@@ -42,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugMoveSidebar(spec)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_NEW_SMART_IN"] {
+                    windowController?.debugNewSmartMailbox(inside: key)  // as its New Smart Mailbox does
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT"] {
                     windowController?.debugSelectSidebar(key: key)  // e.g. account.dev-carol
                     try? await Task.sleep(for: .seconds(1))
