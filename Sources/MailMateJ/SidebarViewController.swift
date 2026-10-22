@@ -219,7 +219,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return
         }
         let previous = selectedNode?.key
-        let selectedKey = previous ?? "unified.inbox"
+        // At launch, the mailbox chosen last time (the main window's sidebar), else Inbox.
+        let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : nil
+        let selectedKey = previous ?? launchKey ?? "unified.inbox"
         roots = fresh
         isReloading = true
         defer { isReloading = false }
@@ -229,10 +231,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.expandItem(root)
             expandRemembered(root.children)
         }
-        // Inbox at launch; after the selected mailbox is deleted, nothing (as MailMate does).
+        // The last mailbox (or Inbox) at launch; after the selected mailbox is deleted, nothing (as MailMate does).
         if let node = find(selectedKey, in: roots) ?? (previous == nil ? find("unified.inbox", in: roots) : nil) {
-            let row = outline.row(forItem: node)
-            if row >= 0 { outline.selectRowIndexes([row], byExtendingSelection: false) }
+            var row = outline.row(forItem: node)
+            if row < 0 {  // inside a collapsed row: open its ancestors
+                for ancestor in ancestors(of: node) { outline.expandItem(ancestor) }
+                row = outline.row(forItem: node)
+            }
+            if row >= 0 {
+                outline.selectRowIndexes([row], byExtendingSelection: false)
+                if previous == nil {  // at launch, show where it is (once the rows above it are in)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let selected = selectedNode else { return }
+                        let row = outline.row(forItem: selected)
+                        if row >= 0 { outline.scrollRowToVisible(row) }
+                    }
+                }
+            }
         } else {
             outline.deselectAll(nil)
         }
@@ -293,14 +308,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         var row = outline.row(forItem: node)
         if row < 0 {
             // Inside a collapsed row: open its ancestors.
-            func path(_ nodes: [SidebarNode], _ trail: [SidebarNode]) -> [SidebarNode]? {
-                for n in nodes {
-                    if n === node { return trail }
-                    if let found = path(n.children, trail + [n]) { return found }
-                }
-                return nil
-            }
-            for ancestor in path(roots, []) ?? [] { outline.expandItem(ancestor) }
+            for ancestor in ancestors(of: node) { outline.expandItem(ancestor) }
             row = outline.row(forItem: node)
         }
         guard row >= 0 else { return false }
@@ -732,8 +740,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !suppressSelection, let node = selectedNode else { return }
+        guard let node = selectedNode else { return }
+        if remembersSelection { UserDefaults.standard.set(node.key, forKey: Self.lastMailboxDefaultsKey) }
+        guard !suppressSelection else { return }
         onSelect?(node)
+    }
+
+    /// Whether the selected mailbox is kept for the next launch (the main window's sidebar).
+    var remembersSelection = false
+    private static let lastMailboxDefaultsKey = "LastMailbox"
+
+    /// The rows above a node, outermost first.
+    private func ancestors(of node: SidebarNode) -> [SidebarNode] {
+        func path(_ nodes: [SidebarNode], _ trail: [SidebarNode]) -> [SidebarNode]? {
+            for n in nodes {
+                if n === node { return trail }
+                if let found = path(n.children, trail + [n]) { return found }
+            }
+            return nil
+        }
+        return path(roots, []) ?? []
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {

@@ -773,7 +773,10 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
             to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue, text: textView.string,
             attachments: setup.attachments, inReplyTo: setup.inReplyTo, references: setup.references)
-        if isMarkdown { message.html = MarkdownMail.html(textView.string) }
+        if isMarkdown {
+            message.html = MarkdownMail.html(textView.string)
+            message.text = MarkdownMail.plainText(textView.string)  // pictures as [ "name" ], as MailMate
+        }
         message.replyTo = replyTo
         message.mailFrom = identity.envelopeEmail
         do {

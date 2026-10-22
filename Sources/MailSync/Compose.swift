@@ -190,9 +190,10 @@ public enum Compose {
         return "On \(date), at \(time), \(who) wrote:"
     }
 
-    /// Prefixes every line with "> " (">" before an empty or already quoted line).
+    /// Prefixes every line with "> " (">" before an empty or already quoted line). An embedded picture's
+    /// Markdown (`![](cid:…)`, from older MailMateJ messages) is quoted as `[ "name" ]`, as MailMate does.
     public static func quote(_ text: String) -> String {
-        var lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        var lines = MarkdownMail.plainText(text).replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
         return lines.map { $0.isEmpty || $0.hasPrefix(">") ? ">" + $0 : "> " + $0 }.joined(separator: "\n")
     }

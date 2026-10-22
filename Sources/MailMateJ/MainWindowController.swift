@@ -67,6 +67,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     init(model: AppModel) {
         self.model = model
         sidebar = SidebarViewController(model: model)
+        sidebar.remembersSelection = true
         list = MessageListViewController(
             store: model.store, columns: [.unread, .flag, .from, .subject, .date, .source, .attachment],
             autosaveName: "MainMessageList")
