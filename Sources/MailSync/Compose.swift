@@ -262,6 +262,29 @@ public enum Compose {
         return halves.count == 2 && !halves[0].isEmpty && !halves[1].isEmpty
     }
 
+    /// Addresses completing what's typed in an address field, as MailMate offers them: those whose
+    /// address or any word of whose name starts with it, formatted "Name <address>". Those that start
+    /// with what's typed come first (only such a one can be completed inline); within each group, people
+    /// written to most first, then the most seen. Addresses already in the field are left out.
+    public static func completions(
+        for typed: String, in known: [MailStore.KnownAddress], excluding: Set<String> = [], limit: Int = 10
+    ) -> [String] {
+        let query = typed.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return [] }
+        let matches = known.filter { address in
+            guard !excluding.contains(address.email) else { return false }
+            if address.email.hasPrefix(query) { return true }
+            guard let name = address.name?.lowercased() else { return false }
+            return name.hasPrefix(query)
+                || name.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "." }).contains { $0.hasPrefix(query) }
+        }
+        let ranked = matches
+            .sorted { ($0.sentTo, $0.seen, $1.email) > ($1.sentTo, $1.seen, $0.email) }
+            .map { format(EmailAddress(name: $0.name, email: $0.email)) }
+        let leading = ranked.filter { $0.lowercased().hasPrefix(query) }
+        return Array((leading + ranked.filter { !$0.lowercased().hasPrefix(query) }).prefix(limit))
+    }
+
     /// "Name <a@b>, c@d", for an address field.
     public static func format(_ addresses: [EmailAddress]) -> String {
         addresses.map(format).joined(separator: ", ")

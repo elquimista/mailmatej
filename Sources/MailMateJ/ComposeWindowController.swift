@@ -65,6 +65,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     static func show(model: AppModel, setup: Setup) {
+        model.refreshKnownAddresses(ifOlderThan: 600)
         let controller = ComposeWindowController(model: model, setup: setup)
         open.insert(controller)
         controller.showWindow(nil)
@@ -347,6 +348,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             row.addSubview(bezel)
             row.addSubview(clip)
             clip.addSubview(tokens)
+            (tokens as? AddressTokenField)?.completionAnchor = bezel
             let inset = Self.tokenInset
             NSLayoutConstraint.activate(constraints + [
                 bezel.topAnchor.constraint(equalTo: row.topAnchor),
@@ -628,7 +630,23 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         window?.title = subject.isEmpty ? "New Message" : subject
     }
 
+    /// Address completion, as MailMate's (see AddressCompleter); AppKit's own is off.
+    private lazy var completer = AddressCompleter { [weak self] typed, present in
+        guard let self else { return [] }
+        return Compose.completions(for: typed, in: model.knownAddresses, excluding: present)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard let field = control as? AddressTokenField else { return false }
+        return completer.handle(commandSelector, in: field)
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        if notification.object is AddressTokenField { completer.close() }
+    }
+
     func controlTextDidChange(_ notification: Notification) {
+        if let field = notification.object as? AddressTokenField { completer.textChanged(in: field) }
         if (notification.object as? NSTextField) === subjectField { updateTitle() }
         updateEdited()
     }
@@ -875,6 +893,38 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             if let row = Int(env["MMJ_DEBUG_SELECT_ATTACHMENT"] ?? "") { c.attachmentsView.debugSelect(row) }
             if let subject = env["MMJ_DEBUG_SUBJECT"] { c.subjectField.stringValue = subject }
             if let body = env["MMJ_DEBUG_BODY"] { c.textView.string = body + c.textView.string }
+            if let typed = env["MMJ_DEBUG_TYPE_TO"], let window = c.window {
+                // Keys typed into To as a user would; then what the field shows (inline completion selected).
+                NSApp.activate()
+                window.makeKeyAndOrderFront(nil)
+                window.makeFirstResponder(c.toField)
+                for (i, char) in typed.enumerated() {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3 * Double(i)) {
+                        let (key, code): (String, UInt16) = char == "⇥" ? ("\t", 48) : (String(char), 0)  // ⇥: Tab
+                        if let event = NSEvent.keyEvent(
+                            with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                            windowNumber: window.windowNumber, context: nil, characters: key,
+                            charactersIgnoringModifiers: key, isARepeat: false, keyCode: code)
+                        {
+                            NSApp.postEvent(event, atStart: false)
+                        }
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3 * Double(typed.count) + 1.5) {
+                    let editor = c.toField.currentEditor() as? NSTextView
+                    if let path = env["MMJ_SNAPSHOT"] {  // the window and the list, captured as the screen shows them
+                        for (number, suffix) in [(window.windowNumber, "-compose"), (c.completer.debugPanelNumber ?? 0, "-list")] where number > 0 {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: suffix + ".png")]
+                            try? capture.run()
+                            capture.waitUntilExit()
+                        }
+                    }
+                    NSLog("MMJ completion: field shows \"\(editor?.string ?? "-")\" selected \(editor.map { NSStringFromRange($0.selectedRange()) } ?? "-"); \(c.completer.debugState); To holds \(c.toField.addresses.map(Compose.format))")
+                }
+                return
+            }
             if let path = env["MMJ_DEBUG_DROP"] {  // a picture dropped at the end of the text
                 c.drop([URL(fileURLWithPath: path)], at: (c.textView.string as NSString).length)
             }
@@ -899,6 +949,9 @@ private let quoteColor = NSColor.systemBlue
 
 /// An address field: one token per address, kept as "Name <email>" strings.
 final class AddressTokenField: NSTokenField {
+    /// The view the completion list hangs under (the field's outline).
+    weak var completionAnchor: NSView?
+
     var addresses: [EmailAddress] {
         get {
             ((objectValue as? [Any]) ?? []).compactMap { $0 as? String }.flatMap(Compose.parseAddresses)

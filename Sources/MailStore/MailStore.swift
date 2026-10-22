@@ -151,6 +151,49 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// An address the user has mail with, for completing addresses while composing.
+    public struct KnownAddress: Sendable, Equatable {
+        public var email: String
+        /// Its most common display name, if any.
+        public var name: String?
+        /// How often it appears in mail, and how often the user sent to it.
+        public var seen: Int
+        public var sentTo: Int
+
+        public init(email: String, name: String?, seen: Int, sentTo: Int) {
+            self.email = email
+            self.name = name
+            self.seen = seen
+            self.sentTo = sentTo
+        }
+    }
+
+    /// Every address in stored mail, with its most common name and counts (see `KnownAddress`).
+    public func knownAddresses() throws -> [KnownAddress] {
+        try dbPool.read { db in
+            let sentIDs = "SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId WHERE b.role = 'sent'"
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT a.email AS email, COUNT(*) AS seen,
+                       SUM(a.role IN (\(AddressRole.to.rawValue), \(AddressRole.cc.rawValue), \(AddressRole.bcc.rawValue))
+                           AND a.messageId IN (\(sentIDs))) AS sentTo
+                FROM address a WHERE a.email LIKE '%_@_%' GROUP BY a.email
+                """)
+            let names = try Row.fetchAll(db, sql: """
+                SELECT email, name, COUNT(*) AS uses FROM address
+                WHERE name IS NOT NULL AND name <> '' AND email LIKE '%_@_%' GROUP BY email, name
+                """)
+            var bestName: [String: (name: String, uses: Int)] = [:]
+            for row in names {
+                let email: String = row["email"], name: String = row["name"], uses: Int = row["uses"]
+                if uses > bestName[email]?.uses ?? 0 { bestName[email] = (name, uses) }
+            }
+            return rows.map { row in
+                let email: String = row["email"]
+                return KnownAddress(email: email, name: bestName[email]?.name, seen: row["seen"], sentTo: row["sentTo"] ?? 0)
+            }
+        }
+    }
+
     /// All of the user's own addresses, across accounts.
     public func myAddresses() throws -> Set<String> {
         try dbPool.read { db in

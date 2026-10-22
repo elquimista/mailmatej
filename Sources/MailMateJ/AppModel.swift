@@ -30,6 +30,21 @@ final class AppModel {
     let coordinator: SyncCoordinator
     private(set) var statuses: [String: AccountSyncStatus] = [:]
     private(set) var myAddresses: Set<String> = []
+    /// Addresses from stored mail, for completing address fields (loaded in the background).
+    private(set) var knownAddresses: [MailStore.KnownAddress] = []
+    private var knownAddressesLoaded: Date?
+
+    /// Reloads `knownAddresses` in the background (at launch, after sending, and when a compose window
+    /// opens with them over 10 minutes old).
+    func refreshKnownAddresses(ifOlderThan age: TimeInterval = 0) {
+        if let loaded = knownAddressesLoaded, Date().timeIntervalSince(loaded) < age { return }
+        knownAddressesLoaded = Date()
+        let store = self.store
+        Task.detached(priority: .utility) {
+            guard let known = try? store.knownAddresses() else { return }
+            await MainActor.run { AppModel.shared?.knownAddresses = known }
+        }
+    }
     private var observation: StoreObservation?
     private var refreshScheduled = false
     private(set) var dockCounters: DockCounters?
@@ -63,6 +78,7 @@ final class AppModel {
             Task { @MainActor in AppModel.shared?.scheduleRefresh() }
         }
         myAddresses = (try? store.myAddresses()) ?? []
+        refreshKnownAddresses()
         createDefaultSmartMailboxes()
         dockCounters = DockCounters(store: store)
         dockCounters?.update()
@@ -815,6 +831,7 @@ final class AppModel {
     /// Sends, then marks the original answered (or forwarded), here and on the server.
     func send(_ message: OutgoingMessage, accountId: String, original: (id: Int64, keyword: String)?) async throws {
         try await coordinator.send(accountId: accountId, message)
+        refreshKnownAddresses()  // its recipients now count as written to
         guard let original, let ref = try store.refs(ids: [original.id]).first else { return }
         try store.setKeyword(original.keyword, true, messageIds: [ref.id])
         try? await coordinator.update(

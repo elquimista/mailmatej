@@ -141,3 +141,23 @@ import Testing
         #expect(m.recipients == ["bob@x.test", "carol@x.test", "dave@x.test"])
     }
 }
+
+@Test func addressCompletionsRankPeopleWrittenTo() {
+    typealias K = MailStore.KnownAddress
+    let known = [
+        K(email: "ellie@elliemcgary.com", name: nil, seen: 40, sentTo: 9),
+        K(email: "ellie@vastekgroup.com", name: "Ellie", seen: 3, sentTo: 0),
+        K(email: "elliemcgary1@gmail.com", name: "Ellie McGary", seen: 12, sentTo: 1),
+        K(email: "mcgary@example.com", name: "Dan McGary", seen: 50, sentTo: 0),
+        K(email: "bob@example.com", name: "Bob", seen: 99, sentTo: 20),
+    ]
+    #expect(Compose.completions(for: "ellie", in: known)
+        == ["ellie@elliemcgary.com", "Ellie McGary <elliemcgary1@gmail.com>", "Ellie <ellie@vastekgroup.com>"])
+    #expect(Compose.completions(for: "McG", in: known) == ["Ellie McGary <elliemcgary1@gmail.com>", "Dan McGary <mcgary@example.com>"])
+    // What starts with the typing comes first, even when a word match is written to more.
+    let ashley = K(email: "aelliott@trovasearch.com", name: "Ashley Elliott", seen: 80, sentTo: 30)
+    #expect(Compose.completions(for: "e", in: known + [ashley]).first == "ellie@elliemcgary.com")
+    #expect(Compose.completions(for: "e", in: known + [ashley]).last == "Ashley Elliott <aelliott@trovasearch.com>")
+    #expect(Compose.completions(for: "ellie", in: known, excluding: ["ellie@elliemcgary.com"]).count == 2)
+    #expect(Compose.completions(for: " ", in: known).isEmpty)
+}
