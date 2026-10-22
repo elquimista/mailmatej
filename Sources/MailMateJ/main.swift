@@ -209,6 +209,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_QUIT"] != nil,
+                    let window = ComposeWindowController.debugSnapshotFrontmost()
+                {
+                    // Quits as ⌘Q would, then captures the compose window (its prompt, if any).
+                    NSApp.terminate(nil)
+                    try? await Task.sleep(for: .seconds(1.5))
+                    let capture = Process()
+                    capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    capture.arguments = ["-x", "-o", "-l\(window.windowNumber)", path.replacingOccurrences(of: ".png", with: "-quit.png")]
+                    try? capture.run()
+                    capture.waitUntilExit()
+                    NSLog("MMJ quit: still running, prompt shown=\(window.attachedSheet != nil)")
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENTS"] != nil {
                     await windowController?.debugCheckAttachments()
                     try? await Task.sleep(for: .seconds(2))
@@ -373,6 +386,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Unsent messages aren't discarded silently: quitting asks first.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let asked = ComposeWindowController.confirmQuit { quit in sender.reply(toApplicationShouldTerminate: quit) }
+        return asked ? .terminateLater : .terminateNow
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { windowController?.showWindow(nil) }

@@ -2,6 +2,8 @@ import AppKit
 import JMAPKit
 import MailStore
 import MailSync
+import QuickLookThumbnailing
+import Quartz
 import UniformTypeIdentifiers
 
 /// A compose window: From, To, Cc, Bcc, Subject and a plain-text body. Sends through JMAP.
@@ -27,7 +29,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     private static var open: Set<ComposeWindowController> = []
 
     private let model: AppModel
-    private let setup: Setup
+    private var setup: Setup
     private let fromPopup = NSPopUpButton()
     private let toField = AddressTokenField()
     private let ccField = AddressTokenField()
@@ -40,8 +42,13 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         field.isBezeled = true
         return field
     }()
-    private let textView = NSTextView()
-    private let attachedLabel = NSTextField(wrappingLabelWithString: "")
+    private let textView = ComposeTextView()
+    private let attachmentsView = ComposeAttachmentsView()
+    /// The format bar's paperclip and total attachment size, shown while there are attachments.
+    private let attachedSize = NSTextField(labelWithString: "")
+    private let attachedClip = NSImageView()
+    /// Files shown in Quick Look.
+    private var previewURLs: [URL] = []
     private var rows: [HeaderRow: NSView] = [:]
     private var files: [URL] = []
     private var sending = false
@@ -132,21 +139,22 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        // The bottom bar: darker than the window, under a separator, with a centered add button.
+        // The bottom bar: darker than the window, under a separator: the attachments, or an add button.
         let bottomBar = BottomBar()
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         let bottomLine = Self.separator()
-        let addButton = NSButton()
-        addButton.isBordered = false
-        addButton.image = Self.addImage
-        addButton.contentTintColor = NSColor.labelColor.withAlphaComponent(0.55)
-        addButton.toolTip = "Attach Files…"
-        addButton.target = self
-        addButton.action = #selector(attachFiles(_:))
-        addButton.translatesAutoresizingMaskIntoConstraints = false
+        attachmentsView.onAdd = { [weak self] in self?.attachFiles(nil) }
+        attachmentsView.onRemove = { [weak self] in self?.removeAttachments($0) }
+        attachmentsView.onQuickLook = { [weak self] in self?.quickLookAttachments($0) }
+        attachmentsView.onToggleSize = { [weak self] in self?.toggleSizeKind(nil) }
+        attachmentsView.onOpen = { [weak self] row in
+            self?.withAttachmentFiles([row]) { urls in urls.forEach { NSWorkspace.shared.open($0) } }
+        }
+        textView.onDropFiles = { [weak self] in self?.attach($0) }
 
-        let content = NSView()
-        for view in [formatBar, formatLine, header, headerLine, scroll, bottomLine, bottomBar, addButton] {
+        let content = FileDropView()
+        content.onDropFiles = { [weak self] in self?.attach($0) }
+        for view in [formatBar, formatLine, header, headerLine, scroll, bottomLine, bottomBar, attachmentsView] {
             content.addSubview(view)
         }
         NSLayoutConstraint.activate([
@@ -173,29 +181,15 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             bottomBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            bottomBar.heightAnchor.constraint(equalToConstant: 45),
-            addButton.centerXAnchor.constraint(equalTo: bottomBar.centerXAnchor),
-            addButton.centerYAnchor.constraint(equalTo: bottomBar.centerYAnchor, constant: 1),
+            attachmentsView.topAnchor.constraint(equalTo: bottomBar.topAnchor),
+            attachmentsView.bottomAnchor.constraint(equalTo: bottomBar.bottomAnchor),
+            attachmentsView.leadingAnchor.constraint(equalTo: bottomBar.leadingAnchor),
+            attachmentsView.trailingAnchor.constraint(equalTo: bottomBar.trailingAnchor),
         ])
         let controller = NSViewController()
         controller.view = content
         window?.contentViewController = controller
     }
-
-    /// MailMate's add button: a 17 pt disc with a thin cross cut out of it (template, tinted by the button).
-    private static let addImage: NSImage = {
-        let image = NSImage(size: NSSize(width: 17, height: 17), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(ovalIn: rect).fill()
-            NSGraphicsContext.current?.compositingOperation = .clear
-            NSRect(x: 4, y: 8, width: 9, height: 1).fill()
-            NSRect(x: 8, y: 4, width: 1, height: 9).fill()
-            return true
-        }
-        image.isTemplate = true
-        image.accessibilityDescription = "Attach Files"
-        return image
-    }()
 
     private static func separator() -> NSView {
         let line = SeparatorLine()
@@ -247,9 +241,25 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         bar.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(stack)
+        // At the right, as MailMate: a paperclip and the total size in 11 pt regular (fitted to its pixels at
+        // 1x), ending 6 pt from the edge.
+        attachedClip.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attachments")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .regular))
+        attachedClip.contentTintColor = .textColor
+        attachedSize.font = .systemFont(ofSize: 11)
+        attachedSize.textColor = .textColor
+        for view in [attachedClip, attachedSize] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(toggleSizeKind(_:))))
+            bar.addSubview(view)
+        }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             stack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            attachedSize.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -5),
+            attachedSize.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            attachedClip.trailingAnchor.constraint(equalTo: attachedSize.leadingAnchor, constant: -3),
+            attachedClip.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
         return bar
     }
@@ -294,11 +304,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         add("Bcc:", bccField, row: .bcc)
         add("Reply-To:", replyToField, row: .replyTo)
         add("Subject:", subjectField)
-        if !setup.attachments.isEmpty || !files.isEmpty {
-            attachedLabel.font = .systemFont(ofSize: 12)
-            attachedLabel.textColor = .secondaryLabelColor
-        }
-        add("Attached:", attachedLabel, height: nil)
         let header = NSView()
         header.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(stack)
@@ -410,10 +415,150 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         savedState = currentState
     }
 
+    // MARK: Attachments
+
+    /// The forwarded message's attachments, then files added here, in the bottom bar; their total size
+    /// in the format bar.
     private func updateAttached() {
-        let names = setup.attachments.map(AppModel.fileName(for:)) + files.map(\.lastPathComponent)
-        attachedLabel.stringValue = names.joined(separator: ", ")
-        attachedLabel.superview?.isHidden = names.isEmpty
+        let parts = setup.attachments.map { part in
+            ComposeAttachmentsView.Item(
+                name: AppModel.fileName(for: part), size: part.size,
+                icon: NSWorkspace.shared.icon(for: UTType(mimeType: part.type) ?? .data))
+        }
+        let added = files.map { url in
+            ComposeAttachmentsView.Item(
+                name: url.lastPathComponent, size: (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                icon: thumbnails[url] ?? NSWorkspace.shared.icon(forFile: url.path))
+        }
+        for url in files where thumbnails[url] == nil { makeThumbnail(url) }
+        attachmentsView.items = parts + added
+        let sizes = attachmentsView.items.compactMap(\.size)
+        let encoded = showsEncodedSize
+        attachmentsView.showsEncodedSize = encoded
+        let total = encoded ? sizes.map(ComposeAttachmentsView.encodedSize).reduce(0, +) : sizes.reduce(0, +)
+        attachedSize.stringValue = ComposeAttachmentsView.byteCount(total)
+        attachedSize.toolTip = encoded ? "Encoded size" : "File size"
+        attachedClip.toolTip = attachedSize.toolTip
+        attachedSize.isHidden = attachmentsView.items.isEmpty
+        attachedClip.isHidden = attachmentsView.items.isEmpty
+    }
+
+    /// Whether this window's attachment sizes (the format bar's total and each row's) are shown once
+    /// encoded for sending, as MailMate starts (what a server's size limit counts), rather than as the
+    /// files' sizes. A click on any of them switches all of them; every window starts encoded.
+    private var showsEncodedSize = true
+
+    @objc private func toggleSizeKind(_ sender: Any?) {
+        showsEncodedSize.toggle()
+        updateAttached()
+    }
+
+    /// Files' Quick Look thumbnails, once made: the picture fitted in 17 × 19 pt with a 1 pt white
+    /// border, as MailMate shows images (measured at 1x).
+    private var thumbnails: [URL: NSImage] = [:]
+
+    private func makeThumbnail(_ url: URL) {
+        guard let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) else { return }
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url, size: CGSize(width: 17, height: 19), scale: window?.backingScaleFactor ?? 2,
+            representationTypes: .thumbnail)
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] thumbnail, _ in
+            guard let picture = thumbnail?.nsImage else { return }
+            let image = Self.framed(picture)
+            DispatchQueue.main.async {
+                guard let self, self.files.contains(url) else { return }
+                self.thumbnails[url] = image
+                self.updateAttached()
+            }
+        }
+    }
+
+    private nonisolated static func framed(_ picture: NSImage) -> NSImage {
+        let fit = min(17 / picture.size.width, 19 / picture.size.height, 1)
+        let size = NSSize(width: (picture.size.width * fit).rounded(), height: (picture.size.height * fit).rounded())
+        return NSImage(size: size, flipped: false) { rect in
+            NSColor.white.setFill()
+            rect.fill()
+            picture.draw(in: rect.insetBy(dx: 1, dy: 1))
+            return true
+        }
+    }
+
+    /// Adds files (from the open panel or dropped on the window). An empty subject takes the first file's
+    /// name, as in MailMate.
+    private func attach(_ urls: [URL]) {
+        let new = urls.filter { url in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                && !files.contains(url)
+        }
+        guard !new.isEmpty else { return }
+        files += new
+        if subjectField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            subjectField.stringValue = new[0].lastPathComponent
+            updateTitle()
+        }
+        updateAttached()
+        updateEdited()
+    }
+
+    /// Rows of the bottom bar: the forwarded attachments first, then the files.
+    private func removeAttachments(_ rows: IndexSet) {
+        let partCount = setup.attachments.count
+        setup.attachments = setup.attachments.enumerated().filter { !rows.contains($0.offset) }.map(\.element)
+        files = files.enumerated().filter { !rows.contains($0.offset + partCount) }.map(\.element)
+        updateAttached()
+        updateEdited()
+    }
+
+    private func quickLookAttachments(_ rows: IndexSet) {
+        withAttachmentFiles(rows) { [weak self] urls in
+            guard let self, let panel = QLPreviewPanel.shared() else { return }
+            previewURLs = urls
+            window?.makeFirstResponder(window?.contentView)
+            if panel.isVisible { panel.reloadData() } else { panel.makeKeyAndOrderFront(nil) }
+        }
+    }
+
+    /// The attachments in these rows as files: added files as they are, forwarded ones fetched (usually
+    /// from disk) into temporary files.
+    private func withAttachmentFiles(_ rows: IndexSet, _ body: @escaping @MainActor ([URL]) -> Void) {
+        let parts = setup.attachments, added = files, accountId = setup.attachmentsAccountId
+        Task { @MainActor in
+            var urls: [URL] = []
+            for row in rows {
+                if row >= parts.count {
+                    urls.append(added[row - parts.count])
+                } else if let accountId {
+                    // A forwarded attachment: fetched (usually from disk) into a temporary file.
+                    let part = parts[row]
+                    guard let data = try? await model.partData(accountId: accountId, part: part) else { continue }
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Compose", isDirectory: true)
+                        .appendingPathComponent(part.blobId, isDirectory: true)
+                    let url = folder.appendingPathComponent(AppModel.fileName(for: part))
+                    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try? data.write(to: url, options: .atomic)
+                    urls.append(url)
+                }
+            }
+            if !urls.isEmpty { body(urls) }
+        }
+    }
+
+    // QuickLookUI declares these outside any actor; AppKit calls them on the main thread.
+    override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        MainActor.assumeIsolated { !previewURLs.isEmpty }
+    }
+
+    override nonisolated func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated { panel.dataSource = self }
+    }
+
+    override nonisolated func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated {
+            panel.dataSource = nil
+            previewURLs = []
+        }
     }
 
     @objc private func toggleHeaderRow(_ sender: NSMenuItem) {
@@ -438,9 +583,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         panel.prompt = "Attach"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let self else { return }
-            files += panel.urls.filter { !files.contains($0) }
-            updateAttached()
-            updateEdited()
+            attach(panel.urls)
         }
     }
 
@@ -663,6 +806,23 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         Self.open.remove(self)
     }
 
+    /// Asked when the app quits: with unsent edited messages open, asks (on the first of them) whether to
+    /// discard them, as MailMate does, instead of losing them silently. Calls `reply` with the answer.
+    static func confirmQuit(_ reply: @escaping (Bool) -> Void) -> Bool {
+        let unsent = open.filter { $0.isEdited || $0.sending }.compactMap(\.window)
+        guard let window = unsent.first else { return false }
+        window.makeKeyAndOrderFront(nil)
+        let alert = NSAlert()
+        alert.messageText = unsent.count == 1
+            ? "Do you want to discard the unsent message?" : "Do you want to discard \(unsent.count) unsent messages?"
+        alert.informativeText = "Drafts aren’t saved yet, so quitting loses \(unsent.count == 1 ? "it" : "them")."
+        alert.addButton(withTitle: "Discard and Quit")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { reply($0 == .alertFirstButtonReturn) }
+        return true
+    }
+
     #if DEBUG
         /// Fills fields as a user would (MMJ_DEBUG_FROM/TO/SUBJECT/BODY) and sends, for scripted tests.
         static func debugSendFrontmost(_ env: [String: String]) {
@@ -679,10 +839,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 c.bccField.addresses = Compose.parseAddresses(bcc)
                 c.rows[.bcc]?.isHidden = false
             }
-            if let file = env["MMJ_DEBUG_ATTACH"] {
-                c.files.append(URL(fileURLWithPath: file))
-                c.updateAttached()
+            if let paths = env["MMJ_DEBUG_ATTACH"] {  // comma-separated, attached as a drop would
+                c.attach(paths.split(separator: ",").map { URL(fileURLWithPath: String($0)) })
             }
+            if env["MMJ_DEBUG_TOGGLE_SIZE"] != nil { c.toggleSizeKind(nil) }  // as a click on a size does
+            if let row = Int(env["MMJ_DEBUG_SELECT_ATTACHMENT"] ?? "") { c.attachmentsView.debugSelect(row) }
             if let subject = env["MMJ_DEBUG_SUBJECT"] { c.subjectField.stringValue = subject }
             if let body = env["MMJ_DEBUG_BODY"] { c.textView.string = body + c.textView.string }
             NSLog("MMJ compose: from=\(c.fromPopup.titleOfSelectedItem ?? "-") to=\(c.toField.addresses) cc=\(c.ccField.addresses) subject=\(c.subjectField.stringValue) attachments=\(c.setup.attachments.count) inReplyTo=\(c.setup.inReplyTo) references=\(c.setup.references)\n---\n\(c.textView.string)\n---")
@@ -747,5 +908,15 @@ final class BottomBar: NSView {
         // MailMate's bar is 11 levels darker than the window background.
         NSColor.black.withAlphaComponent(0.2).setFill()
         bounds.fill()
+    }
+}
+
+extension ComposeWindowController: QLPreviewPanelDataSource {
+    nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        MainActor.assumeIsolated { previewURLs.count }
+    }
+
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        MainActor.assumeIsolated { previewURLs[index] as NSURL }
     }
 }
