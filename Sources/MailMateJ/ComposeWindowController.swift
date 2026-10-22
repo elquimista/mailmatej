@@ -789,23 +789,39 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             return fail("An attached file couldn’t be read.", detail: AppModel.describe(error))
         }
 
+        // As MailMate: the window goes at once and the message is sent in the background; if sending
+        // fails, the window comes back with the message as it was and says why.
         sending = true
-        (window.toolbar?.items.first?.view as? NSButton)?.isEnabled = false
-        window.subtitle = "Sending…"
+        window.orderOut(nil)
         Task {
             do {
                 try await model.send(message, accountId: identity.accountId, original: setup.original)
                 sending = false
                 window.close()
+                Self.sendFinished(failed: false)
             } catch {
                 #if DEBUG
                     NSLog("MMJ compose: send failed: \(AppModel.describe(error))")
                 #endif
                 sending = false
-                (window.toolbar?.items.first?.view as? NSButton)?.isEnabled = true
-                window.subtitle = ""
+                window.makeKeyAndOrderFront(nil)
                 fail("The message couldn’t be sent.", detail: AppModel.describe(error))
+                Self.sendFinished(failed: true)
             }
+        }
+    }
+
+    /// A quit waiting for messages still being sent (see `confirmQuit`).
+    private static var quitAfterSending: ((Bool) -> Void)?
+
+    private static func sendFinished(failed: Bool) {
+        guard let reply = quitAfterSending else { return }
+        if failed {
+            quitAfterSending = nil
+            reply(false)  // Stay, so the message that couldn't be sent can be seen.
+        } else if !open.contains(where: \.sending) {
+            quitAfterSending = nil
+            reply(true)
         }
     }
 
@@ -855,9 +871,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// Asked when the app quits: with unsent edited messages open, asks (on the first of them) whether to
     /// discard them, as MailMate does, instead of losing them silently. Calls `reply` with the answer.
+    /// Messages still being sent in the background are waited for (the app quits once they're sent).
     static func confirmQuit(_ reply: @escaping (Bool) -> Void) -> Bool {
-        let unsent = open.filter { $0.isEdited || $0.sending }.compactMap(\.window)
-        guard let window = unsent.first else { return false }
+        let unsent = open.filter { $0.isEdited && !$0.sending }.compactMap(\.window)
+        guard let window = unsent.first else {
+            guard open.contains(where: \.sending) else { return false }
+            quitAfterSending = reply
+            return true
+        }
         window.makeKeyAndOrderFront(nil)
         let alert = NSAlert()
         alert.messageText = unsent.count == 1
@@ -937,7 +958,13 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             }
             c.updateEdited()
             NSLog("MMJ compose: edited=\(c.window?.isDocumentEdited ?? false) spellcheck=\(c.textView.isContinuousSpellCheckingEnabled) autocorrect=\(c.textView.isAutomaticSpellingCorrectionEnabled) replacement=\(c.textView.isAutomaticTextReplacementEnabled)")
-            if env["MMJ_DEBUG_NOSEND"] == nil { c.sendMessage(nil) }
+            if env["MMJ_DEBUG_NOSEND"] == nil {
+                c.sendMessage(nil)
+                NSLog("MMJ compose: window visible right after Send: \(c.window?.isVisible ?? false)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    NSLog("MMJ compose: 8 s later visible \(c.window?.isVisible ?? false), sheet \(c.window?.attachedSheet != nil), still open \(open.contains(c))")
+                }
+            }
         }
 
         static func debugSnapshotFrontmost() -> NSWindow? { open.first(where: { $0.window?.isVisible == true })?.window }

@@ -67,5 +67,11 @@ import Testing
         #expect(MessagePage.hasNoColors(#"<p>Hello Ellie,</p><img src="https://x.example/open?m=1" border="0" width="1" height="1">"#))
         #expect(MessagePage.hasNoColors(##"<a href="https://x.example/page#abc123">link</a> <table border="1"><td>x</td></table>"##))
         #expect(MessagePage.hasNoColors(#"<div style="border: 1px solid; margin: 0">x</div>"#))
+        // Pictures keep HTML on white too; a tracking pixel doesn't.
+        #expect(MessagePage.hasPictures(#"<p>Hi</p><img src="cid:abc@example.com" alt="" title="x.jpg" style="max-width: 100%;">"#))
+        #expect(MessagePage.hasPictures(#"<img src="https://x.example/logo.png" width="120">"#))
+        #expect(!MessagePage.hasPictures(#"<p>Hello Ellie,</p><img src="https://x.example/open?m=1" border="0" width="1" height="1">"#))
+        #expect(!MessagePage.hasPictures(#"<img src="https://x.example/p.gif" style="width:1px;height:1px;">"#))
+        #expect(!MessagePage.hasPictures("<p>No images</p>"))
     }
 }

@@ -84,7 +84,7 @@ public enum MessagePage {
         content: String, plain: Bool, remote: Bool, token: String
     ) -> String {
         // Plain text, and HTML that sets no colours of its own, follow dark mode as MailMate shows them.
-        let adaptive = plain || hasNoColors(content)
+        let adaptive = plain || (hasNoColors(content) && !hasPictures(content))
         let https = remote ? " https:" : ""
         let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
             + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
@@ -115,6 +115,22 @@ public enum MessagePage {
         let parts = url.absoluteString.dropFirst(actionScheme.count + 1).split(separator: "/", maxSplits: 1)
         guard parts.count == 2, parts[0] == token else { return nil }
         return Action(rawValue: String(parts[1]))
+    }
+
+    /// Whether HTML shows a picture (an image not declared 1 or 2 px wide or tall, which a tracking pixel
+    /// is). MailMate keeps such HTML on white even without colours: pictures, often on white themselves,
+    /// look wrong on a dark page. (Seen at 1x: a Markdown message with an embedded picture stays white,
+    /// one whose only image is a tracking pixel goes dark.)
+    static func hasPictures(_ html: String) -> Bool {
+        var rest = html[...]
+        while let tag = rest.range(of: #"<img\b[^>]*>"#, options: [.regularExpression, .caseInsensitive]) {
+            let img = String(rest[tag])
+            let tiny = img.range(of: #"(?i)\b(width|height)\s*=\s*["']?\s*[0-2](px)?\s*["'\s/>]"#, options: .regularExpression) != nil
+                || img.range(of: #"(?i)(width|height)\s*:\s*[0-2](px)?\s*[;"']"#, options: .regularExpression) != nil
+            if !tiny { return true }
+            rest = rest[tag.upperBound...]
+        }
+        return false
     }
 
     /// Whether HTML leaves all colours to the reader, so it can be shown light-on-dark as MailMate does.
