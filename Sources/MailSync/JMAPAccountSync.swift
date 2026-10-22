@@ -502,6 +502,19 @@ public actor JMAPAccountSync {
         _ = try await syncMailboxes(accountId)
     }
 
+    /// Renames a mailbox on the server (Mailbox/set update), then syncs mailboxes.
+    public func renameMailbox(remoteId: String, to name: String) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let set = request.call("Mailbox/set", [
+            "accountId": .string(accountId), "update": .object([remoteId: ["name": .string(name)]]),
+        ])
+        if let error = try await client.send(request).arguments(set)["notUpdated"]?[remoteId] {
+            throw SendError.rejected(Self.setErrorText(error))
+        }
+        _ = try await syncMailboxes(accountId)
+    }
+
     /// Puts a whole message (its raw RFC 5322 bytes) into a mailbox of this account (blob upload, then
     /// Email/import), keeping its keywords and received date: the copy half of a move from another
     /// account. Returns once the server has confirmed it, then syncs it in.

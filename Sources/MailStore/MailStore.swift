@@ -498,6 +498,11 @@ public final class MailStore: Sendable {
     }
 
     /// Puts a message in exactly these mailboxes.
+    /// Renames a mailbox here (its server follows; see `AppModel.renameMailbox`).
+    public func renameMailbox(id: Int64, to name: String) throws {
+        try dbPool.write { db in try db.execute(sql: "UPDATE mailbox SET name = ? WHERE id = ?", arguments: [name, id]) }
+    }
+
     public func setMailboxes(_ mailboxIds: [Int64], messageId: Int64) throws {
         try dbPool.write { db in
             try db.execute(sql: "DELETE FROM message_mailbox WHERE messageId = ?", arguments: [messageId])

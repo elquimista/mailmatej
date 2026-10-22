@@ -554,6 +554,25 @@ final class AppModel {
         }
     }
 
+    /// Renames a folder: here at once, then on the server; if the server refuses, the old name comes back.
+    func renameMailbox(id: Int64, to name: String) {
+        guard let box = try? store.mailboxes().first(where: { $0.id == id }), box.name != name else { return }
+        try? store.renameMailbox(id: id, to: name)
+        refreshNow()
+        Task {
+            do {
+                try await coordinator.renameMailbox(accountId: box.accountId, remoteId: box.remoteId, to: name)
+            } catch {
+                try? store.renameMailbox(id: id, to: box.name)
+                refreshNow()
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t rename “\(box.name)”."
+                alert.informativeText = Self.describe(error)
+                present(alert)
+            }
+        }
+    }
+
     // MARK: Smart mailboxes
 
     /// Creates a smart mailbox (inside `parentId`, if given) and shows it at once.

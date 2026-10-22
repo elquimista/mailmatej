@@ -1549,6 +1549,12 @@ extension MainWindowController {
                 var flags: NSEvent.ModifierFlags = []
                 if key == "^", let next = chars.first { key = String(next); chars.removeFirst(); flags = .control }
                 if key == "⏎" { key = "\r"; flags = .command }
+                if key == "↩" { key = "\r" }  // plain Return
+                if key == "⎋" { key = "\u{1B}" }  // Escape
+                if key == "«" {  // hand the keyboard to the sidebar
+                    sidebar.debugFocus()
+                    continue
+                }
                 if key == "⌦" { key = "\u{7F}" }  // Backspace as the key handler sees it (key code 51).
                 if key == "⌧" { key = String(UnicodeScalar(NSDeleteFunctionKey)!) }  // Forward delete (key code 117).
                 if let selector = ["N": "nextUnreadMessage:", "T": "nextUnreadThread:", "R": "rootOfThread:", "L": "lastOfThread:",
@@ -1577,7 +1583,7 @@ extension MainWindowController {
                     with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
                     windowNumber: NSApp.keyWindow?.windowNumber ?? window?.windowNumber ?? 0, context: nil, characters: key,
                     charactersIgnoringModifiers: key, isARepeat: false,
-                    keyCode: key == "\r" ? 36 : key == "\u{7F}" ? 51 : key == String(UnicodeScalar(NSDeleteFunctionKey)!) ? 117 : 0)
+                    keyCode: key == "\r" ? 36 : key == "\u{1B}" ? 53 : key == "\u{7F}" ? 51 : key == String(UnicodeScalar(NSDeleteFunctionKey)!) ? 117 : 0)
                 else { continue }
                 // Through the event queue, as a real key press arrives (so undo groups per key press).
                 NSApp.postEvent(event, atStart: false)

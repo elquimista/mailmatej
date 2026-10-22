@@ -316,6 +316,11 @@ public actor SyncCoordinator {
         try await engine.send(message)
     }
 
+    public func renameMailbox(accountId: String, remoteId: String, to name: String) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.renameMailbox(remoteId: remoteId, to: name)
+    }
+
     public func redirect(accountId: String, remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         try await engine.redirect(remoteId: remoteId, to: recipients, identityId: identityId, mailFrom: mailFrom)

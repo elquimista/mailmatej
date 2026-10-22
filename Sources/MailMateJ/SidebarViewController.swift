@@ -99,6 +99,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.menu = menu
         outline.target = self
         outline.doubleAction = #selector(rowDoubleClicked(_:))
+        outline.onReturn = { [weak self] in
+            guard let self, let node = selectedNode, canRename(node) else { return NSSound.beep() }
+            beginRename(key: node.key, thenEdit: false)
+        }
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -777,7 +781,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private var renaming: (key: String, thenEdit: Bool)?
 
-    /// Edits a smart mailbox's name in its row.
+    /// Smart mailboxes and an account's folders can be renamed (not unified mailboxes, accounts, or Inbox).
+    private func canRename(_ node: SidebarNode) -> Bool {
+        if node.kind == .smart { return true }
+        guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
+        return node.role != "inbox"
+    }
+
+    /// Edits a smart mailbox's or folder's name in its row.
     private func beginRename(key: String, thenEdit: Bool) {
         guard let node = find(key, in: roots) else { return }
         let row = outline.row(forItem: node)
@@ -791,23 +802,36 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         field.currentEditor()?.selectAll(nil)
     }
 
+    /// Escape cancels the rename, keeping the old name.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard renaming != nil, selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        if let node = renaming.flatMap({ find($0.key, in: roots) }) { (control as? NSTextField)?.stringValue = node.title }
+        view.window?.makeFirstResponder(outline)
+        return true
+    }
+
     func controlTextDidEndEditing(_ obj: Notification) {
         guard let field = obj.object as? NSTextField, let renaming else { return }
         self.renaming = nil
         field.isEditable = false
-        guard let node = find(renaming.key, in: roots), case .smart(let id)? = node.scope else { return }
+        guard let node = find(renaming.key, in: roots) else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !name.isEmpty, name != node.title {
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
+        if !name.isEmpty, name != node.title, movement != .cancel {
             node.title = name
-            model.updateSmartMailbox(id: id, name: name)
+            switch node.scope {
+            case .smart(let id)?: model.updateSmartMailbox(id: id, name: name)
+            case .mailbox(let id)?: model.renameMailbox(id: id, to: name)
+            default: break
+            }
         } else {
             field.stringValue = node.title
         }
-        // Only Return goes on to the editor: ending the edit by clicking elsewhere stays where the click was.
-        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
-        if movement == .return {
+        // Return (or Escape) hands the keyboard back to the sidebar; Return after New Smart Mailbox goes on
+        // to its editor. Ending the edit by clicking elsewhere stays where the click was.
+        if movement == .return || movement == .cancel {
             view.window?.makeFirstResponder(outline)
-            if renaming.thenEdit { editMailbox(node) }
+            if renaming.thenEdit, movement == .return { editMailbox(node) }
         }
     }
 
@@ -970,6 +994,15 @@ final class SidebarRowView: NSTableRowView {
 /// (they show Hide/Show instead), and the rows under them are drawn one level further left, where they
 /// sat under group rows.
 final class SidebarOutlineView: NSOutlineView {
+    /// Return (or Enter) on the selected row: rename it, as in Finder.
+    var onReturn: () -> Void = {}
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if modifiers.isEmpty, event.keyCode == 36 || event.keyCode == 76 { return onReturn() }
+        super.keyDown(with: event)
+    }
+
     private func isHeader(_ row: Int) -> Bool { (item(atRow: row) as? SidebarNode)?.kind == .header }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
