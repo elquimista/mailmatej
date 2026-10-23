@@ -37,6 +37,16 @@ public struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendab
         self.sortOrder = sortOrder
         self.isEnabled = isEnabled
     }
+
+    /// The accounts' order everywhere: by description (`name`), A to Z as Finder sorts names (case
+    /// ignored, numbers by value).
+    public static func ordered(_ a: AccountRecord, _ b: AccountRecord) -> Bool {
+        switch a.name.localizedStandardCompare(b.name) {
+        case .orderedAscending: true
+        case .orderedDescending: false
+        case .orderedSame: a.id < b.id
+        }
+    }
 }
 
 extension AccountRecord {

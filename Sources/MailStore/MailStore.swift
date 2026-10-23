@@ -41,17 +41,9 @@ public final class MailStore: Sendable {
 
     // MARK: Accounts
 
+    /// The accounts, by description A to Z (see `AccountRecord.ordered`).
     public func accounts() throws -> [AccountRecord] {
-        try dbPool.read { db in try AccountRecord.order(Column("sortOrder"), Column("name")).fetchAll(db) }
-    }
-
-    /// The accounts' order in the sidebar (dragged there), first to last.
-    public func setAccountOrder(_ ids: [String]) throws {
-        try dbPool.write { db in
-            for (index, id) in ids.enumerated() {
-                try db.execute(sql: "UPDATE account SET sortOrder = ? WHERE id = ?", arguments: [index, id])
-            }
-        }
+        try dbPool.read { db in try AccountRecord.fetchAll(db) }.sorted(by: AccountRecord.ordered)
     }
 
     public func account(id: String) throws -> AccountRecord? {
@@ -139,16 +131,21 @@ public final class MailStore: Sendable {
     }
 
     private func allIdentities() throws -> [IdentityRecord] {
-        try dbPool.read { db in
+        // In the accounts' order, then by address.
+        let rank = Dictionary(uniqueKeysWithValues: try accounts().enumerated().map { ($1.id, $0) })
+        return try dbPool.read { db in
             try Row.fetchAll(
                 db,
                 sql: """
                     SELECT i.accountId, i.remoteId, CASE WHEN i.name = '' THEN a.fullName ELSE i.name END AS name, i.email
                     FROM identity i JOIN account a ON a.id = i.accountId
-                    WHERE a.isEnabled ORDER BY a.sortOrder, a.name, i.email
+                    WHERE a.isEnabled ORDER BY i.email
                     """
             ).map { IdentityRecord(accountId: $0["accountId"], remoteId: $0["remoteId"], name: $0["name"], email: $0["email"]) }
-        }
+        }.enumerated().sorted { a, b in
+            let (x, y) = (rank[a.element.accountId] ?? .max, rank[b.element.accountId] ?? .max)
+            return x != y ? x < y : a.offset < b.offset  // stable: by address within an account
+        }.map(\.element)
     }
 
     /// An address the user has mail with, for completing addresses while composing.

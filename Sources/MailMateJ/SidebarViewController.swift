@@ -501,7 +501,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         guard split.byAccount, let list = try? store.smartAccounts(id: record.id) else { return valueNodes(account: nil) }
         let sorted = list.compactMap { entry in accounts[entry.accountId].map { ($0, entry.unread) } }
-            .sorted { ($0.0.sortOrder, $0.0.name) < ($1.0.sortOrder, $1.0.name) }
+            .sorted { AccountRecord.ordered($0.0, $1.0) }
         return sorted.map { account, unread in
             let node = SidebarNode(
                 key: "smart.\(record.id).account.\(account.id)", kind: .mailbox, title: account.name, symbol: "at",
@@ -560,7 +560,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard settings.splits, let scope = node.scope else { return [] }
         let order: (MailboxRecord, MailboxRecord) -> Bool = { a, b in
             let x = accounts[a.accountId]!, y = accounts[b.accountId]!
-            return (x.sortOrder, x.name, a.name.lowercased()) < (y.sortOrder, y.name, b.name.lowercased())
+            if x.id != y.id { return AccountRecord.ordered(x, y) }
+            return a.name.lowercased() < b.name.lowercased()
         }
         let known = mailboxes.filter { accounts[$0.accountId] != nil }
         func child(_ key: String, _ title: String, _ scope: MessageScope, accountId: String, badge: Int, role: String?) -> SidebarNode {
@@ -593,7 +594,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
             if settings.splitsByAccount {
                 let ids = Set(sources.map(\.accountId))
-                children = accounts.values.filter { ids.contains($0.id) }.sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) }
+                children = accounts.values.filter { ids.contains($0.id) }.sorted(by: AccountRecord.ordered)
                     .map { account in
                         let node = child(
                             "acct.\(account.id)", account.name, flagged ? .flaggedInAccount(account.id) : .allInAccount(account.id),
@@ -654,7 +655,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func isDraggable(_ node: SidebarNode) -> Bool {
         guard !isInEditor else { return false }
         // Special mailboxes at the top or placed in a smart mailbox (not All / Junk / Deleted, part of All Messages).
-        return (node.kind == .unified && node.key != "unified.everything") || node.kind == .smart || node.kind == .account
+        // Accounts aren't: they're always by description, A to Z.
+        return (node.kind == .unified && node.key != "unified.everything") || node.kind == .smart
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
@@ -670,14 +672,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Where a drop may go: special mailboxes anywhere among Mailboxes, or into (onto, or among the
     /// mailboxes in) a smart mailbox not inside themselves; smart mailboxes there too, or into another
-    /// smart mailbox likewise; accounts among the accounts.
+    /// smart mailbox likewise.
     func outlineView(
         _ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int
     ) -> NSDragOperation {
         guard let node = dragged(info), let target = item as? SidebarNode else { return [] }
         switch node.kind {
-        case .account:
-            return target.key == "header.sources" && index >= 0 ? .move : []
         case .unified:
             if target.key == "header.mailboxes" { return index >= 0 ? .move : [] }
             guard target.kind == .smart, !Self.contains(node, target) else { return [] }
@@ -726,11 +726,6 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let position = index - start
             let at = index == -1 ? placed.count : (position > old ? position - 1 : position)
             try? model.store.placeSpecialMailbox(key: key, inside: parent, index: at)
-        case .account:
-            var ids = target.children.compactMap(\.accountId).filter { $0 != node.accountId }
-            let old = target.children.firstIndex { $0 === node } ?? Int.max
-            ids.insert(node.accountId ?? "", at: min(index > old ? index - 1 : index, ids.count))
-            try? model.store.setAccountOrder(ids)
         case .unified, .smart where target.key == "header.mailboxes":
             if node.kind == .unified, let key = node.scope?.key {  // out of any smart mailbox it was in
                 try? model.store.placeSpecialMailbox(key: key, inside: nil, index: 0)

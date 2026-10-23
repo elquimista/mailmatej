@@ -122,7 +122,6 @@ final class AppModel {
             sessionURL: draft.sessionURL.absoluteString,
             username: draft.authKind == .basic ? draft.username : session.username,
             authKind: draft.authKind, remoteAccountId: mailAccountId,
-            sortOrder: (try store.accounts().map(\.sortOrder).max() ?? -1) + 1,
             fullName: draft.fullName, emailAddresses: draft.emailAddresses)
         try Keychain.set(draft.secret, account: record.id)
         try store.save(record)
@@ -1169,7 +1168,7 @@ final class AppModel {
                     id: "dev-\(name)", name: "\(name.capitalized) (local)",
                     sessionURL: "http://localhost:\(ProcessInfo.processInfo.environment["MMJ_DEV_PORT"] ?? "18080")/.well-known/jmap",
                     username: "\(name)@mmj.test",
-                    authKind: .basic, sortOrder: existing?.sortOrder ?? 1000 + i,  // keep a dragged order
+                    authKind: .basic,
                     // Keep what was set in the account window.
                     fullName: existing?.fullName ?? "", emailAddresses: existing?.emailAddresses ?? "")
                 try? store.save(record)  // Upsert, so a changed dev server URL is picked up.
