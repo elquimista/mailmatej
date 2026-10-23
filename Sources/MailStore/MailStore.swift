@@ -470,6 +470,17 @@ public final class MailStore: Sendable {
         public var remoteId: String
     }
 
+    /// How many of a list's messages are fully downloaded, and how many it has.
+    public func downloadCounts(scope: MessageScope) throws -> (downloaded: Int, total: Int) {
+        let (filter, args) = self.filter(scope: scope, search: nil)
+        return try dbPool.read { db in
+            let row = try Row.fetchOne(
+                db, sql: "SELECT COALESCE(SUM(m.downloadState = 1), 0) AS done, COUNT(*) AS total FROM message m WHERE \(filter)",
+                arguments: args)
+            return (row?["done"] ?? 0, row?["total"] ?? 0)
+        }
+    }
+
     /// A list's unread messages.
     public func unreadIDs(scope: MessageScope) throws -> [Int64] {
         let (filter, args) = self.filter(scope: scope, search: nil)

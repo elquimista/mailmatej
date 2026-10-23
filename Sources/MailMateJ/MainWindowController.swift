@@ -232,6 +232,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             list.tableView.deselectAll(nil)
             messageView.show(messageID: nil)
             reloadList(.scopeChanged)
+            updateProgress()
         }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
@@ -245,6 +246,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             list.colorKey = node.key
             selectAfterMove = nil
             self.reloadList(.scopeChanged)
+            updateProgress()
         }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
@@ -495,7 +497,23 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private func syncStatusDidChange() {
         sidebar.refreshStatuses()
-        updateTitle()
+        updateProgress()
+    }
+
+    /// The sidebar's progress bar: how much of the selected mailbox is downloaded, while messages are
+    /// downloading and it isn't all here yet.
+    private func updateProgress() {
+        #if DEBUG
+            if let shown = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_PROGRESS"] ?? "") {  // e.g. "0.4"
+                return sidebar.showProgress(true, fraction: shown, text: "Downloading \(Int(shown * 560)) of 560")
+            }
+        #endif
+        guard hasMailbox, model.downloadProgress != nil, let counts = try? model.store.downloadCounts(scope: scope),
+            counts.total > 0, counts.downloaded < counts.total
+        else { return sidebar.showProgress(false) }
+        sidebar.showProgress(
+            true, fraction: Double(counts.downloaded) / Double(counts.total),
+            text: "Downloading \(counts.downloaded.formatted()) of \(counts.total.formatted())")
     }
 
     /// "Subject — Mailbox (N messages)", as MailMate titles its window.
@@ -508,11 +526,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let mailbox = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
         let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
         window?.title = subject.map { ($0.isEmpty ? "(no subject)" : $0) + " — " + mailbox } ?? mailbox
-        let syncing = model.syncingCount
-        let remaining = model.downloadsRemaining
-        window?.subtitle =
-            syncing > 0 ? "Syncing \(syncing) account\(syncing == 1 ? "" : "s")…"
-            : remaining > 0 ? "Downloading messages… \(remaining.formatted()) left" : ""
     }
 
     #if DEBUG
@@ -554,6 +567,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         var debugSidebarBadges: String { sidebar.debugBadges }
         func debugEmpty(key: String, choose: String?) { sidebar.debugEmpty(key: key, choose: choose) }
         /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
+        func debugShowProgress() { updateProgress() }
+
         func debugSort(column: String) {
             guard let prototype = list.tableView.tableColumn(withIdentifier: .init(column))?.sortDescriptorPrototype else {
                 return NSLog("MMJ sort: no sortable column \(column)")

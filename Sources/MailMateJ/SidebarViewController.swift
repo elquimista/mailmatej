@@ -114,7 +114,37 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
-        view = scroll
+        let container = NSView()
+        for v in [scroll, progressBar] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(v)
+        }
+        progressBar.isHidden = true
+        progressHeight = progressBar.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: container.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: progressBar.topAnchor),
+            progressBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            progressBar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            progressHeight,
+        ])
+        view = container
+    }
+
+    /// Sync and download progress, at the bottom while there is any (the main window's sidebar).
+    private let progressBar = SyncProgressBar()
+    private var progressHeight: NSLayoutConstraint!
+
+    /// Shows the progress bar (`fraction` done) with `text` across it, or hides it.
+    func showProgress(_ shown: Bool, fraction: Double = 0, text: String = "") {
+        progressBar.fraction = fraction
+        progressBar.text = text
+        guard progressBar.isHidden == shown else { return }
+        progressBar.isHidden = !shown
+        progressHeight.constant = shown ? SyncProgressBar.height : 0
     }
 
     var selectedNode: SidebarNode? { outline.item(atRow: outline.selectedRow) as? SidebarNode }

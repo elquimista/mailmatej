@@ -1072,9 +1072,12 @@ final class AppModel {
         }
     }
 
-    /// Messages still to download across accounts that are downloading now.
-    var downloadsRemaining: Int {
-        statuses.values.filter(\.isDownloading).map { $0.total - $0.downloaded }.reduce(0, +)
+    /// How much of the accounts' mail is stored here while any account downloads (accounts done count
+    /// as done, so it only grows): messages downloaded and in all; nil when nothing downloads.
+    var downloadProgress: (downloaded: Int, total: Int)? {
+        guard statuses.values.contains(where: \.isDownloading) else { return nil }
+        let counted = statuses.values.filter { $0.total > 0 }
+        return (counted.map { min($0.downloaded, $0.total) }.reduce(0, +), counted.map(\.total).reduce(0, +))
     }
 
     /// Mailboxes (local ids) any download is working on right now.
