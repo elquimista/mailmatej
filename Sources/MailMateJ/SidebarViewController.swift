@@ -284,6 +284,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
 
         var debugInboxBadge: Int { find("unified.inbox", in: roots)?.badge ?? -1 }
+        /// Every row's badge, as "key=count", in tree order (MMJ_DEBUG_BADGES).
+        var debugBadges: String {
+            func walk(_ nodes: [SidebarNode]) -> [String] { nodes.flatMap { ["\($0.key)=\($0.badge)"] + walk($0.children) } }
+            return walk(roots).joined(separator: " ")
+        }
 
         /// Moves rows as drops would: "key>targetKey@index", several separated by ";".
         func debugMove(_ spec: String) {
@@ -405,6 +410,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             node.children = Self.mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
             sources.children.append(node)
         }
+        DisplayedCounts.apply(to: [unified, sources], store: store)
         return [unified, sources]
     }
 
@@ -780,7 +786,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard let node = selectedNode else { return }
-        if remembersSelection { UserDefaults.standard.set(node.key, forKey: Self.lastMailboxDefaultsKey) }
+        if remembersSelection {
+            UserDefaults.standard.set(node.key, forKey: Self.lastMailboxDefaultsKey)
+        }
         guard !suppressSelection else { return }
         onSelect?(node)
     }
@@ -844,6 +852,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             menu.addItem(.separator())
         }
         if node.kind != .header {
+            let count = menu.addItem(withTitle: "Displayed Count", action: nil, keyEquivalent: "")
+            count.submenu = countMenu(for: node)
             let color = menu.addItem(withTitle: "Color", action: nil, keyEquivalent: "")
             color.submenu = colorMenu(for: node)
             let symbol = menu.addItem(withTitle: "Symbol", action: nil, keyEquivalent: "")
@@ -881,6 +891,59 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             remove.representedObject = node
             remove.target = self
         }
+    }
+
+    // MARK: Displayed Count
+
+    /// MailMate's Displayed Count submenu: Inherit, No Count, the counts, and Include Submailboxes.
+    private func countMenu(for node: SidebarNode) -> NSMenu {
+        let menu = NSMenu()
+        let current = DisplayedCounts.kind(for: node.key)
+        func add(_ title: String, _ kind: DisplayedCounts.Kind?) {
+            let item = menu.addItem(withTitle: title, action: #selector(countChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = CountChoice(key: node.key, kind: kind)
+            item.state = kind == current ? .on : .off
+        }
+        add("Inherit", nil)
+        add(DisplayedCounts.Kind.none.title, DisplayedCounts.Kind.none)
+        menu.addItem(.separator())
+        for kind in DisplayedCounts.Kind.allCases where kind != .none { add(kind.title, kind) }
+        menu.addItem(.separator())
+        let include = menu.addItem(withTitle: "Include Submailboxes", action: #selector(toggleIncludeSubmailboxes(_:)), keyEquivalent: "")
+        include.target = self
+        include.representedObject = node.key
+        include.state = includesSubmailboxes(node) ? .on : .off
+        return menu
+    }
+
+    private final class CountChoice: NSObject {
+        let key: String
+        let kind: DisplayedCounts.Kind?
+        init(key: String, kind: DisplayedCounts.Kind?) {
+            self.key = key
+            self.kind = kind
+        }
+    }
+
+    /// Include Submailboxes for a node: its own choice, else the nearest one above it.
+    private func includesSubmailboxes(_ node: SidebarNode) -> Bool {
+        for n in [node] + ancestors(of: node).reversed() {
+            if let on = DisplayedCounts.includesSubmailboxes(n.key) { return on }
+        }
+        return false
+    }
+
+    @objc private func countChosen(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? CountChoice else { return }
+        DisplayedCounts.set(choice.kind, for: choice.key)
+        reload()
+    }
+
+    @objc private func toggleIncludeSubmailboxes(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String, let node = Self.node(withKey: key, in: roots) else { return }
+        DisplayedCounts.setIncludesSubmailboxes(!includesSubmailboxes(node), for: key)
+        reload()
     }
 
     // MARK: Color

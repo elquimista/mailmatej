@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil {
+                    NSLog("MMJ badges: \(windowController?.debugSidebarBadges ?? "")")
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIDEBAR_MOVE"] {
                     windowController?.debugMoveSidebar(spec)
                     try? await Task.sleep(for: .milliseconds(500))

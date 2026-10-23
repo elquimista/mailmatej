@@ -975,9 +975,22 @@ public final class MailStore: Sendable {
         return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
     }
 
-    /// How many of a list's messages match `counting` (for Dock counters).
+    /// How many of a list's messages match `counting` (for Dock counters and the sidebar).
     public func count(scope: MessageScope, counting: MessageCount) throws -> Int {
-        let (filter, args) = self.filter(scope: scope, search: nil)
+        try count(scopes: [scope], counting: counting)
+    }
+
+    /// How many messages in any of these lists match `counting`, each counted once (a mailbox with its
+    /// submailboxes).
+    public func count(scopes: [MessageScope], counting: MessageCount) throws -> Int {
+        guard !scopes.isEmpty else { return 0 }
+        var clauses: [String] = []
+        var args: [(any DatabaseValueConvertible)?] = []
+        for scope in scopes {
+            let (clause, scopeArgs) = filterParts(scope: scope, search: nil)
+            clauses.append("(\(clause))")
+            args += scopeArgs
+        }
         let condition: String
         switch counting {
         case .all: condition = ""
@@ -985,8 +998,9 @@ public final class MailStore: Sendable {
         case .flagged: condition = " AND m.isFlagged"
         case .unreplied: condition = " AND NOT m.isAnswered AND NOT m.isDraft"
         }
-        let sql = "SELECT COUNT(*) FROM message m WHERE \(filter)\(condition)"
-        return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: args) ?? 0 }
+        let sql = "SELECT COUNT(*) FROM message m WHERE (\(clauses.joined(separator: " OR ")))\(condition)"
+        let arguments = StatementArguments(args)
+        return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: arguments) ?? 0 }
     }
 
     /// Which of these messages are in a list.

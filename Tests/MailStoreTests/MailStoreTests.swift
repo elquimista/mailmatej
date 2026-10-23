@@ -584,6 +584,9 @@ import Testing
         #expect(try store.count(scope: .account("acc"), counting: .all) == 3)
         #expect(try store.count(scope: .role("inbox"), counting: .flagged) == 0)
         #expect(try store.count(scope: .role("inbox"), counting: .unreplied) == 2)
+        // A mailbox with its submailboxes: each message once, also where the lists overlap.
+        #expect(try store.count(scopes: [.role("inbox"), .account("acc")], counting: .all) == 3)
+        #expect(try store.count(scopes: [.role("inbox"), .role("trash")], counting: .unread) == 2)
         for scope in [MessageScope.allMessages, .flagged, .role("inbox"), .mailbox(42), .account("A:B"),
                       .flaggedInMailbox(7), .flaggedInAccount("A:B"), .allInAccount("acc")] {
             #expect(MessageScope(key: scope.key) == scope)
