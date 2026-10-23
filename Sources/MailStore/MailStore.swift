@@ -1146,8 +1146,9 @@ public final class MailStore: Sendable {
                 sql: """
                     SELECT m.id, m.accountId, m.fromDisplay, m.fromEmail, m.subject, m.receivedAt, m.isSeen,
                            m.isFlagged, m.isAnswered, m.hasAttachment, m.size, a.name AS accountName,
-                           (SELECT b.name FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
-                            WHERE mm.messageId = m.id ORDER BY b.role IS NULL, b.name LIMIT 1) AS mailboxName
+                           (SELECT group_concat(name, ', ') FROM (
+                              SELECT b.name FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                              WHERE mm.messageId = m.id ORDER BY b.role IS NULL, b.name)) AS mailboxName
                     FROM message m JOIN account a ON a.id = m.accountId
                     WHERE m.id IN (\(marks))
                     """,

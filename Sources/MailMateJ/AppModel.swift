@@ -255,6 +255,8 @@ final class AppModel {
         case deletePermanently
         /// Into one mailbox of the messages' account.
         case move(toMailboxId: Int64)
+        /// Out of this mailbox only, for messages that are in others too (a message stays in at least one).
+        case removeFromMailbox(Int64)
         /// Into each message's account's mailbox with this role (a Unified mailbox, such as Sent Messages).
         case moveToRole(String)
         /// Each message back into the mailboxes it was in (undo of a move), and back to junk (true) or
@@ -364,6 +366,17 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: "inbox")
             }
             try move(refs, to: inbox, extra: ["keywords/$junk": .null, "keywords/$notjunk": .bool(true)])
+        case .removeFromMailbox(let mailboxId):
+            guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
+                return work
+            }
+            let current = try store.mailboxIDs(messageIds: ids)
+            let removable = refs.filter { ref in
+                let boxes = current[ref.id] ?? []
+                return boxes.contains(mailboxId) && boxes.count > 1
+            }
+            for ref in removable { try store.setMailboxes((current[ref.id] ?? []).filter { $0 != mailboxId }, messageId: ref.id) }
+            if !removable.isEmpty { work.updates.append((removable.map(\.remoteId), ["mailboxIds/\(target.remoteId)": .null])) }
         case .move(let mailboxId):
             guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
                 throw MessageActionError.noMailbox(role: "")

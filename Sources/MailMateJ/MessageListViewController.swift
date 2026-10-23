@@ -510,10 +510,14 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         func debugContextMenu(row: Int, run: String?) -> [String] {
             let menu = NSMenu()
             fillContextMenu(menu, row: row)
-            if let run, let item = menu.items.first(where: { $0.title == run }), let action = item.action {
-                NSApp.sendAction(action, to: item.target, from: item)
+            // "Item" runs an item, "Item>Sub" an item of its submenu.
+            let path = run?.split(separator: ">").map(String.init) ?? []
+            var item = path.first.flatMap { title in menu.items.first { $0.title == title } }
+            if path.count > 1 { item = item?.submenu?.items.first { $0.title == path[1] } }
+            if let item, let action = item.action { NSApp.sendAction(action, to: item.target, from: item) }
+            return menu.items.map { item in
+                item.isSeparatorItem ? "—" : item.title + (item.submenu.map { " [" + $0.items.map(\.title).joined(separator: ", ") + "]" } ?? "")
             }
-            return menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
         }
     #endif
 

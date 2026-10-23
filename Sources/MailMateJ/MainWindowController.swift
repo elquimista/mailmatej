@@ -684,6 +684,20 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return list.debugContextMenu(row: row, run: run) + ["message \(id)"]
         }
 
+        /// Copies the row's message into its account's mailbox with this role too, as a rule's Copy does.
+        func debugCopy(row: Int, role: String) {
+            guard row < list.ids.count, let ref = try? model.store.refs(ids: [list.ids[row]]).first,
+                let box = try? model.store.mailbox(accountId: ref.accountId, role: role)
+            else { return NSLog("MMJ copy: nothing to copy") }
+            model.perform(.copy(toMailboxId: box.id), on: [ref.id]) { _ in false }
+        }
+
+        /// The row's Source Mailbox text.
+        func debugSource(row: Int) -> String {
+            guard row < list.ids.count, let r = try? model.store.rows(ids: [list.ids[row]]).first else { return "-" }
+            return "\(r.mailboxName) – \(r.accountName)"
+        }
+
         func debugHoverLink(containing text: String) async { await messageView.debugHoverLink(containing: text) }
 
         func debugScrollMessage(by points: CGFloat) { messageView.debugScrollContent(by: points) }
@@ -1178,6 +1192,41 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         ] {
             menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
+        if let remove = removeFromMailboxItem(for: ids) { menu.addItem(remove) }
+    }
+
+    /// Remove from Mailbox ▸ each mailbox the messages are in, for messages in several (a message in
+    /// Sent and Archive, say): takes them out of that one only. Shown only when some message is in more
+    /// than one; a mailbox is offered when some message could leave it and still be in another.
+    private func removeFromMailboxItem(for ids: [Int64]) -> NSMenuItem? {
+        guard let current = try? model.store.mailboxIDs(messageIds: ids), current.values.contains(where: { $0.count > 1 }),
+            let all = try? model.store.mailboxes(), let accounts = try? model.store.accounts()
+        else { return nil }
+        let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let accountNames = Dictionary(accounts.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        let removable = Set(current.values.filter { $0.count > 1 }.flatMap { $0 })
+        // Per account, its special mailboxes first, then by name.
+        let boxes: [MailboxRecord] = removable.compactMap { byID[$0] }.sorted { a, b in
+            if a.accountId != b.accountId { return a.accountId < b.accountId }
+            if (a.role == nil) != (b.role == nil) { return a.role != nil }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        let severalAccounts = Set(boxes.map { $0.accountId }).count > 1
+        let submenu = NSMenu()
+        for box in boxes {
+            let title = severalAccounts ? "\(box.name) – \(accountNames[box.accountId] ?? "")" : box.name
+            let item = submenu.addItem(withTitle: title, action: #selector(removeFromMailboxChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = (box.id, ids) as (Int64, [Int64])
+        }
+        let item = NSMenuItem(title: "Remove from Mailbox", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func removeFromMailboxChosen(_ sender: NSMenuItem) {
+        guard let (mailboxId, ids) = sender.representedObject as? (Int64, [Int64]) else { return }
+        perform(.removeFromMailbox(mailboxId), on: ids)
     }
 
     /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
@@ -1279,7 +1328,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
         case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
         case .keyword, .copy, .deletePermanently: break  // only rules do these
-        case .archive, .junk, .notJunk, .delete, .move, .moveToRole, .restoreMailboxes:
+        case .archive, .junk, .notJunk, .delete, .move, .moveToRole, .restoreMailboxes, .removeFromMailbox:
             let inTrash: Set<Int64>
             if case .delete = action { inTrash = (try? model.store.messageIDs(ids, inRole: "trash")) ?? [] } else { inTrash = [] }
             let movable = ids.filter { !inTrash.contains($0) }  // Those deleted for good stay deleted.
@@ -1295,6 +1344,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .junk: undo.setActionName("Mark as Junk")
             case .notJunk: undo.setActionName("Move Out of Junk")
             case .delete: undo.setActionName("Delete")
+            case .removeFromMailbox: undo.setActionName("Remove from Mailbox")
             default: undo.setActionName("Move")
             }
         }

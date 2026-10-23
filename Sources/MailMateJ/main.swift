@@ -125,12 +125,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
                 }
+                if let role = ProcessInfo.processInfo.environment["MMJ_DEBUG_COPY_ROW0"] {
+                    windowController?.debugCopy(row: 0, role: role)  // the first row's message into that mailbox too
+                    try? await Task.sleep(for: .seconds(3))
+                    NSLog("MMJ source: \(windowController?.debugSource(row: 0) ?? "-")")
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_CONTEXT_MENU"] {
                     // "row" or "row:Item title": logs the row's context menu, then runs that item.
                     let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
                     let items = windowController?.debugContextMenu(row: Int(parts[0]) ?? 0, run: parts.count > 1 ? parts[1] : nil)
                     NSLog("MMJ context menu: \(items ?? [])")
                     try? await Task.sleep(for: .seconds(3))
+                    NSLog("MMJ source after: \(windowController?.debugSource(row: 0) ?? "-")")
                 }
                 if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_HOVER_LINK"] {
                     await windowController?.debugHoverLink(containing: text)
