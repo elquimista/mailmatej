@@ -130,6 +130,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(3))
                     NSLog("MMJ source: \(windowController?.debugSource(row: 0) ?? "-")")
                 }
+                if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_RESULT"] {
+                    // "thread", "people", "cancel", comma-separated: as the toolbar buttons and Cancel do.
+                    NSLog("MMJ result before: \(windowController?.debugListState ?? "-")")
+                    for step in steps.split(separator: ",") {
+                        windowController?.debugResult(String(step))
+                        try? await Task.sleep(for: .seconds(2))
+                        NSLog("MMJ result \(step): \(windowController?.debugListState ?? "-")")
+                        if let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"], let number = windowController?.window?.windowNumber {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-\(step).png")]
+                            try? capture.run()
+                            capture.waitUntilExit()
+                        }
+                    }
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_CONTEXT_MENU"] {
                     // "row" or "row:Item title": logs the row's context menu, then runs that item.
                     let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)

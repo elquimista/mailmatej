@@ -183,7 +183,45 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        view = scroll
+        let container = NSView()
+        for v in [resultBar, scroll] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(v)
+        }
+        resultBar.isHidden = true
+        // The window's content runs under the toolbar: the bar sits below it, and the list keeps running
+        // under the toolbar while there's no bar (the scroll view insets itself).
+        listUnderToolbar = scroll.topAnchor.constraint(equalTo: container.topAnchor)
+        listUnderBar = scroll.topAnchor.constraint(equalTo: resultBar.bottomAnchor)
+        NSLayoutConstraint.activate([
+            resultBar.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            resultBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            resultBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            resultBar.heightAnchor.constraint(equalToConstant: ResultBar.height),
+            listUnderToolbar,
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        view = container
+    }
+
+    // MARK: Result bar
+
+    private let resultBar = ResultBar()
+    private var listUnderToolbar: NSLayoutConstraint!
+    private var listUnderBar: NSLayoutConstraint!
+
+    #if DEBUG
+        var debugResultBar: String { "bar \(NSStringFromRect(resultBar.frame)) hidden \(resultBar.isHidden) view \(NSStringFromRect(view.frame)) \(type(of: view))" }
+    #endif
+
+    /// MailMate's bar over a search result's list ("Same thread"), with Cancel; nil hides it.
+    func showResultBar(_ title: String?, symbol: String = "", onCancel: @escaping () -> Void = {}) {
+        if let title { resultBar.show(title: title, symbol: symbol, onCancel: onCancel) }
+        resultBar.isHidden = title == nil
+        listUnderToolbar.isActive = title == nil
+        listUnderBar.isActive = title != nil
     }
 
     // MARK: Data
@@ -960,5 +998,120 @@ final class ThreadFromCell: ColoredCell {
 
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet { chevron.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor }
+    }
+}
+
+/// The bar over a search result's list, as MailMate draws it (measured at 1x): 29 pt and a 1 pt line,
+/// a little lighter than the list; the search's symbol 9 pt in and its name in bold 11 pt grey; outlined
+/// buttons 18 pt tall with 4 pt corners, 7 pt from the right.
+final class ResultBar: NSView {
+    static let height: CGFloat = 30
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private let cancel = OutlineButton(title: "Cancel")
+
+    private static let background = NSColor(name: nil) {
+        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 40 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1) : NSColor(white: 0.93, alpha: 1)
+    }
+    private static let line = NSColor(name: nil) {
+        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 62 / 255, green: 65 / 255, blue: 66 / 255, alpha: 1) : NSColor(white: 0.82, alpha: 1)
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        label.font = .systemFont(ofSize: 11, weight: .bold)
+        label.textColor = .secondaryLabelColor
+        icon.contentTintColor = .secondaryLabelColor
+        icon.imageScaling = .scaleNone
+        [icon, label, cancel].forEach(addSubview)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(title: String, symbol: String, onCancel: @escaping () -> Void) {
+        label.stringValue = title
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        cancel.onClick = onCancel
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        label.sizeToFit()
+        label.frame.origin = NSPoint(x: 28 - 2, y: ((29 - label.frame.height) / 2).rounded() + 1)
+        // The symbol stands on the text's baseline and reaches its cap height, as MailMate's does.
+        let size = icon.image?.size ?? .zero
+        let baseline = label.frame.minY + label.firstBaselineOffsetFromTop
+        let ink = (icon.image?.alignmentRect ?? .zero)
+        // Its ink from 9 pt in (the symbol has 1 pt of space on its left), 4 pt before the text.
+        icon.frame = NSRect(x: 8, y: (baseline - size.height + ink.minY).rounded(), width: size.width, height: size.height)
+        let width = cancel.intrinsicContentSize.width
+        cancel.frame = NSRect(x: bounds.width - 7 - width, y: 5, width: width, height: 18)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Self.background.setFill()
+        bounds.fill()
+        Self.line.setFill()
+        NSRect(x: 0, y: 29, width: bounds.width, height: 1).fill()
+    }
+}
+
+/// MailMate's small outlined buttons: SF 11 in the text color 7 pt from a grey 1 pt outline with 4 pt
+/// corners, darker while pressed.
+final class OutlineButton: NSView {
+    var onClick: () -> Void = {}
+    private let title: String
+    private var pressed = false {
+        didSet { needsDisplay = true }
+    }
+
+    private static let font = NSFont.systemFont(ofSize: 11)
+    /// MailMate's outline shows as 125 on the dark bar.
+    private static let outline = NSColor(name: nil) {
+        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 108 / 255, alpha: 1) : NSColor(white: 0, alpha: 0.25)
+    }
+
+    init(title: String) {
+        self.title = title
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: ceil((title as NSString).size(withAttributes: [.font: Self.font]).width) + 14, height: 18)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        if pressed {
+            NSColor.labelColor.withAlphaComponent(0.15).setFill()
+            box.fill()
+        }
+        Self.outline.setStroke()
+        box.lineWidth = 1
+        box.stroke()
+        let text = NSAttributedString(string: title, attributes: [.font: Self.font, .foregroundColor: NSColor.labelColor])
+        let size = text.size()
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            if next.type == .leftMouseUp {
+                pressed = false
+                if inside { onClick() }
+                return
+            }
+            pressed = inside
+        }
     }
 }

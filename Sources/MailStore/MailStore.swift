@@ -1115,6 +1115,9 @@ public final class MailStore: Sendable {
             let (clause, smartArgs) = smartFilter(id: id)
             clauses.append("\(clause) AND m.accountId = ?")
             args += smartArgs + [accountId]
+        case .messages(let ids):
+            clauses.append(ids.isEmpty ? "0" : "m.id IN (\(Self.placeholders(ids.count)))")
+            args += ids
         }
 
         switch scope {
@@ -1183,6 +1186,22 @@ public final class MailStore: Sendable {
     }
 
     // MARK: Correspondence
+
+    /// A message's whole conversation, as threads link messages (see `threadKeys`): every message of its
+    /// account outside Trash and Junk in the same thread, and the message itself.
+    public func threadMemberIDs(of messageId: Int64) throws -> [Int64] {
+        guard let accountId = try refs(ids: [messageId]).first?.accountId else { return [] }
+        let (filter, args) = self.filter(scope: .allInAccount(accountId), search: nil)
+        let rows = try dbPool.read { db in
+            try Row.fetchAll(
+                db, sql: "SELECT \(Self.threadColumns) FROM message m WHERE (\(filter)) OR m.id = ? ORDER BY m.receivedAt",
+                arguments: args + [messageId]
+            ).map(ThreadInput.init)
+        }
+        let keys = Self.threadKeys(rows)
+        guard let key = keys[messageId] else { return [messageId] }
+        return rows.filter { keys[$0.id] == key }.map(\.id)
+    }
 
     /// The other party of a message: the sender, unless the user sent it, then the first recipient.
     public func correspondent(messageId: Int64, myAddresses: Set<String>) throws -> String? {

@@ -228,6 +228,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
         sidebar.onSelectNone = { [weak self] in
             guard let self else { return }
+            leaveResult()
             hasMailbox = false
             list.tableView.deselectAll(nil)
             messageView.show(messageID: nil)
@@ -236,11 +237,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
+            leaveResult()
             hasMailbox = true
-            remembered[self.scope] = SavedView(
-                selection: list.selectedIDs, anchor: list.scrollAnchor,
-                correspondenceSelection: correspondence.selectedIDs, correspondenceAnchor: correspondence.scrollAnchor,
-                displayed: messageView.displayedMessageID)
+            saveView()
             self.scope = scope
             self.scopeTitle = node.title
             list.colorKey = node.key
@@ -295,11 +294,28 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         // No mailbox: an empty list (a scope that matches nothing).
         let scope = hasMailbox ? self.scope : MessageScope.smart(-1)
         let search: String? = search.isEmpty ? nil : search
-        let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
+        let (threaded, savedExpanded, savedOpened) = (showsThreads, expandedThreads, openedMessages)
+        let result = self.result.map { ($0.kind, $0.anchor, $0.email, $0.opening) }
         let started = Date()
         Task {
-            let (rows, messages, newest, stages) = await Task.detached(priority: .userInitiated) {
+            let (rows, messages, newest, stages, scope, expanded, opened) = await Task.detached(priority: .userInitiated) {
                 let began = Date()
+                var (scope, expanded, opened) = (scope, savedExpanded, savedOpened)
+                if let (kind, anchor, email, opening) = result {
+                    // Found again on each load, so new mail in the conversation shows up.
+                    let ids = kind == .thread
+                        ? (try? store.threadMemberIDs(of: anchor)) ?? [anchor]
+                        : (try? store.correspondenceIDs(email: email ?? "", keeping: anchor)) ?? [anchor]
+                    scope = .messages(ids)
+                    // The message's own conversation shown whole (the thread result is just that one), so
+                    // the message itself is in view to select, as MailMate opens it.
+                    if opening, threaded, let threads = (try? store.threadedMessages(scope: scope, sort: sort))?.threadOf,
+                        let own = threads[anchor]
+                    {
+                        expanded.insert(own)
+                        opened.formUnion(threads.filter { $0.value == own }.map(\.key))
+                    }
+                }
                 let list = threaded
                     ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
                     : nil
@@ -315,7 +331,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
                 let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
                 // Every message of the list, collapsed threads' replies included (threadOf has each one).
-                return (rows, list?.threadOf.count ?? rows.count, newest, stages)
+                return (rows, list?.threadOf.count ?? rows.count, newest, stages, scope, expanded, opened)
             }.value
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
@@ -324,6 +340,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             #endif
             guard generation == loadGeneration else { return }
             messageCount = messages
+            if result != nil {
+                self.scope = scope  // the result's messages, for actions taking rows out
+                if self.result?.opening == true {
+                    self.result?.opening = false
+                    (expandedThreads, openedMessages) = (expanded, opened)  // folding and unfolding start from here
+                }
+            }
             let ids = rows.map(\.id)
             list.showsThreads = threaded
             list.expandedThreads = expanded
@@ -572,6 +595,21 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
         func debugEmpty(key: String, choose: String?) { sidebar.debugEmpty(key: key, choose: choose) }
+
+        /// Shows the selected message's thread ("thread") or correspondence ("people"), or ends it ("cancel").
+        func debugResult(_ kind: String) {
+            switch kind {
+            case "thread": showResult(.thread)
+            case "people": showResult(.correspondents)
+            case "collapse", "expand":  // the first row's thread, as its chevron does
+                if let id = list.ids.first, let row = list.threadRows[id] { toggle(row, collapse: kind == "collapse") }
+            default: endResult()
+            }
+        }
+
+        var debugListState: String {
+            "scope \(scopeTitle) rows \(list.ids.count) messages \(messageCount) selected \(list.selectedIDs) title \(window?.title ?? "") \(list.debugResultBar)"
+        }
         /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
         func debugShowProgress() { updateProgress() }
 
@@ -986,30 +1024,107 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return item
     }
 
-    /// The threaded and flat list buttons (48 pt apart, as in MailMate); the one in use is shown pressed.
+    /// MailMate's Thread and Correspondence buttons (48 pt apart): the selected message's whole
+    /// conversation, or all mail with its correspondent, as a search result (see `showResult`).
     private func listStyleToolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
-        let threaded = Self.toolbarButton(symbol: "list.bullet.indent", pointSize: 16, label: "Show Threads", width: 32)
-        let flat = Self.toolbarButton(symbol: "list.bullet", pointSize: 16, label: "Show Messages Without Threads", width: 32)
-        for (button, action) in [(threaded, #selector(showThreadedList(_:))), (flat, #selector(showFlatList(_:)))] {
-            button.setButtonType(.pushOnPushOff)
-            button.target = self
-            button.action = action
-        }
-        let stack = NSStackView(views: [threaded, flat])
+        let thread = Self.toolbarButton(
+            symbol: ResultKind.thread.symbol, pointSize: 16, label: "Find and display messages from the same conversation", width: 32)
+        let people = Self.toolbarButton(
+            symbol: ResultKind.correspondents.symbol, pointSize: 16,
+            label: "Find and display messages between the same correspondents", width: 32)
+        thread.target = self
+        thread.action = #selector(showThreadResult(_:))
+        people.target = self
+        people.action = #selector(showCorrespondentsResult(_:))
+        let stack = NSStackView(views: [thread, people])
         stack.spacing = 16
         let item = ValidatingToolbarItem(itemIdentifier: id)
         item.view = stack
-        item.label = "List Style"
+        item.label = "Thread"
         item.onValidate = { [weak self] in
-            guard let self else { return }
-            threaded.state = showsThreads ? .on : .off
-            flat.state = showsThreads ? .off : .on
+            let enabled = !(self?.targetIDs.isEmpty ?? true)
+            thread.isEnabled = enabled
+            people.isEnabled = enabled
         }
         return item
     }
 
-    @objc private func showThreadedList(_ sender: Any?) { if !showsThreads { toggleThreads(sender) } }
-    @objc private func showFlatList(_ sender: Any?) { if showsThreads { toggleThreads(sender) } }
+    // MARK: Thread and correspondence results
+
+    private enum ResultKind {
+        case thread, correspondents
+
+        var title: String { self == .thread ? "Same thread" : "Correspondence" }
+        var symbol: String { self == .thread ? "list.bullet.indent" : "list.bullet" }
+    }
+
+    /// The search result on show: what it finds for which message (and its correspondent), and the
+    /// mailbox to go back to.
+    private struct Result {
+        var kind: ResultKind
+        var anchor: Int64
+        var email: String?
+        var back: (scope: MessageScope, title: String, colorKey: String?, hasMailbox: Bool)
+        /// Until it has loaded once: its message's conversation opens whole; after that it folds and
+        /// unfolds as usual.
+        var opening = true
+    }
+
+    private var result: Result?
+
+    @objc func showThreadResult(_ sender: Any?) { showResult(.thread) }
+
+    /// Choosing a mailbox while a result shows: the result goes (its bar too), without going back.
+    private func leaveResult() {
+        guard result != nil else { return }
+        result = nil
+        list.showResultBar(nil)
+    }
+    @objc func showCorrespondentsResult(_ sender: Any?) { showResult(.correspondents) }
+
+    /// As MailMate: the selected message's conversation, or all mail between it and its correspondent,
+    /// across All Messages, under a bar naming the search; that message stays selected. Cancel (or
+    /// Escape, or choosing a mailbox) goes back to the mailbox it came from.
+    private func showResult(_ kind: ResultKind) {
+        guard let anchor = targetIDs.first else { return NSSound.beep() }
+        var email: String?
+        if kind == .correspondents {
+            guard let found = try? model.store.correspondent(messageId: anchor, myAddresses: model.myAddresses) else {
+                return NSSound.beep()
+            }
+            email = found
+        }
+        let back = result?.back ?? (scope, scopeTitle, list.colorKey, hasMailbox)
+        if result == nil { saveView() }
+        result = Result(kind: kind, anchor: anchor, email: email, back: back)
+        hasMailbox = true
+        scopeTitle = "All Messages"
+        list.colorKey = nil
+        selectAfterMove = nil
+        pendingHistorySelection = anchor  // selected once the result has loaded
+        list.showResultBar(kind.title, symbol: kind.symbol) { [weak self] in self?.endResult() }
+        reloadList(.scopeChanged)
+    }
+
+    /// Back to the mailbox the result was opened from, as it was.
+    private func endResult() {
+        guard let back = result?.back else { return }
+        result = nil
+        list.showResultBar(nil)
+        scope = back.scope
+        scopeTitle = back.title
+        list.colorKey = back.colorKey
+        hasMailbox = back.hasMailbox
+        reloadList(.scopeChanged)
+    }
+
+    /// Remembers the list's selection and position in the current mailbox, for coming back to it.
+    private func saveView() {
+        remembered[scope] = SavedView(
+            selection: list.selectedIDs, anchor: list.scrollAnchor,
+            correspondenceSelection: correspondence.selectedIDs, correspondenceAnchor: correspondence.scrollAnchor,
+            displayed: messageView.displayedMessageID)
+    }
 
     @objc private func showFlagMenu(_ sender: NSButton) {
         let menu = NSMenu()
@@ -1483,6 +1598,13 @@ extension MainWindowController {
                 clearSearch()
                 return true
             }
+        }
+        // With no search to clear, Escape ends a thread or correspondence result (as its Cancel does).
+        if let window, event.window === window, window.attachedSheet == nil, modifiers.isEmpty, event.keyCode == 53,
+            search.isEmpty, result != nil, !(window.firstResponder is NSText)
+        {
+            endResult()
+            return true
         }
         guard let window, event.window === window, window.attachedSheet == nil,
             !(window.firstResponder is NSText), modifiers.isSubset(of: [.control])

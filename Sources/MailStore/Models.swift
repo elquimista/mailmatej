@@ -313,6 +313,8 @@ public indirect enum MessageScope: Hashable, Sendable {
     /// A special mailbox's submailbox (Inbox ▸ Alice): the child's messages, narrowed by the special
     /// mailbox's conditions (by its key).
     case within(String, MessageScope)
+    /// These messages (a search result: a message's whole conversation, say). Not saved in settings.
+    case messages([Int64])
 
     /// A stable string form, for settings: "all", "flagged", "role:inbox", "mailbox:42", "account:<id>",
     /// "flagged:mailbox:42", "flagged:account:<id>", "all:account:<id>".
@@ -333,6 +335,7 @@ public indirect enum MessageScope: Hashable, Sendable {
         case .smartAccountValue(let id, let account, let field, let value):
             "smartaccountvalue:\(id):\(account):\(field.rawValue):\(value)"
         case .within(let parent, let child): "within:\(parent)|\(child.key)"
+        case .messages(let ids): "messages:" + ids.map(String.init).joined(separator: ",")
         }
     }
 
