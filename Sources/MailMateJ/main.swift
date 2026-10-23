@@ -46,6 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSort(column: column)  // as a click on its header
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_EMPTY"] {
+                    // "<sidebar key>[|erase]": logs its Empty item; with erase, empties it as Erase does.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    for key in parts[0].split(separator: ",").map(String.init) {
+                        windowController?.debugEmpty(key: key, erase: parts.count > 1)
+                    }
+                    try? await Task.sleep(for: .seconds(4))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil {
                     NSLog("MMJ badges: \(windowController?.debugSidebarBadges ?? "")")
                 }

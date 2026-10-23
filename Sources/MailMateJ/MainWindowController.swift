@@ -552,6 +552,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
+        func debugEmpty(key: String, erase: Bool) { sidebar.debugEmpty(key: key, erase: erase) }
         /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
         func debugSort(column: String) {
             guard let prototype = list.tableView.tableColumn(withIdentifier: .init(column))?.sortDescriptorPrototype else {

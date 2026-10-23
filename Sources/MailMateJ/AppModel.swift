@@ -289,6 +289,13 @@ final class AppModel {
         }
     }
 
+    /// Erases every message a mailbox shows (Empty "Deleted Messages"): gone here at once, then deleted
+    /// for good on the servers.
+    func emptyMailbox(_ scope: MessageScope) {
+        guard let ids = try? store.messageIDs(scope: scope), !ids.isEmpty else { return }
+        perform(.deletePermanently, on: ids) { _ in true }  // asked before
+    }
+
     /// What's left for the server once the local change is made.
     private struct ServerWork {
         var updates: [(remoteIds: [String], patch: [String: JSONValue])] = []

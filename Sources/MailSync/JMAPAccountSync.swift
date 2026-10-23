@@ -547,15 +547,21 @@ public actor JMAPAccountSync {
     public func destroy(remoteIds: [String]) async throws {
         guard !remoteIds.isEmpty else { return }
         let accountId = try remoteAccountId(try await client.currentSession())
-        var request = JMAPRequest()
-        let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(remoteIds)])
-        // Already gone (deleted elsewhere, or by an earlier try whose reply was lost) counts as done.
-        let refused = (try await client.send(request).arguments(set)["notDestroyed"]?.objectValue ?? [:])
-            .filter { $0.value["type"]?.stringValue != "notFound" }
-        let failed = Set(refused.keys)
-        try store.deleteMessages(accountId: account.id, remoteIds: remoteIds.filter { !failed.contains($0) })
-        if !failed.isEmpty {
-            throw ChangeRefused(count: failed.count, deleting: true, reason: refused.values.first.map(Self.setErrorText))
+        var refused: [String: JSONValue] = [:]
+        // In batches, within what servers take in one call (an emptied Deleted Messages can hold thousands).
+        for start in stride(from: 0, to: remoteIds.count, by: 500) {
+            let batch = Array(remoteIds[start..<min(start + 500, remoteIds.count)])
+            var request = JMAPRequest()
+            let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(batch)])
+            // Already gone (deleted elsewhere, or by an earlier try whose reply was lost) counts as done.
+            for (id, error) in try await client.send(request).arguments(set)["notDestroyed"]?.objectValue ?? [:]
+            where error["type"]?.stringValue != "notFound" {
+                refused[id] = error
+            }
+            try store.deleteMessages(accountId: account.id, remoteIds: batch.filter { refused[$0] == nil })
+        }
+        if !refused.isEmpty {
+            throw ChangeRefused(count: refused.count, deleting: true, reason: refused.values.first.map(Self.setErrorText))
         }
     }
 

@@ -305,6 +305,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         func debugSelect(key: String) { select(key: key) }
 
+        /// Logs a mailbox's Empty item (title, enabled) and, with `erase`, empties it as Erase does.
+        func debugEmpty(key: String, erase: Bool) {
+            guard let node = find(key, in: roots) else { return NSLog("MMJ empty: no \(key)") }
+            let menu = NSMenu()
+            addEmptyItem(node, to: menu)
+            let item = menu.items.last { !$0.isSeparatorItem }
+            NSLog("MMJ empty: \(key) item=\(item?.title ?? "none") enabled=\(item?.action != nil)")
+            if erase, item?.action != nil, let scope = node.scope { model.emptyMailbox(scope) }
+        }
+
         func debugDuplicate(key: String) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ duplicate: no \(key)") }
             duplicate(node)
@@ -875,9 +885,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         if node.kind == .unified {
             add("Edit Mailbox…", #selector(editMailboxClicked(_:)))
+            addEmptyItem(node, to: menu)
             return
         }
         guard let accountId = node.accountId else { return }
+        if addEmptyItem(node, to: menu) { menu.addItem(.separator()) }
         let sync = menu.addItem(withTitle: "Sync Now", action: #selector(syncClicked(_:)), keyEquivalent: "")
         sync.representedObject = accountId
         sync.target = self
@@ -895,6 +907,54 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let remove = menu.addItem(withTitle: "Remove Account…", action: #selector(removeClicked(_:)), keyEquivalent: "")
             remove.representedObject = node
             remove.target = self
+        }
+    }
+
+    // MARK: Empty
+
+    /// MailMate's Empty "Deleted Messages"…, for a Deleted Messages mailbox (unified, or an account's),
+    /// greyed out when it's empty. Returns whether it was added.
+    @discardableResult
+    private func addEmptyItem(_ node: SidebarNode, to menu: NSMenu) -> Bool {
+        let isTrash: Bool
+        switch node.scope {
+        case .role("trash")?: isTrash = true
+        case .within(_, .role("trash"))?: isTrash = true
+        default: isTrash = node.role == "trash"
+        }
+        guard isTrash, let scope = node.scope else { return false }
+        menu.addItem(.separator())
+        let item = menu.addItem(withTitle: "Empty “\(emptyName(node))”…", action: #selector(emptyClicked(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = node
+        if ((try? model.store.count(scope: scope, counting: .all)) ?? 0) == 0 { item.action = nil }
+        return true
+    }
+
+    /// The mailbox's own name, as MailMate names it: an account's row under Deleted Messages is that
+    /// account's trash ("Deleted Items"), not the account.
+    private func emptyName(_ node: SidebarNode) -> String {
+        var scope = node.scope
+        if case .within(_, let inner)? = scope { scope = inner }
+        guard case .mailbox(let id)? = scope, let box = try? model.store.mailboxes().first(where: { $0.id == id }) else {
+            return node.title
+        }
+        return box.name
+    }
+
+    @objc private func emptyClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode, let scope = node.scope, let window = view.window else { return }
+        let count = (try? model.store.count(scope: scope, counting: .all)) ?? 0
+        guard count > 0 else { return }
+        let alert = NSAlert()
+        alert.messageText = "Erase the \(count == 1 ? "message" : "\(count) messages") in “\(emptyName(node))”?"
+        alert.informativeText = "They’re deleted for good, on the server too. This can’t be undone."
+        alert.addButton(withTitle: "Erase")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.model.emptyMailbox(scope)
         }
     }
 
