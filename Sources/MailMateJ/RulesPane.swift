@@ -693,14 +693,20 @@ final class RuleActionEditor: NSView, NSTextFieldDelegate {
         }
         // MailMate's: the unified mailboxes (each message's own Inbox, Archive, ...) without their
         // submailboxes, then the accounts ▸ their folders. Smart mailboxes, Flagged and All Messages can't
-        // receive messages, so they aren't offered.
+        // receive messages, so they aren't offered; unified mailboxes placed inside smart ones are, from
+        // wherever they are, in sidebar order.
         var roots: [SidebarNode] = []
         if let unified = context.roots.first(where: { $0.key == "header.mailboxes" }) {
             let header = SidebarNode(key: unified.key, kind: .header, title: unified.title)
-            header.children = unified.children.compactMap { node in
-                guard case .role? = node.scope else { return nil }
-                return SidebarNode(key: node.key, kind: node.kind, title: node.title, symbol: node.symbol, scope: node.scope)
+            func receiving(_ nodes: [SidebarNode]) -> [SidebarNode] {
+                nodes.flatMap { node -> [SidebarNode] in
+                    if node.kind == .unified, case .role? = node.scope {
+                        return [SidebarNode(key: node.key, kind: node.kind, title: node.title, symbol: node.symbol, scope: node.scope)]
+                    }
+                    return node.kind == .smart ? receiving(node.children) : []
+                }
             }
+            header.children = receiving(unified.children)
             roots.append(header)
         }
         roots += context.roots.filter { $0.key == "header.sources" }

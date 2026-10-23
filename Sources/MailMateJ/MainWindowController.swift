@@ -1547,7 +1547,14 @@ extension MainWindowController {
         if move && accounts.isEmpty { return NSSound.beep() }
 
         var choices: [MailboxPicker.Choice] = []
-        for node in roots.first(where: { $0.key == "header.mailboxes" })?.children ?? [] {
+        // The Mailboxes section's own, plus the unified mailboxes placed inside smart ones, in sidebar order.
+        func listed(_ nodes: [SidebarNode], top: Bool) -> [SidebarNode] {
+            nodes.flatMap { node -> [SidebarNode] in
+                let inner = node.kind == .smart ? listed(node.children, top: false) : []
+                return (top || node.kind == .unified ? [node] : []) + inner
+            }
+        }
+        for node in listed(roots.first(where: { $0.key == "header.mailboxes" })?.children ?? [], top: true) {
             guard let scope = node.scope else { continue }
             if move {
                 // Moving into a Unified mailbox means its role's mailbox in each message's account.
