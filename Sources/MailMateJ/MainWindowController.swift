@@ -285,6 +285,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Whether a mailbox is selected (not after the selected one was deleted).
     private var hasMailbox = true
 
+    /// How many messages the list holds, as of its last load.
+    private var messageCount = 0
+
     private func reloadList(_ reason: ReloadReason) {
         loadGeneration += 1
         let generation = loadGeneration
@@ -295,7 +298,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
         let started = Date()
         Task {
-            let (rows, newest, stages) = await Task.detached(priority: .userInitiated) {
+            let (rows, messages, newest, stages) = await Task.detached(priority: .userInitiated) {
                 let began = Date()
                 let list = threaded
                     ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
@@ -311,7 +314,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
                 let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
                 let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
-                return (rows, newest, stages)
+                // Every message of the list, collapsed threads' replies included (threadOf has each one).
+                return (rows, list?.threadOf.count ?? rows.count, newest, stages)
             }.value
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
@@ -319,6 +323,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
             #endif
             guard generation == loadGeneration else { return }
+            messageCount = messages
             let ids = rows.map(\.id)
             list.showsThreads = threaded
             list.expandedThreads = expanded
@@ -522,7 +527,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             window?.title = "No mailbox selected"  // MailMate's
             return
         }
-        let count = list.ids.count
+        // Messages, as MailMate counts them, not rows: a collapsed thread is one row.
+        let count = messageCount
         let mailbox = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
         let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
         window?.title = subject.map { ($0.isEmpty ? "(no subject)" : $0) + " — " + mailbox } ?? mailbox
