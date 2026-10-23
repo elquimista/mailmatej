@@ -368,6 +368,23 @@ def reply(name):
     print(f"  {name}: imported {import_batch(auth, account, [(raw, [inbox], {}, now)])} reply to {old['subject']!r}")
 
 
+def live_many(count, every):
+    """Delivers a message to a random one of user001..userNNN every `every` seconds, for soak tests."""
+    sessions = {}
+    while True:
+        name = f"user{random.randint(1, count):03}"
+        if name not in sessions:
+            auth, account = user_session(name)
+            sessions[name] = (auth, account, mailboxes(auth, account))
+        auth, account, boxes = sessions[name]
+        me = (name.capitalize(), f"{name}@{DOMAIN}")
+        person = random.choice(PEOPLE)
+        raw, _ = make_message(me, datetime.now(timezone.utc), False, person, random.choice(TOPICS).format(n=random.randint(1, 999)))
+        import_batch(auth, account, [(raw, [boxes["inbox"]], {}, datetime.now(timezone.utc))])
+        print(f"{datetime.now():%H:%M:%S} delivered to {name}", flush=True)
+        time.sleep(every)
+
+
 def live(name):
     auth, account = user_session(name)
     boxes = mailboxes(auth, account)
@@ -391,6 +408,7 @@ def main():
     p.add_argument("--thread", metavar="USER")
     p.add_argument("--undisclosed", metavar="USER")
     p.add_argument("--reply", metavar="USER")
+    p.add_argument("--live-many", type=float, metavar="SECONDS", help="deliver to random userNNN accounts this often")
     args = p.parse_args()
     random.seed(42)
     if args.live:
@@ -407,6 +425,8 @@ def main():
         return undisclosed(args.undisclosed)
     if args.reply:
         return reply(args.reply)
+    if args.live_many:
+        return live_many(args.accounts or 100, args.live_many)
     names = [f"user{i:03}" for i in range(1, args.accounts + 1)] if args.accounts else ["alice", "bob", "carol"]
     for name in names:
         ensure_user(name)
