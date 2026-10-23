@@ -1298,6 +1298,8 @@ public final class MailStore: Sendable {
         case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
         case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
         case .size: "m.size \(direction), m.receivedAt DESC"
+        case .unread: "NOT m.isSeen \(direction), m.receivedAt DESC"  // descending: unread first
+        case .flagged: "m.isFlagged \(direction), m.receivedAt DESC"
         }
     }
 

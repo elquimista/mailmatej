@@ -377,7 +377,12 @@ public enum MessageCount: Hashable, Sendable {
 }
 
 public struct MessageSort: Hashable, Sendable {
-    public enum Key: String, Sendable { case receivedAt, from, subject, size }
+    public enum Key: String, Sendable {
+        case receivedAt, from, subject, size, unread, flagged
+
+        /// Newest, unread or flagged first on the first click, as in MailMate; the rest A to Z.
+        public var startsDescending: Bool { self == .receivedAt || self == .unread || self == .flagged }
+    }
     public var key: Key
     public var ascending: Bool
 

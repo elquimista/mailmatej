@@ -23,6 +23,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             case .from: .from
             case .subject: .subject
             case .date: .receivedAt
+            case .unread: .unread
+            case .flag: .flagged
             default: nil
             }
         }
@@ -163,7 +165,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             }
             if let width = widths[column] { c.width = width }
             if let key = column.sortKey {
-                c.sortDescriptorPrototype = NSSortDescriptor(key: key.rawValue, ascending: key != .receivedAt)
+                c.sortDescriptorPrototype = NSSortDescriptor(key: key.rawValue, ascending: !key.startsDescending)
             }
             table.addTableColumn(c)
         }

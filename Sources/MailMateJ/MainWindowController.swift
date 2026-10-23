@@ -552,6 +552,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
+        /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
+        func debugSort(column: String) {
+            guard let prototype = list.tableView.tableColumn(withIdentifier: .init(column))?.sortDescriptorPrototype else {
+                return NSLog("MMJ sort: no sortable column \(column)")
+            }
+            list.tableView.sortDescriptors = [prototype]
+        }
         func debugDuplicateSidebar(_ key: String) { sidebar.debugDuplicate(key: key) }
         func debugNewSmartMailbox(inside key: String) { sidebar.debugNewSmartMailbox(inside: key) }
         func debugSymbolMenu(key: String, path: String) { sidebar.debugSymbolMenu(key: key, path: path) }

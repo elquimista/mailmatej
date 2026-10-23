@@ -42,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if let column = ProcessInfo.processInfo.environment["MMJ_DEBUG_SORT"] {
+                    windowController?.debugSort(column: column)  // as a click on its header
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil {
                     NSLog("MMJ badges: \(windowController?.debugSidebarBadges ?? "")")
                 }
