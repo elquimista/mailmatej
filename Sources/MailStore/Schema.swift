@@ -284,6 +284,17 @@ enum Schema {
             // All Messages): that mailbox's MessageScope key.
             try db.execute(sql: "ALTER TABLE smart_mailbox ADD COLUMN parentKey TEXT")
         }
+        m.registerMigration("v17-special-in-smart") { db in
+            // The other way round: a special mailbox (Inbox, Sent Messages, ...) placed inside a smart
+            // mailbox, by its MessageScope key; back at the top once that smart mailbox is deleted.
+            try db.execute(sql: """
+                CREATE TABLE special_placement (
+                    key TEXT PRIMARY KEY,
+                    parentId INTEGER NOT NULL REFERENCES smart_mailbox(id) ON DELETE CASCADE,
+                    sortOrder INTEGER NOT NULL DEFAULT 0
+                )
+                """)
+        }
 
         return m
     }

@@ -27,6 +27,27 @@ import Testing
             addresses: [.init(role: .from, name: nil, email: from), .init(role: .to, name: nil, email: to)])
     }
 
+    @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),
+        ])
+        // A smart mailbox with no mailboxes of its own, including its submailboxes.
+        let id = try store.createSmartMailbox(name: "Mine", parentId: nil)
+        try store.updateSmartMailbox(id: id, definition: SmartDefinition(sources: SmartSources(scopes: [], includeSubmailboxes: true)))
+        #expect(try store.messageIDs(scope: .smart(id)).isEmpty)
+        try store.placeSpecialMailbox(key: "role:sent", inside: id, index: 0)
+        #expect(try store.specialPlacements().map(\.key) == ["role:sent"])
+        #expect(try store.messageIDs(scope: .smart(id)).count == 1)  // Sent's message
+        try store.placeSpecialMailbox(key: "role:inbox", inside: id, index: 0)
+        #expect(try store.specialPlacements().map(\.key) == ["role:inbox", "role:sent"])  // in the order placed
+        #expect(try store.messageIDs(scope: .smart(id)).count == 2)
+        // Back at the top, and gone with the smart mailbox.
+        try store.placeSpecialMailbox(key: "role:inbox", inside: nil, index: 0)
+        #expect(try store.messageIDs(scope: .smart(id)).count == 1)
+        try store.deleteSmartMailbox(id: id)
+        #expect(try store.specialPlacements().isEmpty)
+    }
+
     @Test func smartMailboxesMatchTheirConditions() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "pay@payoneer.com", at: 100, subject: "You Have Received a Payment!"),

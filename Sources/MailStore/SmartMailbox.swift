@@ -403,6 +403,11 @@ final class SmartCatalog: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [Int64: SmartMailboxRecord] = [:]
     private var special: [String: SmartCondition] = [:]
+    /// Special mailboxes placed inside smart ones: their scope keys by smart mailbox, in order.
+    private var placed: [Int64: [String]] = [:]
+
+    func setPlaced(_ placements: [Int64: [String]]) { lock.withLock { placed = placements } }
+    func placed(in id: Int64) -> [String] { lock.withLock { placed[id] ?? [] } }
 
     /// The conditions narrowing special mailboxes, by scope key.
     func setSpecial(_ conditions: [String: SmartCondition]) { lock.withLock { special = conditions } }
@@ -436,6 +441,13 @@ extension MailStore {
         if smart.definition.sources.includeSubmailboxes {
             for child in smartCatalog.children(of: id) {
                 let (childClause, childArgs) = smartFilter(id: child.id, visited: inside)
+                clause = "(\(clause)) OR (\(childClause))"
+                args += childArgs
+            }
+            // Special mailboxes placed inside it are its submailboxes too.
+            for key in smartCatalog.placed(in: id) {
+                guard let scope = MessageScope(key: key) else { continue }
+                let (childClause, childArgs) = filterParts(scope: scope, search: nil)
                 clause = "(\(clause)) OR (\(childClause))"
                 args += childArgs
             }
@@ -632,6 +644,7 @@ extension MailStore {
             if let condition = try? JSONDecoder().decode(SmartCondition.self, from: Data(json.utf8)) { special[row["key"]] = condition }
         }
         smartCatalog.setSpecial(special)
+        smartCatalog.setPlaced(Dictionary(grouping: try specialPlacements(), by: \.parentId).mapValues { $0.map(\.key) })
         return list
     }
 
@@ -712,6 +725,33 @@ extension MailStore {
             try db.execute(sql: "UPDATE smart_mailbox SET parentId = ?, parentKey = ? WHERE id = ?", arguments: [parentId, key, id])
             for (order, sibling) in siblings.enumerated() {
                 try db.execute(sql: "UPDATE smart_mailbox SET sortOrder = ? WHERE id = ?", arguments: [order, sibling])
+            }
+        }
+        try refreshSmartCatalog()
+    }
+
+    /// Special mailboxes placed inside smart mailboxes: scope key, smart mailbox, in each one's order.
+    public func specialPlacements() throws -> [(key: String, parentId: Int64)] {
+        try dbPool.read { db in
+            try Row.fetchAll(db, sql: "SELECT key, parentId FROM special_placement ORDER BY parentId, sortOrder")
+                .map { ($0["key"], $0["parentId"]) }
+        }
+    }
+
+    /// Places a special mailbox (by scope key) inside smart mailbox `parentId` at `index` among the special
+    /// mailboxes there, or (nil) back among the top-level mailboxes.
+    public func placeSpecialMailbox(key: String, inside parentId: Int64?, index: Int) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM special_placement WHERE key = ?", arguments: [key])
+            guard let parentId else { return }
+            var keys = try String.fetchAll(
+                db, sql: "SELECT key FROM special_placement WHERE parentId = ? ORDER BY sortOrder", arguments: [parentId])
+            keys.insert(key, at: min(max(0, index), keys.count))
+            try db.execute(sql: "DELETE FROM special_placement WHERE parentId = ?", arguments: [parentId])
+            for (order, placed) in keys.enumerated() {
+                try db.execute(
+                    sql: "INSERT INTO special_placement (key, parentId, sortOrder) VALUES (?, ?, ?)",
+                    arguments: [placed, parentId, order])
             }
         }
         try refreshSmartCatalog()

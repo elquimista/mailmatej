@@ -377,6 +377,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         unified.children.append(all)
         unified.children += smartNodes(store: store, accounts: accountsByID)
         unified.children = ordered(unified.children)
+        // Special mailboxes placed inside smart ones go there, after its own smart submailboxes.
+        for placement in (try? store.specialPlacements()) ?? [] {
+            guard let special = unified.children.first(where: { $0.kind == .unified && $0.scope?.key == placement.key }),
+                let parent = node(withKey: "smart.\(placement.parentId)", in: [unified]), !contains(special, parent)
+            else { continue }
+            unified.children.removeAll { $0 === special }
+            let at = parent.children.lastIndex { $0.kind == .smart || $0.kind == .unified }.map { $0 + 1 } ?? 0
+            parent.children.insert(special, at: at)
+        }
 
         let sources = SidebarNode(key: "header.sources", kind: .header, title: "Sources")
         let byAccount = Dictionary(grouping: mailboxes, by: \.accountId)
@@ -584,8 +593,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// What can be dragged: the special and smart mailboxes (in Mailboxes) and the accounts (in Sources).
     private func isDraggable(_ node: SidebarNode) -> Bool {
         guard !isInEditor else { return false }
-        return (node.kind == .unified && roots.first?.children.contains { $0 === node } == true)
-            || node.kind == .smart || node.kind == .account
+        // Special mailboxes at the top or placed in a smart mailbox (not All / Junk / Deleted, part of All Messages).
+        return (node.kind == .unified && node.key != "unified.everything") || node.kind == .smart || node.kind == .account
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
@@ -599,9 +608,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         info.draggingPasteboard.string(forType: Self.dragType).flatMap { find($0, in: roots) }
     }
 
-    /// Where a drop may go: special mailboxes anywhere among Mailboxes; smart mailboxes there too, or
-    /// into (onto, or among the smart mailboxes in) another smart mailbox, not one inside themselves;
-    /// accounts among the accounts.
+    /// Where a drop may go: special mailboxes anywhere among Mailboxes, or into (onto, or among the
+    /// mailboxes in) a smart mailbox not inside themselves; smart mailboxes there too, or into another
+    /// smart mailbox likewise; accounts among the accounts.
     func outlineView(
         _ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int
     ) -> NSDragOperation {
@@ -610,7 +619,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         case .account:
             return target.key == "header.sources" && index >= 0 ? .move : []
         case .unified:
-            return target.key == "header.mailboxes" && index >= 0 ? .move : []
+            if target.key == "header.mailboxes" { return index >= 0 ? .move : [] }
+            guard target.kind == .smart, !Self.contains(node, target) else { return [] }
+            // After its smart submailboxes, among the special mailboxes placed there.
+            let start = target.children.prefix { $0.kind == .smart }.count
+            let placed = target.children.filter { $0.kind == .unified }.count
+            return index == -1 || (index >= start && index <= start + placed) ? .move : []
         case .smart:
             if target.key == "header.mailboxes" { return index >= 0 ? .move : [] }
             guard target.kind == .smart || target.kind == .unified, target !== node, !Self.contains(node, target) else { return [] }
@@ -621,6 +635,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         default:
             return []
         }
+    }
+
+    private static func node(withKey key: String, in nodes: [SidebarNode]) -> SidebarNode? {
+        for node in nodes {
+            if node.key == key { return node }
+            if let found = self.node(withKey: key, in: node.children) { return found }
+        }
+        return nil
     }
 
     private static func contains(_ node: SidebarNode, _ other: SidebarNode) -> Bool {
@@ -636,12 +658,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @discardableResult
     private func move(_ node: SidebarNode, into target: SidebarNode, at index: Int) -> Bool {
         switch node.kind {
+        case .unified where target.kind == .smart:
+            guard case .smart(let parent)? = target.scope, let key = node.scope?.key else { return false }
+            let placed = target.children.filter { $0.kind == .unified }
+            let start = target.children.prefix { $0.kind == .smart }.count
+            let old = placed.firstIndex { $0 === node } ?? Int.max
+            let position = index - start
+            let at = index == -1 ? placed.count : (position > old ? position - 1 : position)
+            try? model.store.placeSpecialMailbox(key: key, inside: parent, index: at)
         case .account:
             var ids = target.children.compactMap(\.accountId).filter { $0 != node.accountId }
             let old = target.children.firstIndex { $0 === node } ?? Int.max
             ids.insert(node.accountId ?? "", at: min(index > old ? index - 1 : index, ids.count))
             try? model.store.setAccountOrder(ids)
         case .unified, .smart where target.key == "header.mailboxes":
+            if node.kind == .unified, let key = node.scope?.key {  // out of any smart mailbox it was in
+                try? model.store.placeSpecialMailbox(key: key, inside: nil, index: 0)
+            }
             var keys = target.children.map(\.key).filter { $0 != node.key }
             let old = target.children.firstIndex { $0 === node } ?? Int.max
             keys.insert(node.key, at: min(index > old ? index - 1 : index, keys.count))
