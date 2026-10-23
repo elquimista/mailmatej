@@ -281,6 +281,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     MailboxEditorWindowController.show(key: parts[0], model: AppModel.shared, over: target)
                     try? await Task.sleep(for: .seconds(1))
                     if parts.count > 1 { MailboxEditorWindowController.debugShow(tab: parts[1]) }
+                    if let width = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_WIDTH"] ?? ""),
+                        let editor = NSApp.windows.first(where: { $0.windowController is MailboxEditorWindowController })
+                    {
+                        var frame = editor.frame
+                        frame.size.width = width
+                        editor.setFrame(frame, display: true)  // as dragging its edge would
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_HOVER"] != nil { MailboxEditorWindowController.debugHoverTabs() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] != nil { MailboxEditorWindowController.debugDumpMailboxMenu() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_DUP_UNGROUP"] != nil { MailboxEditorWindowController.debugDuplicateAndUngroup() }

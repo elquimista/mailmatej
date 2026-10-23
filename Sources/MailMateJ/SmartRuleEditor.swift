@@ -101,8 +101,6 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         /// The row's controls, left to right (checkbox first in Conditions).
         var controls: [NSView] = []
         var valueControl: NSView?
-        /// The value field's own width, before it gives way to ⊖ ⊕.
-        var fullValueWidth: CGFloat?
         /// The mailbox menu behind a mailbox pull-down (kept alive with the row).
         var mailboxMenu: MailboxMenu?
         /// The field menu behind the field pop-up (kept alive with the row).
@@ -219,7 +217,6 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         row.valueControl = nil
         row.mailboxMenu = nil
         row.fieldMenu = nil
-        row.fullValueWidth = nil
         row.minus.removeFromSuperview()
         row.plus.removeFromSuperview()
     }
@@ -508,11 +505,9 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
                 var frame = control.frame
                 frame.origin.x = isCheckbox ? x - 1 : x
                 frame.origin.y = (top + (Self.rowHeight - 1 - frame.height) / 2).rounded()
-                // As MailMate's: the value field gives way to ⊖ ⊕ in a narrow editor (a rule's).
-                if control === row.valueControl, control is NSTextField {
-                    if row.fullValueWidth == nil { row.fullValueWidth = frame.width }
-                    let room = bounds.width - 10 - 18 - 20 - 6 - frame.origin.x
-                    frame.size.width = max(60, min(row.fullValueWidth ?? frame.width, room))
+                // As MailMate's: a text value field fills the row up to ⊖ ⊕, following the editor's width.
+                if control === row.valueControl, control is NSTextField, control === row.controls.last {
+                    frame.size.width = max(60, bounds.width - 10 - 18 - 20 - 6 - frame.origin.x)
                 }
                 control.frame = frame
                 x = isCheckbox ? x + 19 : x + frame.width + 7

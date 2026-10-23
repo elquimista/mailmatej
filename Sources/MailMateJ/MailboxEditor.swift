@@ -70,7 +70,8 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
             backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.toolbarStyle = .unified
-        window.minSize = NSSize(width: 700, height: 360)
+        // Narrow enough to be out of the way, wide enough for a rule's rows beside the rule list.
+        window.minSize = NSSize(width: 960, height: 360)
         window.setFrameAutosaveName("MailboxEditor")
         super.init(window: window)
         window.delegate = self

@@ -290,6 +290,11 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
         let buttonY = detail.bounds.height - 20 - commitButton.frame.height + 8
         commitButton.frame.origin = NSPoint(x: width - 27 - commitButton.frame.width + 7, y: buttonY)
         revertButton.frame.origin = NSPoint(x: commitButton.frame.minX - 9 - revertButton.frame.width + 4, y: buttonY)
+        // As in MailMate, they follow the window's width: the description and the condition and action
+        // tables stretch, the buttons keep to the right edge.
+        for view in [descriptionField, conditions, actions] as [NSView] { view.autoresizingMask = [.width] }
+        commitButton.autoresizingMask = [.minXMargin, .minYMargin]
+        revertButton.autoresizingMask = [.minXMargin, .minYMargin]
     }
 
     private func changed() { dirty = true }
@@ -732,8 +737,8 @@ final class RuleActionEditor: NSView, NSTextFieldDelegate {
                 var frame = control.frame
                 frame.origin.x = i == 0 ? x - 1 : x
                 frame.origin.y = (top + (SmartRuleEditor.rowHeight - 1 - frame.height) / 2).rounded()
-                if control is NSTextField, !(control is NSPopUpButton) {  // the address gives way to ⊖ ⊕
-                    frame.size.width = max(80, min(173, bounds.width - 10 - 18 - 20 - 6 - frame.origin.x))
+                if control is NSTextField, !(control is NSPopUpButton) {  // the address fills the row up to ⊖ ⊕
+                    frame.size.width = max(80, bounds.width - 10 - 18 - 20 - 6 - frame.origin.x)
                 }
                 control.frame = frame
                 x = i == 0 ? x + 19 : x + frame.width + 7
