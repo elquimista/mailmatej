@@ -126,8 +126,32 @@ final class MenuParentClicks: NSObject, NSMenuDelegate {
             openingClick = false
             return
         }
-        guard let item = highlighted, item.hasSubmenu, item.isEnabled, let choose = onParent(item) else { return }
+        // A parent stays highlighted while its submenu is open, also once the pointer has left the menus:
+        // a release out there chooses nothing.
+        guard Self.pointerIsOverMenu(), let item = highlighted, item.hasSubmenu, item.isEnabled,
+            let choose = onParent(item)
+        else { return }
         rootMenu?.cancelTracking()
         DispatchQueue.main.async(execute: choose)
+    }
+
+    /// Whether the frontmost window under the pointer is one of this app's open menus.
+    private static func pointerIsOverMenu() -> Bool {
+        guard let screen = NSScreen.screens.first else { return false }
+        let mouse = NSEvent.mouseLocation
+        return isMenu(at: CGPoint(x: mouse.x, y: screen.frame.maxY - mouse.y))  // window list bounds are top-down
+    }
+
+    static func isMenu(at point: CGPoint) -> Bool {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        for info in windows {
+            guard let bounds = (info[kCGWindowBounds as String] as? NSDictionary)
+                .flatMap({ CGRect(dictionaryRepresentation: $0) }), bounds.contains(point)
+            else { continue }
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            let owner = info[kCGWindowOwnerPID as String] as? pid_t ?? 0
+            return layer == Int(CGWindowLevelForKey(.popUpMenuWindow)) && owner == ProcessInfo.processInfo.processIdentifier
+        }
+        return false
     }
 }
