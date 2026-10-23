@@ -9,6 +9,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
+        #if DEBUG
+            // MMJ_APPEARANCE=light|dark: the app in that appearance, whatever the system's.
+            if let name = ProcessInfo.processInfo.environment["MMJ_APPEARANCE"] {
+                NSApp.appearance = NSAppearance(named: name == "light" ? .aqua : .darkAqua)
+            }
+        #endif
         do {
             try AppModel.bootstrap()
         } catch {
@@ -135,6 +141,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 {
                     windowController?.debugRender(html: html)
                     try? await Task.sleep(for: .seconds(2))
+                }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_LAYOUT"] != nil {
+                    try? await Task.sleep(for: .seconds(1))
+                    NSLog("MMJ message layout: \(windowController?.debugMessageLayout ?? "-")")
                 }
                 if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_LOAD_REMOTE"] != nil {
                     try? await Task.sleep(for: .seconds(1))

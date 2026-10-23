@@ -333,6 +333,6 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
 }
 
 /// A view whose y runs top-down, so frames read like the measurements.
-private final class FlippedView: NSView {
+final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

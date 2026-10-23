@@ -5,15 +5,23 @@ import Quartz
 import UniformTypeIdentifiers
 import WebKit
 
-/// Shows one message as a single web page: header fields, the remote-content bar and the body,
-/// so they scroll together. Scripts never run. Embedded images always show; remote content is
-/// blocked unless the user loads it, and trackers/insecure loads never load.
+/// Shows one message: the native header block (fields, attachments, remote-content bar) over the
+/// message content in a web view, one under the other in a native scroll view, so they scroll together
+/// as in MailMate while the email's CSS can't reach the headers. The web view is as tall as its content
+/// (a script in the app's own world reports the height as it changes). Scripts never run. Embedded
+/// images always show; remote content is blocked unless the user loads it, and trackers/insecure loads
+/// never load.
 @MainActor
-final class MessageViewController: NSViewController, WKNavigationDelegate {
+final class MessageViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
     private let model: AppModel
     private let placeholder = NSTextField(labelWithString: "No Message Selected")
     private let linkPreview = LinkPreviewView()
     private var webView: MessageWebView!
+    private let header = MessageHeaderView()
+    private let scroll = MessageScrollView()
+    private let document = FlippedView()
+    /// The content's height as the page last reported it (points).
+    private var contentHeight: CGFloat = 0
     private let partHandler: EmbeddedPartSchemeHandler
 
     private var currentID: Int64?
@@ -33,8 +41,6 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private var flagsMonitor: Any?
     /// The user clicked Load for the message on screen.
     private var loadRemoteForCurrent = false
-    /// Identifies this page's action links, so links inside an email can't trigger them.
-    private var actionToken = UUID().uuidString
 
     /// Blocks every network load. Attached unless the user loads remote content.
     private static var blockAllRules: WKContentRuleList?
@@ -59,21 +65,21 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         config.websiteDataStore = .nonPersistent()
         config.suppressesIncrementalRendering = true
         config.setURLSchemeHandler(partHandler, forURLScheme: MessageHTML.cidScheme)
+        // The content's height, from the app's own script world (the email can't see or affect it).
+        config.userContentController.addUserScript(WKUserScript(
+            source: Self.heightScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
+        config.userContentController.add(WeakMessageHandler(self), contentWorld: .defaultClient, name: "mmjHeight")
         webView = MessageWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsMagnification = true
-        webView.onOpen = { [weak self] in self?.openAttachment($0) }
-        webView.onButton = { [weak self] index, action, modifiers in
-            switch action {
-            case "quicklook": self?.quickLookAttachment(index)
-            // As MailMate's download button: saves to Downloads; with ⌥, asks where to save.
-            case "save" where modifiers.contains(.option): self?.saveAttachment(index)
-            case "save": self?.saveAttachmentToDownloads(index)
-            default: break
-            }
-        }
-        webView.menuForAttachment = { [weak self] in self?.attachmentMenu($0) }
-        webView.dragItem = { [weak self] in self?.draggingItem(forAttachment: $0) }
+
+        header.onOpen = { [weak self] in self?.openAttachment($0) }
+        header.onQuickLook = { [weak self] in self?.quickLookAttachment($0) }
+        // As MailMate's download button: saves to Downloads; with ⌥, asks where to save.
+        header.onSave = { [weak self] index, option in option ? self?.saveAttachment(index) : self?.saveAttachmentToDownloads(index) }
+        header.menuForAttachment = { [weak self] in self?.attachmentMenu($0) }
+        header.dragItem = { [weak self] in self?.draggingItem(forAttachment: $0) }
+        header.onBarAction = { [weak self] action, button in self?.perform(action, from: button) }
         // ⌥ changes what the download button does, so its icon and tooltip follow the key.
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.showOptionVariants(event.modifierFlags.contains(.option))
@@ -93,17 +99,27 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         placeholder.textColor = .tertiaryLabelColor
         placeholder.alignment = .center
 
+        document.addSubview(header)
+        document.addSubview(webView)
+        scroll.documentView = document
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipResized), name: NSView.frameDidChangeNotification, object: scroll.contentView)
+
         let root = NSView()
         linkPreview.isHidden = true
-        for v in [webView!, placeholder, linkPreview] as [NSView] {
+        for v in [scroll, placeholder, linkPreview] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: root.topAnchor),
-            webView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             placeholder.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             root.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
@@ -116,6 +132,66 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         showPlaceholder("No Message Selected")
     }
 
+    // MARK: Layout
+
+    /// Reports the content's height whenever it changes (images loading, the pane resized): the end
+    /// marker's position, which the page puts right after the content.
+    private static let heightScript = """
+        (() => {
+          let last = -1, pending = false;
+          const report = () => {
+            pending = false;
+            const end = document.querySelector('mmj-end');
+            const height = Math.ceil(end ? end.getBoundingClientRect().top + window.scrollY : document.body.scrollHeight);
+            if (height !== last) { last = height; window.webkit.messageHandlers.mmjHeight.postMessage(height); }
+          };
+          const schedule = () => { if (!pending) { pending = true; setTimeout(report, 0); } };
+          const observer = new ResizeObserver(schedule);
+          observer.observe(document.documentElement);
+          if (document.body) observer.observe(document.body);
+          document.addEventListener('load', schedule, true);
+          schedule();
+        })();
+        """
+
+    nonisolated func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        MainActor.assumeIsolated {
+            if let height = (message.body as? NSNumber)?.doubleValue { contentHeightChanged(height) }
+        }
+    }
+
+    /// Points: the page measures in CSS pixels, which zooming scales. Capped against a page that grows
+    /// with its own view (`min-height: 120vh`).
+    private func contentHeightChanged(_ height: Double) {
+        let points = min(CGFloat(height) * webView.magnification, 200_000)
+        guard points != contentHeight else { return }
+        contentHeight = points
+        layoutDocument()
+    }
+
+    /// Measures the content once more when the page has loaded (the script reports changes after that).
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webView.callAsyncJavaScript(
+            "const e = document.querySelector('mmj-end'); return e ? Math.ceil(e.getBoundingClientRect().top + window.scrollY) : 0;",
+            arguments: [:], in: nil, in: .defaultClient
+        ) { [weak self] result in
+            if let height = (try? result.get()) as? Double, height > 0 { self?.contentHeightChanged(height) }
+        }
+    }
+
+    @objc private func clipResized() { layoutDocument() }
+
+    /// The header on top, the content under it, as tall as the content (and at least down to the
+    /// pane's bottom, so the page's background fills it).
+    private func layoutDocument() {
+        let width = scroll.contentView.bounds.width
+        let headerHeight = header.height(forWidth: width)
+        let webHeight = max(contentHeight, scroll.contentView.bounds.height - headerHeight)
+        header.frame = NSRect(x: 0, y: 0, width: width, height: headerHeight)
+        webView.frame = NSRect(x: 0, y: headerHeight, width: width, height: webHeight)
+        document.frame = NSRect(x: 0, y: 0, width: width, height: headerHeight + webHeight)
+    }
+
     func show(messageID: Int64?, selectionCount: Int = 1) {
         guard let messageID else {
             currentID = nil
@@ -123,6 +199,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             return
         }
         guard messageID != currentID else { return }
+        scroll.contentView.scroll(to: .zero)  // a new message starts at its top
+        scroll.reflectScrolledClipView(scroll.contentView)
         currentID = messageID
         currentBody = nil
         loadRemoteForCurrent = false
@@ -133,7 +211,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
         currentDetail = detail
         placeholder.isHidden = true
-        webView.isHidden = false
+        scroll.isHidden = false
         onDisplay?(messageID)
 
         if let body = try? model.store.body(messageId: messageID) {
@@ -163,8 +241,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     private func showPlaceholder(_ text: String) {
         placeholder.stringValue = text
         placeholder.isHidden = false
-        webView.isHidden = true
+        scroll.isHidden = true
         currentDetail = nil
+        header.update(fields: [], attachments: [], bar: nil)
         webView.loadHTMLString("", baseURL: nil)
     }
 
@@ -179,7 +258,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     private var currentSender: String? { currentDetail?.addresses(.from).first?.email }
 
-    private var headerFields: [MessagePage.HeaderField] {
+    private var headerFields: [MessageHeaderView.Field] {
         guard let detail = currentDetail else { return [] }
         func list(_ role: AddressRole, groups: AddressRole? = nil) -> String {
             // Empty groups show by name, as MailMate shows "undisclosed-recipients".
@@ -194,7 +273,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
         return [
             .init(label: "From:", value: list(.from)),
-            .init(label: "Subject:", value: detail.subject, emphasized: true),
+            .init(label: "Subject:", value: detail.subject),
             .init(label: "Date:", value: Formatters.fullDate(detail.sentAt ?? detail.receivedAt)),
             .init(label: "To:", value: list(.to, groups: .toGroup)),
             .init(label: "Cc:", value: list(.cc, groups: .ccGroup)),
@@ -232,13 +311,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     }
 
     private func loadPage(content: String, bar: MessagePage.Bar?, plain: Bool, remote: Bool) {
-        actionToken = UUID().uuidString
-        webView.token = actionToken
-        webView.resetAttachmentTracking()
-        let html = MessagePage.html(
-            headers: headerFields, attachments: attachments.map(Self.pageAttachment),
-            attachmentButtons: attachments.isEmpty ? [] : Self.attachmentButtons, bar: bar, content: content,
-            plain: plain, remote: remote, token: actionToken)
+        webView.resetHover()
+        header.update(fields: headerFields, attachments: attachments.map(Self.headerAttachment), bar: bar)
+        showsOptionVariants = false
+        header.showsOptionVariants = NSEvent.modifierFlags.contains(.option)
+        contentHeight = 0  // until the new page reports its own
+        layoutDocument()
+        let html = MessagePage.html(content: content, plain: plain, remote: remote)
         #if DEBUG
             if let path = ProcessInfo.processInfo.environment["MMJ_DUMP_HTML"] {
                 try? html.write(toFile: path, atomically: true, encoding: .utf8)
@@ -284,12 +363,33 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
     }
 
-    private static var iconCache: [String: String] = [:]
-
-    static func pageAttachment(_ part: MessagePart) -> MessagePage.Attachment {
+    static func headerAttachment(_ part: MessagePart) -> MessageHeaderView.Attachment {
         let name = AppModel.fileName(for: part)
-        let size = part.size.map(Self.binarySize) ?? ""
-        return MessagePage.Attachment(name: name, size: size, icon: iconDataURL(forFileNamed: name, type: part.type))
+        let ext = (name as NSString).pathExtension.lowercased()
+        let type = UTType(filenameExtension: ext) ?? UTType(mimeType: part.type) ?? .data
+        return MessageHeaderView.Attachment(name: name, size: part.size.map(Self.binarySize) ?? "", icon: icon(for: type))
+    }
+
+    private static var iconCache: [String: NSImage] = [:]
+
+    /// The type's Finder icon, drawn at 40 px and shown at 20 pt (sharp on Retina, and at 1x the same
+    /// pixels MailMate shows), cached per type.
+    private static func icon(for type: UTType) -> NSImage {
+        if let cached = iconCache[type.identifier] { return cached }
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        if let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 40, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSWorkspace.shared.icon(for: type).draw(in: NSRect(x: 0, y: 0, width: 40, height: 40))
+            NSGraphicsContext.restoreGraphicsState()
+            rep.size = NSSize(width: 20, height: 20)
+            image.addRepresentation(rep)
+        }
+        iconCache[type.identifier] = image
+        return image
     }
 
     /// "51 B", "4.2 KiB", "32.6 KiB": binary units, as MailMate shows attachment sizes.
@@ -303,61 +403,6 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             value /= 1024
         }
         return "\(bytes) B"
-    }
-
-    /// The rows' round buttons, drawn as MailMate draws them (measured at 1x): 20 px grey circles showing
-    /// as (171, 172, 172), with the symbol cut out. Drawn in 157, which WebKit shows as 171 here.
-    private static let attachmentButtons: [MessagePage.AttachmentButton] = [
-        .init(action: "quicklook", title: "Quick Look", icon: circleButtonDataURL("eye.circle.fill")),
-        .init(
-            action: "save", title: "Save to Downloads", icon: circleButtonDataURL("arrow.down.circle.fill"),
-            optionTitle: "Save As…", optionIcon: circleButtonDataURL("folder.circle.fill")),
-    ]
-
-    private static func circleButtonDataURL(_ symbolName: String) -> String {
-        guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 32, weight: .regular))
-        else { return "" }
-        // The circle's ink, scaled to exactly 40 × 40 pixels (20 pt on Retina).
-        let ink = MessageListViewController.inkBounds(of: symbol, integral: false)
-        let side = 40
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-        else { return "" }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        let scale = CGFloat(side) / max(ink.width, ink.height)
-        symbol.draw(
-            in: NSRect(x: -ink.minX * scale, y: -ink.minY * scale, width: symbol.size.width * scale, height: symbol.size.height * scale))
-        NSColor(srgbRed: 157 / 255, green: 157 / 255, blue: 157 / 255, alpha: 1).set()
-        NSRect(x: 0, y: 0, width: side, height: side).fill(using: .sourceAtop)
-        NSGraphicsContext.restoreGraphicsState()
-        return rep.representation(using: .png, properties: [:]).map { "data:image/png;base64," + $0.base64EncodedString() } ?? ""
-    }
-
-    /// The file type's Finder icon as a 40 px PNG (sharp at 20 pt on Retina), cached per type.
-    private static func iconDataURL(forFileNamed name: String, type: String) -> String {
-        let ext = (name as NSString).pathExtension.lowercased()
-        let key = ext.isEmpty ? type : ext
-        if let cached = iconCache[key] { return cached }
-        let utType = UTType(filenameExtension: ext) ?? UTType(mimeType: type) ?? .data
-        let icon = NSWorkspace.shared.icon(for: utType)
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 40, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-        var url = ""
-        if let rep {
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            icon.draw(in: NSRect(x: 0, y: 0, width: 40, height: 40))
-            NSGraphicsContext.restoreGraphicsState()
-            if let png = rep.representation(using: .png, properties: [:]) {
-                url = "data:image/png;base64," + png.base64EncodedString()
-            }
-        }
-        iconCache[key] = url
-        return url
     }
 
     /// Runs `body` with the attachment as a file, or reports why it couldn't be fetched.
@@ -543,20 +588,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             fileType: type.identifier,
             delegate: AttachmentPromiseDelegate(model: model, messageId: id, index: index, accountId: detail.accountId, part: part))
         let item = NSDraggingItem(pasteboardWriter: promise)
-        let icon = NSWorkspace.shared.icon(for: type)
-        let location = webView.convert(view.window?.mouseLocationOutsideOfEventStream ?? .zero, from: nil)
-        item.setDraggingFrame(NSRect(x: location.x - 16, y: location.y - 16, width: 32, height: 32), contents: icon)
-        return item
+        item.setDraggingFrame(NSRect(x: 0, y: 0, width: 32, height: 32), contents: NSWorkspace.shared.icon(for: type))
+        return item  // placed under the pointer by the row
     }
 
-    private func showOptionVariants(_ on: Bool, force: Bool = false) {
-        guard on != showsOptionVariants || force, !attachments.isEmpty || !on else {
-            showsOptionVariants = on
-            return
-        }
+    private func showOptionVariants(_ on: Bool) {
         showsOptionVariants = on
-        webView.callAsyncJavaScript(
-            MessagePage.optionKeyScript, arguments: ["option": on], in: nil, in: .defaultClient, completionHandler: nil)
+        header.showsOptionVariants = on
     }
 
     /// Keys released while another app is in front never reach us.
@@ -584,13 +622,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
 
     // MARK: Remote-content actions
 
-    private func perform(_ action: MessagePage.Action) {
+    private func perform(_ action: MessagePage.Action, from button: NSView? = nil) {
         switch action {
         case .load:
             loadRemoteForCurrent = true
             rerender()
         case .alwaysLoadMenu:
-            showAlwaysLoadMenu()
+            showAlwaysLoadMenu(under: button)
         case .stopAlwaysLoading:
             guard let sender = currentSender else { return }
             for entry in (try? model.store.remoteContentAllowEntries(email: sender)) ?? [] {
@@ -601,15 +639,14 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
         }
     }
 
-    private func showAlwaysLoadMenu() {
-        guard let sender = currentSender, let window = view.window else { return }
+    private func showAlwaysLoadMenu(under button: NSView?) {
+        guard let sender = currentSender, let anchor = button ?? view.window?.contentView else { return }
         let menu = NSMenu()
         menu.addItem(alwaysLoadItem(title: sender, value: sender))
         if let domain = sender.split(separator: "@").last {
             menu.addItem(alwaysLoadItem(title: "Anyone at \(domain)", value: "@\(domain)"))
         }
-        let point = webView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        menu.popUp(positioning: nil, at: point, in: webView)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.isFlipped ? anchor.bounds.height + 2 : -2), in: anchor)
     }
 
     private func alwaysLoadItem(title: String, value: String) -> NSMenuItem {
@@ -634,62 +671,16 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     #if DEBUG
         func debugLoadRemote() { perform(.load) }
 
-        /// Logs what the app-world hit test finds at each attachment item's center, then fetches the
-        /// first attachment to a file (without opening it) and logs its path and quarantine flag.
+        /// Logs the attachments, Quick Looks the second with MMJ_DEBUG_QUICKLOOK, and fetches the first to a
+        /// file (without opening it), logging its path and quarantine flag.
         func debugCheckAttachments() async {
             NSLog("MMJ attachments: \(attachments.map { AppModel.fileName(for: $0) })")
-            try? await Task.sleep(for: .seconds(1))  // Let the page finish loading.
-            func run(_ script: String) async -> String {
-                await withCheckedContinuation { done in
-                    webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .defaultClient) { result in
-                        done.resume(returning: String(describing: result))
-                    }
-                }
-            }
-            let probe = await run(
-                "return document.querySelectorAll('mmj-att').length + ' items, page scripts ' + "
-                    + "(document.querySelector('noscript') ? 'n/a' : 'off')")
-            NSLog("MMJ attachment probe: \(probe)")
-            NSLog("MMJ chrome style: \(await run("const c = getComputedStyle(document.querySelector('mmj-chrome')); return c.backgroundColor + ' ' + c.opacity + ' scheme ' + matchMedia('(prefers-color-scheme: dark)').matches"))")
-            let centers = await run(
-                "return [...document.querySelectorAll('mmj-att')].map(e => { const r = e.getBoundingClientRect(); "
-                    + "const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); "
-                    + "const item = hit && hit.closest('mmj-attachments mmj-att'); "
-                    + "return item ? item.getAttribute('data-mmj-att') : 'miss'; }).join(' ')")
-            NSLog("MMJ attachment hit test: \(centers) token=\(actionToken)")
-
-            // Hover detection as the pointer would drive it: a synthetic move over the second item.
-            let rect = await run(
-                "const r = document.querySelectorAll('mmj-att')[1].querySelector('mmj-btn').getBoundingClientRect(); "
-                    + "return (r.x + r.width / 2) + ',' + (r.y + r.height / 2)")
-            let numbers = rect.replacingOccurrences(of: "success(", with: "").replacingOccurrences(of: ")", with: "")
-                .split(separator: ",").compactMap { Double($0) }
-            if numbers.count == 2, let window = view.window {
-                let inView = NSPoint(x: numbers[0], y: webView.isFlipped ? numbers[1] : webView.bounds.height - numbers[1])
-                let inWindow = webView.convert(inView, to: nil)
-                if let move = NSEvent.mouseEvent(
-                    with: .mouseMoved, location: inWindow, modifierFlags: [], timestamp: 0,
-                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
-                {
-                    webView.mouseMoved(with: move)
-                    try? await Task.sleep(for: .milliseconds(500))
-                    NSLog("MMJ attachment hovered after move: \(String(describing: webView.hoveredAttachment)) button=\(String(describing: webView.hoveredButton))")
-                    NSLog("MMJ attachment menu: \(attachmentMenu(1)?.items.map(\.title) ?? [])")
-                }
-            }
+            NSLog("MMJ attachment menu: \(attachmentMenu(1)?.items.map(\.title) ?? [])")
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_OPTION"] != nil {
                 showOptionVariants(true)
-                try? await Task.sleep(for: .milliseconds(300))
-                let state = await run(
-                    "const b = document.querySelector('mmj-btn[data-mmj-btn=save]'); "
-                        + "return b.title + ' | visible: ' + [...b.querySelectorAll('img')].map(i => getComputedStyle(i).display).join(',')")
-                NSLog("MMJ attachment option state: \(state)")
+                NSLog("MMJ attachment option state: \(header.showsOptionVariants)")
                 syncOptionKey()  // As after the save panel closes, with ⌥ not held.
-                try? await Task.sleep(for: .milliseconds(300))
-                let after = await run(
-                    "const b = document.querySelector('mmj-btn[data-mmj-btn=save]'); "
-                        + "return b.title + ' | visible: ' + [...b.querySelectorAll('img')].map(i => getComputedStyle(i).display).join(',')")
-                NSLog("MMJ attachment option state after sync: \(after)")
+                NSLog("MMJ attachment option state after sync: \(header.showsOptionVariants)")
             }
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_QUICKLOOK"] != nil {
                 quickLookAttachment(1)
@@ -709,7 +700,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             currentID = -1  // Keeps the selected message's header, if any.
             partHandler.allowedMessageID = -1
             placeholder.isHidden = true
-            webView.isHidden = false
+            scroll.isHidden = false
             render(MessageBody(html: html, text: nil))
         }
 
@@ -724,7 +715,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
         }
 
-        /// Scrolls the message content, as the scroll wheel would.
+        /// Scrolls the message, as the scroll wheel over its content would.
         func debugScrollContent(by points: CGFloat) {
             guard let event = CGEvent(
                 scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(-points), wheel2: 0, wheel3: 0),
@@ -732,15 +723,15 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
             else { return }
             webView.scrollWheel(with: nsEvent)
         }
+
+        /// The header's and content's frames and the scroll position, for checking the layout.
+        var debugLayout: String {
+            "header \(NSStringFromRect(header.frame)) web \(NSStringFromRect(webView.frame)) content \(contentHeight) "
+                + "document \(NSStringFromRect(document.frame)) scrolled \(scroll.contentView.bounds.origin.y)"
+        }
     #endif
 
     // MARK: WKNavigationDelegate
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // A new page starts with the plain buttons; match the key if it's held right now.
-        showsOptionVariants = false
-        if NSEvent.modifierFlags.contains(.option) && !attachments.isEmpty { showOptionVariants(true, force: true) }
-    }
 
     func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -748,9 +739,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate {
     ) {
         guard let url = navigationAction.request.url else { return decisionHandler(.cancel) }
         if navigationAction.navigationType == .linkActivated {
-            if let action = MessagePage.action(from: url, token: actionToken) {
-                perform(action)
-            } else if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+            if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
                 // Clicked links open in the browser (only web and mail links).
                 NSWorkspace.shared.open(url)
             }
@@ -778,7 +767,7 @@ final class AttachmentPromise: NSFilePromiseProvider {
     private var strongDelegate: AttachmentPromiseDelegate?
 
     convenience init(fileType: String, delegate: AttachmentPromiseDelegate) {
-        self.init(fileType: fileType, delegate: delegate)
+        self.init(fileType: fileType, delegate: delegate as any NSFilePromiseProviderDelegate)
         strongDelegate = delegate
     }
 }
@@ -861,4 +850,41 @@ final class LinkPreviewView: NSView {
 
     // Clicks and hovering go to the message underneath.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The message's scroll view: the header and content scroll in it together. Paging keys pressed in
+/// the content come here (see MessageWebView).
+final class MessageScrollView: NSScrollView {
+    /// A page down (1) or up (-1), keeping a line of the previous page in view, as scroll views do.
+    func page(_ direction: CGFloat) {
+        scroll(by: direction * max(contentView.bounds.height - verticalPageScroll - 24, 24))
+    }
+
+    func line(_ direction: CGFloat) { scroll(by: direction * 40) }
+
+    func toEdge(top: Bool) {
+        scroll(by: top ? -.greatestFiniteMagnitude : .greatestFiniteMagnitude)
+    }
+
+    private func scroll(by delta: CGFloat) {
+        guard let document = documentView else { return }
+        let maxY = max(0, document.frame.height - contentView.bounds.height)
+        let y = min(max(contentView.bounds.origin.y + delta, 0), maxY)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            contentView.animator().setBoundsOrigin(NSPoint(x: contentView.bounds.origin.x, y: y))
+        }
+        reflectScrolledClipView(contentView)
+    }
+}
+
+/// Passes script messages on without the user content controller keeping the receiver alive.
+final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+    private weak var target: (any WKScriptMessageHandler)?
+
+    init(_ target: any WKScriptMessageHandler) { self.target = target }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
+    }
 }

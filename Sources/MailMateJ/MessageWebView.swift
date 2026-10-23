@@ -1,42 +1,30 @@
 import AppKit
 import WebKit
 
-/// The message web view, plus native handling of the attachment rows: double-click opens, the round
-/// buttons, the context menu, and dragging files out.
+/// The message's web view. It shows only the message content and never scrolls up and down itself:
+/// it's as tall as the content, inside the message's native scroll view (under the native headers), so
+/// vertical scrolling and the paging keys go to that scroll view; wide content still scrolls sideways
+/// here.
 ///
-/// Page scripts never run, so the item under the pointer is found with a script in the app's own
-/// script world (which the email can't see or affect), as the pointer moves. Items are recognized by the
-/// page's token, so an email can't fake one.
+/// Page scripts never run, so the link under the pointer is found with a script in the app's own script
+/// world (which the email can't see or affect), as the pointer moves, for the link preview.
 final class MessageWebView: WKWebView {
-    /// The token of the page on screen; items carrying another token are ignored.
-    var token = ""
-    var onOpen: (Int) -> Void = { _ in }
-    /// A click on one of a row's buttons: the attachment, the button's action and the modifier keys held.
-    var onButton: (Int, String, NSEvent.ModifierFlags) -> Void = { _, _, _ in }
-    var menuForAttachment: (Int) -> NSMenu? = { _ in nil }
     var onPointerMoved: () -> Void = {}
     /// The link under the pointer changed (its href, or nil when off links), for the URL preview.
     var onHoverLink: (String?) -> Void = { _ in }
-    var dragItem: (Int) -> NSDraggingItem? = { _ in nil }
 
-    /// The attachment under the pointer, as of the last hit test, and the button under it, if any.
-    private(set) var hoveredAttachment: Int?
-    private(set) var hoveredButton: String?
     private(set) var hoveredLink: String? {
         didSet { if hoveredLink != oldValue { onHoverLink(hoveredLink) } }
     }
     private var hitTestPending = false
     private var hitTestAgain = false
     private var lastPointer = NSPoint.zero
-    private var press: (index: Int, button: String?, location: NSPoint)?
-    private var dragged = false
+    /// The axis a trackpad gesture started on, kept for the whole gesture and its momentum.
+    private var verticalGesture = true
 
-    /// Forgets the hovered item (a new page is loading).
-    func resetAttachmentTracking() {
-        hoveredAttachment = nil
-        hoveredButton = nil
+    /// Forgets the hovered link (a new page is loading).
+    func resetHover() {
         hoveredLink = nil
-        press = nil
     }
 
     override func updateTrackingAreas() {
@@ -56,101 +44,63 @@ final class MessageWebView: WKWebView {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        hoveredAttachment = nil
-        hoveredButton = nil
         hoveredLink = nil
     }
 
+    /// Up and down go straight to the message's scroll view (no round trip through WebKit, so it
+    /// follows the fingers); sideways stays here, for wide content.
     override func scrollWheel(with event: NSEvent) {
-        super.scrollWheel(with: event)
+        if event.phase == .began || event.phase == .mayBegin || (event.phase.isEmpty && event.momentumPhase.isEmpty) {
+            verticalGesture = abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX)
+        }
+        if verticalGesture, let scroll = enclosingScrollView {
+            scroll.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
         hitTest(event)
     }
 
-    override func mouseDown(with event: NSEvent) {
-        guard let index = hoveredAttachment else { return super.mouseDown(with: event) }
-        if event.modifierFlags.contains(.control) { return showMenu(index, event) }
-        press = (index, hoveredButton, event.locationInWindow)
-        dragged = false
-        window?.makeFirstResponder(self)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let press else { return super.mouseDragged(with: event) }
-        guard press.button == nil, !dragged, hypot(event.locationInWindow.x - press.location.x, event.locationInWindow.y - press.location.y) > 3,
-            let item = dragItem(press.index)
-        else { return }
-        dragged = true
-        beginDraggingSession(with: [item], event: event, source: self)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard let press else { return super.mouseUp(with: event) }
-        self.press = nil
-        if let button = press.button {
-            // As a button does: only if the pointer is still on it when released.
-            if hoveredAttachment == press.index && hoveredButton == button {
-                onButton(press.index, button, event.modifierFlags.intersection(.deviceIndependentFlagsMask))
-            }
-        } else if !dragged && event.clickCount >= 2 {
-            onOpen(press.index)
+    /// The paging keys scroll the message's scroll view.
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.command, .control, .option])
+        guard flags.isEmpty, let scroll = enclosingScrollView as? MessageScrollView else { return super.keyDown(with: event) }
+        let shift = event.modifierFlags.contains(.shift)
+        switch (event.specialKey, event.charactersIgnoringModifiers) {
+        case (_, " "?): scroll.page(shift ? -1 : 1)
+        case (.pageDown?, _): scroll.page(1)
+        case (.pageUp?, _): scroll.page(-1)
+        case (.home?, _): scroll.toEdge(top: true)
+        case (.end?, _): scroll.toEdge(top: false)
+        case (.downArrow?, _): scroll.line(1)
+        case (.upArrow?, _): scroll.line(-1)
+        default: super.keyDown(with: event)
         }
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        guard let index = hoveredAttachment else { return super.rightMouseDown(with: event) }
-        showMenu(index, event)
-    }
-
-    private func showMenu(_ index: Int, _ event: NSEvent) {
-        guard let menu = menuForAttachment(index) else { return }
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
-    }
-
-    /// Asks the page which attachment item, and which link, is at the pointer. One query at a time; a move during a
-    /// query triggers one more, so the answer follows the pointer without piling up.
     private func hitTest(_ event: NSEvent) {
         lastPointer = event.locationInWindow
         hitTest()
     }
 
+    /// Asks the page which link is at the pointer. One query at a time; a move during a query triggers
+    /// one more, so the answer follows the pointer without piling up.
     private func hitTest() {
         guard !hitTestPending else { return hitTestAgain = true }
         let point = convert(lastPointer, from: nil)
         let y = isFlipped ? point.y : bounds.height - point.y
         hitTestPending = true
-        let token = self.token
         callAsyncJavaScript(
             """
-            const e = document.elementFromPoint(x, y);
-            const item = e && e.closest('mmj-attachments mmj-att');
-            const button = e && e.closest('mmj-att mmj-btn');
-            // The email's links only: not our header's (the first element; an email can't hide its own
-            // links by wrapping them in a fake <mmj-chrome>).
+            const e = document.elementFromPoint(x / zoom, y / zoom);
             const link = e && e.closest('a[href]');
-            const ours = link && document.body.firstElementChild.contains(link);
-            return [item ? item.getAttribute('data-mmj-att') + (button ? ':' + button.getAttribute('data-mmj-btn') : '') : null,
-                    link && !ours ? link.getAttribute('href').trim() : null];
+            return link ? link.getAttribute('href').trim() : null;
             """,
-            arguments: ["x": point.x, "y": y], in: nil, in: .defaultClient
+            arguments: ["x": point.x, "y": y, "zoom": magnification], in: nil, in: .defaultClient
         ) { [weak self] result in
             guard let self else { return }
             hitTestPending = false
-            var hovered: Int?
-            var button: String?
-            let values = (try? result.get()) as? [Any]
-            let link = values?.last as? String
-            if let value = values?.first as? String {
-                let parts = value.split(separator: ":").map(String.init)
-                if parts.count >= 2, parts[0] == token {
-                    hovered = Int(parts[1])
-                    button = parts.count == 3 ? parts[2] : nil
-                }
-            }
-            if token == self.token {
-                hoveredAttachment = hovered
-                hoveredButton = button
-                hoveredLink = link
-            }
+            hoveredLink = (try? result.get()) as? String
             if hitTestAgain {
                 hitTestAgain = false
                 hitTest()
@@ -171,14 +121,8 @@ final class MessageWebView: WKWebView {
                 return [b.x + b.width / 2, b.y + b.height / 2];
                 """, arguments: ["t": text], in: nil, contentWorld: .defaultClient)
             guard let point = result as? [Double], point.count == 2 else { return NSLog("MMJ hover: no link \(text)") }
-            lastPointer = convert(NSPoint(x: point[0], y: isFlipped ? point[1] : bounds.height - point[1]), to: nil)
+            lastPointer = convert(NSPoint(x: point[0] * magnification, y: isFlipped ? point[1] * magnification : bounds.height - point[1] * magnification), to: nil)
             hitTest()
         }
     }
 #endif
-
-extension MessageWebView: NSDraggingSource {
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        context == .outsideApplication ? .copy : []
-    }
-}
