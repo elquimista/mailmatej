@@ -167,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             let panel = MailboxPicker.debugPanel
                             let order = NSApp.orderedWindows.map { $0 === panel ? "picker" : $0 === windowController?.window ? "main" : "other" }
                             NSLog("MMJ picker after main window front: visible=\(panel?.isVisible ?? false) level=\(panel?.level.rawValue ?? -1) order=\(order)")
+                        } else if part == "|quit" {
+                            NSLog("MMJ quit requested with \(AppModel.shared?.pendingWork ?? -1) changes under way")
+                            NSApp.terminate(nil)  // as ⌘Q
                         } else if part.hasPrefix("|wait:"), let seconds = Double(part.dropFirst(6)) {
                             try? await Task.sleep(for: .seconds(seconds))  // e.g. to take the server down meanwhile
                         } else if part.hasPrefix("|") {
@@ -387,10 +390,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// Unsent messages aren't discarded silently: quitting asks first.
+    /// Unsent messages aren't discarded silently: quitting asks first. Then, with changes still on their
+    /// way to the servers, it waits for them (see QuitProgress) and quits once they're done. The wait
+    /// isn't held inside the quit itself: while AppKit waits on a quit, the main actor's tasks don't run,
+    /// so the work could never finish. The quit is called off, and made again when the work is done.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let asked = ComposeWindowController.confirmQuit { quit in sender.reply(toApplicationShouldTerminate: quit) }
-        return asked ? .terminateLater : .terminateNow
+        if quittingAfterWork { return .terminateNow }
+        let asked = ComposeWindowController.confirmQuit { discard in
+            sender.reply(toApplicationShouldTerminate: false)  // out of the quit, so the work can run
+            if discard { DispatchQueue.main.async { self.quitAfterPendingWork() } }
+        }
+        if asked { return .terminateLater }
+        guard let model = AppModel.shared, model.pendingWork > 0 else { return .terminateNow }
+        quitAfterPendingWork()
+        return .terminateCancel
+    }
+
+    /// Set once the server work is done, to let the final quit through.
+    private var quittingAfterWork = false
+
+    private func quitAfterPendingWork() {
+        guard let model = AppModel.shared else { return NSApp.terminate(nil) }
+        QuitProgress.wait(for: model) { [weak self] quit in
+            guard quit else { return }
+            self?.quittingAfterWork = true
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

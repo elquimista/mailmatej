@@ -801,7 +801,6 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 try await model.send(message, accountId: identity.accountId, original: setup.original)
                 sending = false
                 window.close()
-                Self.sendFinished(failed: false)
             } catch {
                 #if DEBUG
                     NSLog("MMJ compose: send failed: \(AppModel.describe(error))")
@@ -809,24 +808,12 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 sending = false
                 window.makeKeyAndOrderFront(nil)
                 fail("The message couldn’t be sent.", detail: AppModel.describe(error))
-                Self.sendFinished(failed: true)
             }
         }
     }
 
-    /// A quit waiting for messages still being sent (see `confirmQuit`).
-    private static var quitAfterSending: ((Bool) -> Void)?
-
-    private static func sendFinished(failed: Bool) {
-        guard let reply = quitAfterSending else { return }
-        if failed {
-            quitAfterSending = nil
-            reply(false)  // Stay, so the message that couldn't be sent can be seen.
-        } else if !open.contains(where: \.sending) {
-            quitAfterSending = nil
-            reply(true)
-        }
-    }
+    /// Whether an unsent, edited message is open on screen (one that couldn't be sent is back in its window).
+    static var hasUnsentWindow: Bool { open.contains { $0.isEdited && !$0.sending && $0.window?.isVisible == true } }
 
     private func fail(_ message: String, detail: String? = nil) {
         let alert = NSAlert()
@@ -874,14 +861,10 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// Asked when the app quits: with unsent edited messages open, asks (on the first of them) whether to
     /// discard them, as MailMate does, instead of losing them silently. Calls `reply` with the answer.
-    /// Messages still being sent in the background are waited for (the app quits once they're sent).
+    /// (Messages still being sent are waited for with the rest of the server work: see QuitProgress.)
     static func confirmQuit(_ reply: @escaping (Bool) -> Void) -> Bool {
         let unsent = open.filter { $0.isEdited && !$0.sending }.compactMap(\.window)
-        guard let window = unsent.first else {
-            guard open.contains(where: \.sending) else { return false }
-            quitAfterSending = reply
-            return true
-        }
+        guard let window = unsent.first else { return false }
         window.makeKeyAndOrderFront(nil)
         let alert = NSAlert()
         alert.messageText = unsent.count == 1
@@ -890,7 +873,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         alert.addButton(withTitle: "Discard and Quit")
         alert.addButton(withTitle: "Cancel")
         alert.buttons[0].hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { reply($0 == .alertFirstButtonReturn) }
+        alert.beginSheetModal(for: window) { response in
+            let discard = response == .alertFirstButtonReturn
+            if discard { unsent.forEach { $0.close() } }  // discarded: no longer unsent work
+            reply(discard)
+        }
         return true
     }
 

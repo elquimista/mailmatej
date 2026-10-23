@@ -278,7 +278,7 @@ final class AppModel {
             }
         }
         refreshNow()
-        Task {
+        inBackground { [self] in
             for item in work {
                 do {
                     try await send(item.server, accountId: item.accountId, refs: item.refs, confirm: confirmPermanentDelete)
@@ -294,6 +294,8 @@ final class AppModel {
         var updates: [(remoteIds: [String], patch: [String: JSONValue])] = []
         /// The account has no Archive yet: create it, then move there (here and on the server).
         var archiveIntoNewMailbox = false
+        /// Where those messages were, to put them back if the Archive can't be made.
+        var previousMailboxes: [Int64: [Int64]] = [:]
         /// Messages already in Deleted Messages, deleted for good once confirmed.
         var deleteForGood: [MailStore.MessageRef] = []
     }
@@ -333,7 +335,11 @@ final class AppModel {
             if let archive = try store.mailbox(accountId: accountId, role: "archive") {
                 try move(refs, to: archive)
             } else {
-                work.archiveIntoNewMailbox = true  // An account without an Archive gets one, as other mail apps do.
+                // An account without an Archive gets one, as other mail apps do. Until the server has made it,
+                // the messages are out of their mailboxes here, so they leave the lists at once.
+                work.archiveIntoNewMailbox = true
+                work.previousMailboxes = try store.mailboxIDs(messageIds: ids)
+                for id in ids { try store.setMailboxes([], messageId: id) }
             }
         case .junk:
             guard let junk = try store.mailbox(accountId: accountId, role: "junk") else {
@@ -388,9 +394,17 @@ final class AppModel {
     ) async throws {
         var updates = work.updates
         if work.archiveIntoNewMailbox {
-            try await coordinator.createMailbox(accountId: accountId, name: "Archive", role: "archive")
-            guard let archive = try store.mailbox(accountId: accountId, role: "archive") else {
-                throw MessageActionError.noMailbox(role: "archive")
+            let archive: MailboxRecord
+            do {
+                try await coordinator.createMailbox(accountId: accountId, name: "Archive", role: "archive")
+                guard let made = try store.mailbox(accountId: accountId, role: "archive") else {
+                    throw MessageActionError.noMailbox(role: "archive")
+                }
+                archive = made
+            } catch {
+                for (id, boxes) in work.previousMailboxes { try? store.setMailboxes(boxes, messageId: id) }  // back
+                refreshNow()
+                throw error
             }
             try store.moveMessages(refs.map(\.id), toMailboxId: archive.id)
             refreshNow()
@@ -435,6 +449,42 @@ final class AppModel {
         NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
     }
 
+    // MARK: Work in progress
+
+    /// Changes under way on servers (message actions, moves, sends). Quitting waits for them, as MailMate
+    /// does (see QuitProgress), so none is cut off half done.
+    private(set) var pendingWork = 0 {
+        didSet {
+            onPendingWorkChange?(pendingWork)
+            if pendingWork == 0 {
+                let waiting = whenIdle
+                whenIdle = []
+                waiting.forEach { $0() }
+            }
+        }
+    }
+    var onPendingWorkChange: ((Int) -> Void)?
+    private var whenIdle: [() -> Void] = []
+
+    /// Runs server work in the background, counted in `pendingWork`.
+    func inBackground(_ work: @escaping @MainActor () async -> Void) {
+        pendingWork += 1
+        Task {
+            #if DEBUG
+                if let seconds = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_SLOW_WORK"] ?? "") {
+                    try? await Task.sleep(for: .seconds(seconds))  // a slow server, to test quitting meanwhile
+                }
+            #endif
+            await work()
+            pendingWork -= 1
+        }
+    }
+
+    /// Calls `done` once no server work is under way (at once if none is).
+    func whenNoPendingWork(_ done: @escaping () -> Void) {
+        if pendingWork == 0 { done() } else { whenIdle.append(done) }
+    }
+
     // MARK: Rules
 
     /// Runs the rules on newly arrived messages, as MailMate does: each rule of a mailbox the messages
@@ -474,14 +524,14 @@ final class AppModel {
             if sends.isEmpty {
                 apply(move, to: rest)
             } else {
-                Task {
+                inBackground { [self] in
                     for action in sends { await send(action, messages: matched) }
                     apply(move, to: rest)
                 }
             }
             moved.formUnion(rest)
         } else if !sends.isEmpty {
-            Task { for action in sends { await send(action, messages: matched) } }
+            inBackground { [self] in for action in sends { await send(action, messages: matched) } }
         }
         return (matched, moved)
     }
@@ -562,7 +612,7 @@ final class AppModel {
     /// Copies messages into a mailbox of another account (a rule's Copy to Mailbox), keeping the originals.
     func copyAcrossAccounts(_ refs: [MailStore.MessageRef], toMailboxId mailboxId: Int64) {
         guard let target = try? store.mailboxes().first(where: { $0.id == mailboxId }) else { return }
-        Task {
+        inBackground { [self] in
             for ref in refs {
                 do {
                     guard let detail = try store.detail(id: ref.id) else { continue }
@@ -707,7 +757,7 @@ final class AppModel {
             try? store.deleteMessages(accountId: accountId, remoteIds: group.map(\.ref.remoteId))
         }
         refreshNow()
-        Task {
+        inBackground { [self] in
             var failed: [(Pending, Error)] = []
             for item in pending {
                 do {
@@ -760,7 +810,7 @@ final class AppModel {
     /// Creates a mailbox inside `parentId` (in its account), then moves the messages there.
     func moveToNewMailbox(named name: String, inside parentId: Int64, messages ids: [Int64], then perform: @escaping (MessageAction) -> Void) {
         guard let parent = try? store.mailboxes().first(where: { $0.id == parentId }) else { return }
-        Task {
+        inBackground { [self] in
             do {
                 try await coordinator.createMailbox(accountId: parent.accountId, name: name, role: nil, parentRemoteId: parent.remoteId)
                 guard let created = try store.mailboxes().first(where: {
@@ -830,6 +880,8 @@ final class AppModel {
 
     /// Sends, then marks the original answered (or forwarded), here and on the server.
     func send(_ message: OutgoingMessage, accountId: String, original: (id: Int64, keyword: String)?) async throws {
+        pendingWork += 1  // quitting waits for it
+        defer { pendingWork -= 1 }
         try await coordinator.send(accountId: accountId, message)
         refreshKnownAddresses()  // its recipients now count as written to
         guard let original, let ref = try store.refs(ids: [original.id]).first else { return }
@@ -964,9 +1016,17 @@ final class AppModel {
         Task {
             try? await Task.sleep(for: .milliseconds(300))
             refreshScheduled = false
+            let started = Date()
             myAddresses = (try? store.myAddresses()) ?? myAddresses
             dockCounters?.update()
+            let counted = Date()
             NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
+            #if DEBUG
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
+                    let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
+                    NSLog("MMJ timing: refresh on main: addresses+dock \(ms(started, counted)) ms, observers \(ms(counted, Date())) ms")
+                }
+            #endif
         }
     }
 

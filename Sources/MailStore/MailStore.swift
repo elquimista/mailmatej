@@ -610,6 +610,18 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Messages stored without any mailbox: never so on a JMAP server, so left by a local change the app
+    /// couldn't finish (quit while archiving into a new Archive, say). The next sync fetches them again.
+    public func remoteIDsWithoutMailbox(accountId: String) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(
+                db, sql: """
+                    SELECT remoteId FROM message m
+                    WHERE accountId = ? AND NOT EXISTS (SELECT 1 FROM message_mailbox mm WHERE mm.messageId = m.id)
+                    """, arguments: [accountId])
+        }
+    }
+
     /// Messages whose recipient groups haven't been fetched (see the v10 migration).
     public func remoteIDsMissingRecipientGroups(accountId: String, limit: Int) throws -> [String] {
         try dbPool.read { db in

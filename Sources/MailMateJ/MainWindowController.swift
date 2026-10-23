@@ -287,21 +287,31 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let scope = hasMailbox ? self.scope : MessageScope.smart(-1)
         let search: String? = search.isEmpty ? nil : search
         let (threaded, expanded, opened) = (showsThreads, expandedThreads, openedMessages)
+        let started = Date()
         Task {
-            let (rows, newest) = await Task.detached(priority: .userInitiated) {
+            let (rows, newest, stages) = await Task.detached(priority: .userInitiated) {
+                let began = Date()
                 let list = threaded
                     ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
                     : nil
                 let rows = list?.rows ?? ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
                     MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
                 }
+                let listed = Date()
                 var newest = try? store.newestMessageID(scope: scope, search: search)
                 // New mail inside a collapsed thread is followed to the thread's row.
                 if let list, let id = newest, !rows.contains(where: { $0.id == id }), let thread = list.threadOf[id] {
                     newest = rows.first { $0.thread == thread }?.id ?? id
                 }
-                return (rows, newest)
+                let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
+                let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
+                return (rows, newest, stages)
             }.value
+            #if DEBUG
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
+                    NSLog("MMJ timing: reload stages: \(stages) ms, back on main after \(Int(Date().timeIntervalSince(started) * 1000))")
+                }
+            #endif
             guard generation == loadGeneration else { return }
             let ids = rows.map(\.id)
             list.showsThreads = threaded
@@ -366,7 +376,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             }
             lastNewestID = newest
             #if DEBUG
-                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: list shown (\(reason), \(ids.count) rows)") }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: list shown (\(reason), \(ids.count) rows) after \(Int(Date().timeIntervalSince(started) * 1000)) ms") }
             #endif
 
             if list.selectedIDs != before || reason == .scopeChanged {
@@ -1162,7 +1172,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let same = refs.filter { $0.accountId == target.accountId }
         let other = refs.filter { $0.accountId != target.accountId }
         if !same.isEmpty { perform(.move(toMailboxId: mailboxId), on: same.map(\.id)) }
-        if !other.isEmpty { model.moveAcrossAccounts(other, toMailboxId: mailboxId) }
+        if !other.isEmpty {
+            model.moveAcrossAccounts(other, toMailboxId: mailboxId)
+            removeLeavingRows(other.map(\.id))
+        }
     }
 
     private func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
@@ -1186,6 +1199,28 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.perform(action, on: ids) { [weak self] count in
             await self?.confirmPermanentDelete(count) ?? false
         }
+        removeLeavingRows(ids)
+    }
+
+    /// Takes messages an action moved out of the list out of it at once (the store has changed already),
+    /// so they go as fast as the keypress whatever the list's size; the list's reload confirms it.
+    /// Messages that stay in the list (archived in All Messages, say) stay.
+    private func removeLeavingRows(_ ids: [Int64]) {
+        let shown = ids.filter(list.ids.contains)
+        guard !shown.isEmpty, let staying = try? model.store.ids(shown, in: scope) else { return }
+        let leaving = Set(shown).subtracting(staying)
+        guard !leaving.isEmpty else { return }
+        let next = selectAfterMove.flatMap { leaving.isSuperset(of: $0.moved) ? $0.next : nil }
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: \(leaving.count) rows left the list at once") }
+        #endif
+        let before = list.selectedIDs
+        list.setIDs(list.ids.filter { !leaving.contains($0) }, selecting: next.map { [$0] } ?? [], scroll: .keepPosition)
+        if list.selectedIDs != before {  // the message pane follows the selection, as after a reload
+            messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
+            scheduleCorrespondenceUpdate(for: list.selectedID)
+        }
+        updateTitle()
     }
 
     /// Records how to take an action back (Edit → Undo, or u): moves put the messages back in the

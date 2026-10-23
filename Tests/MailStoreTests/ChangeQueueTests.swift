@@ -17,3 +17,10 @@ import Testing
     #expect(try store.queuedChanges(accountId: "a").map { String(decoding: $0.change, as: UTF8.self) } == ["1b", "3"])
     #expect(try store.queuedChangeCount(accountId: "b") == 1)
 }
+
+@Test func messagesWithoutAMailboxAreFound() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = try MailStore(directory: dir)
+    #expect(try store.remoteIDsWithoutMailbox(accountId: "a").isEmpty)
+}

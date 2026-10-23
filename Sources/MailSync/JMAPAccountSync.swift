@@ -44,6 +44,9 @@ public actor JMAPAccountSync {
         try await syncEmails(accountId, session: session, into: &result)
         try await fillInReferences(accountId)
         try await fillInRecipientGroups(accountId)
+        // Messages a local change left without a mailbox go back to the server's state.
+        let stranded = try store.remoteIDsWithoutMailbox(accountId: account.id)
+        if !stranded.isEmpty { try await refetch(stranded, accountId) }
         return result
     }
 
