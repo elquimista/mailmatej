@@ -43,6 +43,8 @@ public struct OutgoingMessage: Sendable {
     public var references: [String]
     /// The envelope sender, when it isn't the From address (see `IdentityRecord.envelopeEmail`).
     public var mailFrom: String?
+    /// Saved as a draft: the format the text is written in ("markdown"), to reopen it as written.
+    public var draftFormat: String?
 
     public init(
         identityId: String, from: EmailAddress, to: [EmailAddress], cc: [EmailAddress], bcc: [EmailAddress],
@@ -66,6 +68,25 @@ public struct OutgoingMessage: Sendable {
         var seen = Set<String>()
         return (to + cc + bcc).compactMap { $0.email?.lowercased() }.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
+}
+
+/// A draft as saved on the server (see `JMAPAccountSync.loadDraft`).
+public struct SavedDraft: Sendable {
+    /// The From address, lowercased.
+    public var from: String?
+    public var to: [EmailAddress] = []
+    public var cc: [EmailAddress] = []
+    public var bcc: [EmailAddress] = []
+    public var replyTo: [EmailAddress] = []
+    public var subject = ""
+    /// The text as written (Markdown as typed when `isMarkdown`).
+    public var text = ""
+    public var isMarkdown = false
+    public var attachments: [MessagePart] = []
+    public var inReplyTo: [String] = []
+    public var references: [String] = []
+
+    public init() {}
 }
 
 /// Reply, Reply All and Forward: who it goes to, the subject and the quoted text.

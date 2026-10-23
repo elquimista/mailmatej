@@ -23,6 +23,12 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         var references: [String] = []
         /// The message replied to or forwarded, and the keyword to set on it once sent.
         var original: (id: Int64, keyword: String)?
+        var bcc: [EmailAddress] = []
+        var replyTo: [EmailAddress] = []
+        /// The format it's written in; nil: Markdown, MailMate's default.
+        var isMarkdown: Bool?
+        /// The draft it was opened from (Drafts): kept as it was until the message is saved or sent.
+        var openedDraft: AppModel.DraftRef?
     }
 
     /// Open compose windows; each removes itself when closed.
@@ -59,6 +65,18 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// The fields as the window opened, to tell whether the message was edited.
     private var savedState = ""
 
+    // Drafts: a few seconds after each change the message is saved in its account's Drafts, replacing
+    // the previous save, so a crash or Force Quit loses little. A draft it was opened from is kept as it
+    // was until the message is saved (closing with Save, or quitting) or sent, so Don't Save leaves it.
+    private var openedDraft: AppModel.DraftRef?
+    private var autosaved: AppModel.DraftRef?
+    /// The fields as last saved as a draft (as opened, before any save).
+    private var draftState = ""
+    private var autosaveTimer: Timer?
+    /// Saves run one after another; the last one's result.
+    private var saveTask: Task<Error?, Never>?
+    /// Sent, saved and closed, or not kept: a save finishing after this isn't kept either.
+    private var finished = false
     /// Header rows the list menu can show or hide (MailMate hides Cc and Bcc until asked).
     private enum HeaderRow: String, CaseIterable {
         case cc = "Cc", bcc = "Bcc", replyTo = "Reply-To"
@@ -413,13 +431,24 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         subjectField.stringValue = setup.draft.subject
         textView.string = setup.draft.text
         textView.setSelectedRange(NSRange(location: 0, length: 0))
+        bccField.addresses = setup.bcc
+        replyToField.addresses = setup.replyTo
         rows[.cc]?.isHidden = setup.draft.cc.isEmpty
-        rows[.bcc]?.isHidden = true
-        rows[.replyTo]?.isHidden = true
+        rows[.bcc]?.isHidden = setup.bcc.isEmpty
+        rows[.replyTo]?.isHidden = setup.replyTo.isEmpty
+        formatPopup.selectItem(at: setup.isMarkdown == false ? 1 : 0)
+        for popup in [fromPopup, formatPopup] {
+            popup.target = self
+            popup.action = #selector(popupChanged(_:))
+        }
+        openedDraft = setup.openedDraft
         updateAttached()
         updateTitle()
         savedState = currentState
+        draftState = savedState
     }
+
+    @objc private func popupChanged(_ sender: Any?) { updateEdited() }
 
     // MARK: Attachments
 
@@ -753,29 +782,44 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     // MARK: Sending
 
-    @objc func sendMessage(_ sender: Any?) {
-        guard !sending, let window else { return }
+    /// Why the message can't be sent (or saved), as an alert says it.
+    private struct Problem: Error {
+        var message: String
+        var detail: String?
+    }
+
+    /// The message as written, from the chosen identity's account: to send, or (`asDraft`) to save as a
+    /// draft, which needn't be complete and keeps Markdown as typed.
+    private func outgoing(asDraft: Bool) throws -> (message: OutgoingMessage, accountId: String) {
         guard let identity = fromPopup.selectedItem?.representedObject as? IdentityRecord else {
-            return fail("Choose who the message is from.")
+            throw Problem(message: "Choose who the message is from.")
         }
         let to = toField.addresses
         let cc = rows[.cc]?.isHidden == false ? ccField.addresses : []
         let bcc = rows[.bcc]?.isHidden == false ? bccField.addresses : []
         let replyTo = rows[.replyTo]?.isHidden == false ? replyToField.addresses : []
-        if let bad = (to + cc + bcc + replyTo).first(where: { !Compose.isValid($0) }) {
-            return fail("“\(Compose.format(bad))” isn’t a valid email address.")
-        }
-        guard !(to + cc + bcc).isEmpty else { return fail("Add at least one recipient.") }
-        if !setup.attachments.isEmpty, let source = setup.attachmentsAccountId, source != identity.accountId {
-            return fail("The forwarded attachments can only be sent from the account the message is in.")
+        // Forwarded attachments are blobs in the account the message is in.
+        let partsUsable = setup.attachmentsAccountId == nil || setup.attachmentsAccountId == identity.accountId
+        if !asDraft {
+            if let bad = (to + cc + bcc + replyTo).first(where: { !Compose.isValid($0) }) {
+                throw Problem(message: "“\(Compose.format(bad))” isn’t a valid email address.")
+            }
+            guard !(to + cc + bcc).isEmpty else { throw Problem(message: "Add at least one recipient.") }
+            if !setup.attachments.isEmpty, !partsUsable {
+                throw Problem(message: "The forwarded attachments can only be sent from the account the message is in.")
+            }
         }
         var message = OutgoingMessage(
             identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
             to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue, text: textView.string,
-            attachments: setup.attachments, inReplyTo: setup.inReplyTo, references: setup.references)
+            attachments: partsUsable ? setup.attachments : [], inReplyTo: setup.inReplyTo, references: setup.references)
         if isMarkdown {
-            message.html = MarkdownMail.html(textView.string)
-            message.text = MarkdownMail.plainText(textView.string)  // pictures as [ "name" ], as MailMate
+            if asDraft {
+                message.draftFormat = "markdown"  // the text as typed
+            } else {
+                message.html = MarkdownMail.html(textView.string)
+                message.text = MarkdownMail.plainText(textView.string)  // pictures as [ "name" ], as MailMate
+            }
         }
         message.replyTo = replyTo
         message.mailFrom = identity.envelopeEmail
@@ -786,20 +830,39 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                     name: url.lastPathComponent,
                     type: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
                     data: try Data(contentsOf: url),
-                    cid: contentIDs[url].flatMap { shown.contains($0) ? $0 : nil })  // still in the text: inline
+                    // still in the text: inline (a draft keeps every picture's, to show it when reopened)
+                    cid: contentIDs[url].flatMap { asDraft || shown.contains($0) ? $0 : nil })
             }
         } catch {
-            return fail("An attached file couldn’t be read.", detail: AppModel.describe(error))
+            throw Problem(message: "An attached file couldn’t be read.", detail: AppModel.describe(error))
+        }
+        return (message, identity.accountId)
+    }
+
+    @objc func sendMessage(_ sender: Any?) {
+        guard !sending, let window else { return }
+        let message: OutgoingMessage, accountId: String
+        do {
+            (message, accountId) = try outgoing(asDraft: false)
+        } catch let problem as Problem {
+            return fail(problem.message, detail: problem.detail)
+        } catch {
+            return fail("The message couldn’t be sent.", detail: AppModel.describe(error))
         }
 
         // As MailMate: the window goes at once and the message is sent in the background; if sending
-        // fails, the window comes back with the message as it was and says why.
+        // fails, the window comes back with the message as it was and says why. Its drafts go once it's sent.
         sending = true
+        autosaveTimer?.invalidate()
         window.orderOut(nil)
         Task {
+            _ = await saveTask?.value  // a save under way: its draft goes too
             do {
-                try await model.send(message, accountId: identity.accountId, original: setup.original)
+                try await model.send(
+                    message, accountId: accountId, original: setup.original,
+                    replacingDrafts: [openedDraft, autosaved].compactMap { $0 })
                 sending = false
+                finished = true
                 window.close()
             } catch {
                 #if DEBUG
@@ -810,6 +873,88 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 fail("The message couldn’t be sent.", detail: AppModel.describe(error))
             }
         }
+    }
+
+    // MARK: Drafts
+
+    private static var autosaveDelay: TimeInterval {
+        #if DEBUG
+            if let seconds = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_AUTOSAVE"] ?? "") { return seconds }
+        #endif
+        return 3
+    }
+
+    private func scheduleAutosave() {
+        autosaveTimer?.invalidate()
+        guard !sending, !finished else { return }
+        autosaveTimer = Timer.scheduledTimer(withTimeInterval: Self.autosaveDelay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.saveDraft(final: false) }
+        }
+    }
+
+    /// Saves the message as a draft, replacing the previous save; `final` (kept on closing or quitting)
+    /// also replaces the draft it was opened from. Returns the error, if it couldn't be saved.
+    private func saveDraft(final: Bool) -> Task<Error?, Never> {
+        autosaveTimer?.invalidate()
+        let previous = saveTask
+        let task = Task { () -> Error? in
+            _ = await previous?.value
+            guard !finished, !sending else { return nil }
+            let state = currentState
+            if state == draftState {
+                // Nothing new to save. Kept: what was autosaved replaces the draft it was opened from.
+                if final, autosaved != nil, let opened = openedDraft {
+                    openedDraft = nil
+                    model.discardDrafts([opened])
+                }
+                return nil
+            }
+            do {
+                let (message, accountId) = try outgoing(asDraft: true)
+                let old = [autosaved, final ? openedDraft : nil].compactMap { $0 }
+                let saved = try await model.saveDraft(message, accountId: accountId, replacing: old)
+                guard !finished, !sending else {
+                    model.discardDrafts([saved])  // not kept after all
+                    return nil
+                }
+                autosaved = saved
+                if final { openedDraft = nil }
+                draftState = state
+                return nil
+            } catch {
+                #if DEBUG
+                    NSLog("MMJ compose: draft not saved: \(AppModel.describe(error))")
+                #endif
+                return error
+            }
+        }
+        saveTask = task
+        return task
+    }
+
+    /// Saves the message as a draft and closes the window (at once; it comes back if the save fails).
+    private func saveAndClose(_ done: ((Bool) -> Void)? = nil) {
+        guard let window else { return }
+        window.orderOut(nil)
+        Task {
+            if let error = await saveDraft(final: true).value {
+                window.makeKeyAndOrderFront(nil)
+                let detail = (error as? Problem)?.detail ?? AppModel.describe(error)
+                fail("The draft couldn’t be saved.", detail: detail)
+                done?(false)
+            } else {
+                finished = true
+                window.close()
+                done?(true)
+            }
+        }
+    }
+
+    /// Brings forward the window editing a draft, if one is.
+    static func bringForward(editing draft: AppModel.DraftRef) -> Bool {
+        guard let controller = open.first(where: { $0.openedDraft == draft || $0.autosaved == draft }) else { return false }
+        controller.window?.makeKeyAndOrderFront(nil)
+        return true
     }
 
     /// Whether an unsent, edited message is open on screen (one that couldn't be sent is back in its window).
@@ -829,7 +974,10 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         let addresses = [toField, ccField, bccField, replyToField].map { field in
             "\(field.objectValue ?? "")|\(field.currentEditor()?.string ?? "")"
         }
-        return ([subjectField.stringValue, textView.string] + addresses + files.map(\.path)).joined(separator: "\u{1}")
+        let popups = "\(fromPopup.indexOfSelectedItem)|\(formatPopup.indexOfSelectedItem)"
+        let shown = HeaderRow.allCases.map { rows[$0]?.isHidden == false ? "1" : "0" }.joined()
+        return ([subjectField.stringValue, textView.string, popups, shown] + addresses + files.map(\.path))
+            .joined(separator: "\u{1}")
     }
 
     private var isEdited: Bool { currentState != savedState }
@@ -837,46 +985,75 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Shows the edited dot in the close button, as MailMate does.
     private func updateEdited() {
         window?.isDocumentEdited = isEdited
+        scheduleAutosave()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if finished { return true }
         if sending { return false }
-        guard isEdited else { return true }
+        guard isEdited else {
+            // Back as it was opened: an autosave of edits since undone isn't kept.
+            finished = true
+            autosaveTimer?.invalidate()
+            if let autosaved { model.discardDrafts([autosaved]) }
+            return true
+        }
         let alert = NSAlert()
-        alert.messageText = "Discard this message?"
-        alert.informativeText = "It hasn’t been sent, and drafts aren’t saved yet."
-        alert.addButton(withTitle: "Discard")
+        alert.messageText = "Do you want to save this message as a draft?"
+        alert.informativeText = "It’s kept in the Drafts mailbox of the account it’s from."
+        alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: "Don’t Save")
+        alert.buttons[2].hasDestructiveAction = true
         alert.beginSheetModal(for: sender) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            sender.close()
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                saveAndClose()
+            case .alertThirdButtonReturn:
+                // Not kept: its autosave goes; a draft it was opened from stays as it was.
+                finished = true
+                autosaveTimer?.invalidate()
+                Task {
+                    _ = await self.saveTask?.value
+                    if let autosaved = self.autosaved { self.model.discardDrafts([autosaved]) }
+                }
+                sender.close()
+            default:
+                break
+            }
         }
         return false
     }
 
     func windowWillClose(_ notification: Notification) {
+        autosaveTimer?.invalidate()
         Self.open.remove(self)
     }
 
-    /// Asked when the app quits: with unsent edited messages open, asks (on the first of them) whether to
-    /// discard them, as MailMate does, instead of losing them silently. Calls `reply` with the answer.
-    /// (Messages still being sent are waited for with the rest of the server work: see QuitProgress.)
-    static func confirmQuit(_ reply: @escaping (Bool) -> Void) -> Bool {
-        let unsent = open.filter { $0.isEdited && !$0.sending }.compactMap(\.window)
-        guard let window = unsent.first else { return false }
-        window.makeKeyAndOrderFront(nil)
-        let alert = NSAlert()
-        alert.messageText = unsent.count == 1
-            ? "Do you want to discard the unsent message?" : "Do you want to discard \(unsent.count) unsent messages?"
-        alert.informativeText = "Drafts aren’t saved yet, so quitting loses \(unsent.count == 1 ? "it" : "them")."
-        alert.addButton(withTitle: "Discard and Quit")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { response in
-            let discard = response == .alertFirstButtonReturn
-            if discard { unsent.forEach { $0.close() } }  // discarded: no longer unsent work
-            reply(discard)
+    /// Asked when the app quits: unsent messages are saved as drafts, as MailMate keeps them, and their
+    /// windows close. Returns whether there were any; `done` says whether all were saved (one that
+    /// couldn't be is back in its window, saying why, and the app stays).
+    static func saveUnsentBeforeQuit(_ done: @escaping (Bool) -> Void) -> Bool {
+        for controller in open where !controller.isEdited && !controller.sending {
+            // Back as opened: an autosave of edits since undone isn't kept.
+            controller.autosaveTimer?.invalidate()
+            if let autosaved = controller.autosaved {
+                controller.model.discardDrafts([autosaved])
+                controller.autosaved = nil
+                controller.draftState = controller.savedState
+            }
+        }
+        let unsent = open.filter { $0.isEdited && !$0.sending && !$0.finished }
+        guard !unsent.isEmpty else { return false }
+        var left = unsent.count
+        var allSaved = true
+        for controller in unsent {
+            controller.saveAndClose { saved in
+                allSaved = allSaved && saved
+                left -= 1
+                if left == 0 { done(allSaved) }
+            }
         }
         return true
     }
@@ -954,6 +1131,56 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
                     NSLog("MMJ compose: 8 s later visible \(c.window?.isVisible ?? false), sheet \(c.window?.attachedSheet != nil), still open \(open.contains(c))")
                 }
+            }
+        }
+
+        /// On the frontmost compose window: types `text` at the end, waits for the autosave, then
+        /// "send", "dontsave" (closes with Don't Save) or "save" (closes with Save).
+        static func debugEditThen(_ action: String, text: String) async {
+            guard let c = open.first(where: { $0.window?.isVisible == true }) else { return NSLog("MMJ draft: no window") }
+            c.textView.setSelectedRange(NSRange(location: (c.textView.string as NSString).length, length: 0))
+            c.textView.insertText(text, replacementRange: c.textView.selectedRange())
+            try? await Task.sleep(for: .seconds(Self.autosaveDelay + 3))
+            NSLog("MMJ draft: autosaved=\(c.autosaved?.remoteId ?? "-") opened=\(c.openedDraft?.remoteId ?? "-")")
+            switch action {
+            case "send":
+                c.sendMessage(nil)
+            case "dontsave", "save":
+                c.window?.performClose(nil)
+                try? await Task.sleep(for: .milliseconds(800))
+                // The alert's buttons: Save, Cancel, Don't Save.
+                if let sheet = c.window?.attachedSheet {
+                    let buttons = sheet.contentView.map(debugButtons) ?? []
+                    buttons.first { $0.title == (action == "save" ? "Save" : "Don’t Save") }?.performClick(nil)
+                } else {
+                    NSLog("MMJ draft: no prompt")
+                }
+            default:
+                break
+            }
+            try? await Task.sleep(for: .seconds(4))
+            NSLog("MMJ draft: after \(action): windows=\(open.count)")
+        }
+
+        private static func debugButtons(_ view: NSView) -> [NSButton] {
+            view.subviews.flatMap { ($0 as? NSButton).map { [$0] } ?? debugButtons($0) }
+        }
+
+        /// Logs what the compose windows show: fields, format, attachments and drafts.
+        static func debugLogFrontmost() {
+            NSLog("MMJ compose windows: \(open.count)")
+            for c in open {
+                let shown = HeaderRow.allCases.filter { c.rows[$0]?.isHidden == false }.map(\.rawValue)
+                NSLog("""
+                    MMJ compose: from=\(c.fromPopup.titleOfSelectedItem ?? "-") to=\(c.toField.addresses.map(Compose.format)) \
+                    cc=\(c.ccField.addresses.map(Compose.format)) bcc=\(c.bccField.addresses.map(Compose.format)) \
+                    rows=\(shown) subject=\(c.subjectField.stringValue) format=\(c.formatPopup.titleOfSelectedItem ?? "-") \
+                    attachments=\(c.setup.attachments.map { "\($0.name ?? "-") cid=\($0.cid ?? "-")" }) \
+                    inReplyTo=\(c.setup.inReplyTo) opened=\(c.openedDraft?.remoteId ?? "-") edited=\(c.isEdited)
+                    ---
+                    \(c.textView.string)
+                    ---
+                    """)
             }
         }
 

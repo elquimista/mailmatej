@@ -470,6 +470,11 @@ public final class MailStore: Sendable {
         public var remoteId: String
     }
 
+    /// Whether a message is a draft (`$draft`).
+    public func isDraft(id: Int64) throws -> Bool {
+        try dbPool.read { db in try Bool.fetchOne(db, sql: "SELECT isDraft FROM message WHERE id = ?", arguments: [id]) ?? false }
+    }
+
     public func refs(ids: [Int64]) throws -> [MessageRef] {
         guard !ids.isEmpty else { return [] }
         return try dbPool.read { db in

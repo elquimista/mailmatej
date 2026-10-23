@@ -878,16 +878,86 @@ final class AppModel {
         return setup
     }
 
-    /// Sends, then marks the original answered (or forwarded), here and on the server.
-    func send(_ message: OutgoingMessage, accountId: String, original: (id: Int64, keyword: String)?) async throws {
+    /// Sends, then marks the original answered (or forwarded), here and on the server. The drafts it
+    /// was written in go once it's sent.
+    func send(
+        _ message: OutgoingMessage, accountId: String, original: (id: Int64, keyword: String)?, replacingDrafts: [DraftRef] = []
+    ) async throws {
         pendingWork += 1  // quitting waits for it
         defer { pendingWork -= 1 }
-        try await coordinator.send(accountId: accountId, message)
+        let (here, elsewhere) = split(replacingDrafts, accountId: accountId)
+        try await coordinator.send(accountId: accountId, message, replacingDrafts: here)
+        try? store.deleteMessages(accountId: accountId, remoteIds: here)
+        discardDrafts(elsewhere)
         refreshKnownAddresses()  // its recipients now count as written to
         guard let original, let ref = try store.refs(ids: [original.id]).first else { return }
         try store.setKeyword(original.keyword, true, messageIds: [ref.id])
         try? await coordinator.update(
             accountId: ref.accountId, remoteIds: [ref.remoteId], patch: ["keywords/\(original.keyword)": true])
+    }
+
+    // MARK: Drafts
+
+    /// A draft on a server.
+    struct DraftRef: Hashable {
+        var accountId: String
+        var remoteId: String
+    }
+
+    private func split(_ drafts: [DraftRef], accountId: String) -> (here: [String], elsewhere: [DraftRef]) {
+        (drafts.filter { $0.accountId == accountId }.map(\.remoteId), drafts.filter { $0.accountId != accountId })
+    }
+
+    /// Saves a message as a draft in the account's Drafts, replacing `old` (earlier saves of it).
+    func saveDraft(_ message: OutgoingMessage, accountId: String, replacing old: [DraftRef]) async throws -> DraftRef {
+        pendingWork += 1  // quitting waits for it
+        defer { pendingWork -= 1 }
+        let (here, elsewhere) = split(old, accountId: accountId)
+        let id = try await coordinator.saveDraft(accountId: accountId, message, replacing: here)
+        try? store.deleteMessages(accountId: accountId, remoteIds: here)  // the replaced ones leave the lists now
+        discardDrafts(elsewhere)  // saved before From moved it to another account
+        return DraftRef(accountId: accountId, remoteId: id)
+    }
+
+    /// Removes drafts not kept: from the lists at once, from the servers in the background.
+    func discardDrafts(_ drafts: [DraftRef]) {
+        for (accountId, refs) in Dictionary(grouping: drafts, by: \.accountId) {
+            let ids = refs.map(\.remoteId)
+            try? store.deleteMessages(accountId: accountId, remoteIds: ids)
+            inBackground { [coordinator] in try? await coordinator.destroyDrafts(accountId: accountId, ids) }
+        }
+    }
+
+    /// Opens a draft in a compose window to go on with it (or brings forward the window already editing it).
+    func openDraft(messageId: Int64, window: NSWindow?) {
+        guard let ref = try? store.refs(ids: [messageId]).first else { return }
+        let draft = DraftRef(accountId: ref.accountId, remoteId: ref.remoteId)
+        if ComposeWindowController.bringForward(editing: draft) { return }
+        Task {
+            do {
+                let identities = try store.identities()
+                guard !identities.isEmpty else { throw ComposeError.noIdentities }
+                let saved = try await coordinator.loadDraft(accountId: ref.accountId, remoteId: ref.remoteId)
+                let mine = identities.filter { $0.accountId == ref.accountId }
+                var setup = ComposeWindowController.Setup(
+                    identities: identities, identity: mine.first { $0.email == saved.from } ?? mine.first ?? identities.first,
+                    draft: Compose.Draft(to: saved.to, cc: saved.cc, subject: saved.subject, text: saved.text))
+                setup.bcc = saved.bcc
+                setup.replyTo = saved.replyTo
+                setup.isMarkdown = saved.isMarkdown
+                setup.attachments = saved.attachments
+                setup.attachmentsAccountId = ref.accountId
+                setup.inReplyTo = saved.inReplyTo
+                setup.references = saved.references
+                setup.openedDraft = draft
+                ComposeWindowController.show(model: self, setup: setup)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t open the draft."
+                alert.informativeText = Self.describe(error)
+                if let window { alert.beginSheetModal(for: window, completionHandler: nil) } else { alert.runModal() }
+            }
+        }
     }
 
     enum ComposeError: LocalizedError {

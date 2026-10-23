@@ -310,10 +310,27 @@ public actor SyncCoordinator {
     }
 
     /// Sends a message from the account (see `JMAPAccountSync.send`), then syncs so it shows in Sent.
-    public func send(accountId: String, _ message: OutgoingMessage) async throws {
+    public func send(accountId: String, _ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
         defer { requestSync(accountId) }
-        try await engine.send(message)
+        try await engine.send(message, replacingDrafts: replacingDrafts)
+    }
+
+    /// Saves a draft (see `JMAPAccountSync.saveDraft`), then syncs so it shows in Drafts.
+    public func saveDraft(accountId: String, _ message: OutgoingMessage, replacing old: [String]) async throws -> String {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        defer { requestSync(accountId) }
+        return try await engine.saveDraft(message, replacing: old)
+    }
+
+    public func destroyDrafts(accountId: String, _ remoteIds: [String]) async throws {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await engine.destroyDrafts(remoteIds)
+    }
+
+    public func loadDraft(accountId: String, remoteId: String) async throws -> SavedDraft {
+        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        return try await engine.loadDraft(remoteId: remoteId)
     }
 
     public func renameMailbox(accountId: String, remoteId: String, to name: String) async throws {

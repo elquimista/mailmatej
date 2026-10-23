@@ -266,6 +266,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         for messageList in [list, correspondence] {
             messageList.onShowInFinder = { [weak self] id in self?.model.showInFinder(messageId: id, window: self?.window) }
+            messageList.onOpen = { [weak self] id in  // a draft opens in a compose window, to go on with it
+                guard let self, (try? model.store.isDraft(id: id)) == true else { return }
+                model.openDraft(messageId: id, window: window)
+            }
             messageList.addContextItems = { [weak self] menu, ids in self?.addMessageItems(to: menu, for: ids) }
         }
         correspondence.onSelectionChange = { [weak self] id in

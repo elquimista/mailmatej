@@ -32,6 +32,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     var onSortChange: ((MessageSort) -> Void)?
     /// "Show in Finder" chosen from a row's context menu.
     var onShowInFinder: ((Int64) -> Void)?
+    /// A message double-clicked.
+    var onOpen: ((Int64) -> Void)?
 
     /// The list's sort, remembered across launches (per list, keyed by its autosave name).
     private(set) var sort: MessageSort
@@ -102,6 +104,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         }
         let table = tableView
         (table as? MessageTableView)?.onArrow = { [weak self] expand in self?.arrowKey(expand: expand) ?? false }
+        table.target = self
+        table.doubleAction = #selector(rowDoubleClicked(_:))
         table.style = .fullWidth
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
@@ -879,6 +883,14 @@ final class DateCell: ColoredCell {
     required init?(coder: NSCoder) { fatalError() }
 
     override var coloredFields: [NSTextField] { [dateField, timeField] }
+}
+
+extension MessageListViewController {
+    @objc fileprivate func rowDoubleClicked(_ sender: Any?) {
+        let row = tableView.clickedRow
+        guard row >= 0, row < ids.count else { return }
+        onOpen?(ids[row])
+    }
 }
 
 /// The message table, passing ← and → to the list for collapsing and expanding threads.

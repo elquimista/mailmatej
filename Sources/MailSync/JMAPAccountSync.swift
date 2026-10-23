@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import JMAPKit
 import MailStore
@@ -562,7 +563,8 @@ public actor JMAPAccountSync {
 
     /// Sends a message (RFC 8621 §7): creates it in Drafts, submits it, and on success the server moves
     /// it to Sent and clears `$draft`. Bcc recipients are only in the envelope, never in the message.
-    public func send(_ message: OutgoingMessage) async throws {
+    /// `replacingDrafts`: the drafts it was written in, removed once it's sent.
+    public func send(_ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
         let session = try await client.currentSession()
         guard session.supports(Capability.submission) else { throw JMAPError.missingCapability(Capability.submission) }
         let accountId = try remoteAccountId(session)
@@ -570,64 +572,7 @@ public actor JMAPAccountSync {
             throw SendError.noMailbox(role: "drafts")
         }
         let sent = try store.mailbox(accountId: account.id, role: "sent")
-
-        var email: [String: JSONValue] = [
-            "mailboxIds": .object([drafts.remoteId: true]),
-            "keywords": ["$draft": true, "$seen": true],
-            "from": Self.json([message.from]),
-            "subject": .string(message.subject),
-            // As MailMate does: Outlook users can't send reactions, which arrive as stray emails elsewhere.
-            "header:X-MS-Reactions:asText": "disallow",
-            "sentAt": .string(ISO8601DateFormatter().string(from: Date())),
-            "bodyValues": ["text": ["value": .string(message.text)]],
-            "textBody": [["partId": "text", "type": "text/plain"]],
-        ]
-        if !message.to.isEmpty { email["to"] = Self.json(message.to) }
-        if !message.cc.isEmpty { email["cc"] = Self.json(message.cc) }
-        if !message.replyTo.isEmpty { email["replyTo"] = Self.json(message.replyTo) }
-        var parts = message.attachments
-        for file in message.files {
-            let blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
-            parts.append(MessagePart(blobId: blobId, cid: file.cid, type: file.type, name: file.name, size: file.data.count))
-        }
-        if let html = message.html {
-            // Built explicitly, as mail clients expect it (servers given text, HTML and attachments separately
-            // put inline pictures beside the HTML instead):
-            // mixed [ related [ alternative [text, html], inline pictures ], attachments ]
-            email.removeValue(forKey: "textBody")
-            email["bodyValues"] = ["text": ["value": .string(message.text)], "html": ["value": .string(html)]]
-            func leaf(_ part: MessagePart, inline: Bool) -> JSONValue {
-                var item: [String: JSONValue] = [
-                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": inline ? "inline" : "attachment",
-                ]
-                if let name = part.name { item["name"] = .string(name) }
-                if inline, let cid = part.cid { item["cid"] = .string(cid) }
-                return .object(item)
-            }
-            let shown = parts.filter { part in part.cid.map { html.contains("cid:" + $0) } ?? false }
-            let attached = parts.filter { part in !shown.contains { $0.blobId == part.blobId && $0.cid == part.cid } }
-            var body: JSONValue = [
-                "type": "multipart/alternative",
-                "subParts": [["partId": "text", "type": "text/plain"], ["partId": "html", "type": "text/html"]],
-            ]
-            if !shown.isEmpty {
-                body = ["type": "multipart/related", "subParts": .array([body] + shown.map { leaf($0, inline: true) })]
-            }
-            if !attached.isEmpty {
-                body = ["type": "multipart/mixed", "subParts": .array([body] + attached.map { leaf($0, inline: false) })]
-            }
-            email["bodyStructure"] = body
-        } else if !parts.isEmpty {
-            email["attachments"] = .array(parts.map { part in
-                var item: [String: JSONValue] = [
-                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": "attachment",
-                ]
-                if let name = part.name { item["name"] = .string(name) }
-                return .object(item)
-            })
-        }
-        if !message.inReplyTo.isEmpty { email["inReplyTo"] = .strings(message.inReplyTo) }
-        if !message.references.isEmpty { email["references"] = .strings(message.references) }
+        let email = try await emailObject(message, accountId: accountId, drafts: drafts, asDraft: false)
 
         var afterSend: [String: JSONValue] = ["keywords/$draft": .null]
         if let sent {
@@ -667,6 +612,179 @@ public actor JMAPAccountSync {
             try? await discardDraft(draftId, accountId)
             throw SendError.rejected(Self.setErrorText(error))
         }
+        // Only once it's on its way: had it failed, its drafts would still hold it.
+        try? await destroyDrafts(replacingDrafts)
+    }
+
+    /// The JMAP Email for a message (its files uploaded), in Drafts with `$draft`. As a draft (saved, not
+    /// sent) it keeps its Bcc and, for Markdown, the text as typed with its format in a header, so it
+    /// reopens as it was written.
+    private func emailObject(
+        _ message: OutgoingMessage, accountId: String, drafts: MailboxRecord, asDraft: Bool
+    ) async throws -> [String: JSONValue] {
+        var email: [String: JSONValue] = [
+            "mailboxIds": .object([drafts.remoteId: true]),
+            "keywords": ["$draft": true, "$seen": true],
+            "from": Self.json([message.from]),
+            "subject": .string(message.subject),
+            // As MailMate does: Outlook users can't send reactions, which arrive as stray emails elsewhere.
+            "header:X-MS-Reactions:asText": "disallow",
+            "sentAt": .string(ISO8601DateFormatter().string(from: Date())),
+            "bodyValues": ["text": ["value": .string(message.text)]],
+            "textBody": [["partId": "text", "type": "text/plain"]],
+        ]
+        if !message.to.isEmpty { email["to"] = Self.json(message.to) }
+        if !message.cc.isEmpty { email["cc"] = Self.json(message.cc) }
+        if !message.replyTo.isEmpty { email["replyTo"] = Self.json(message.replyTo) }
+        if asDraft, !message.bcc.isEmpty { email["bcc"] = Self.json(message.bcc) }
+        if asDraft, let format = message.draftFormat { email["header:\(Self.draftFormatHeader):asText"] = .string(format) }
+        var parts = message.attachments
+        for file in message.files {
+            let blobId = try await upload(file, accountId: accountId)
+            parts.append(MessagePart(blobId: blobId, cid: file.cid, type: file.type, name: file.name, size: file.data.count))
+        }
+        if let html = message.html {
+            // Built explicitly, as mail clients expect it (servers given text, HTML and attachments separately
+            // put inline pictures beside the HTML instead):
+            // mixed [ related [ alternative [text, html], inline pictures ], attachments ]
+            email.removeValue(forKey: "textBody")
+            email["bodyValues"] = ["text": ["value": .string(message.text)], "html": ["value": .string(html)]]
+            func leaf(_ part: MessagePart, inline: Bool) -> JSONValue {
+                var item: [String: JSONValue] = [
+                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": inline ? "inline" : "attachment",
+                ]
+                if let name = part.name { item["name"] = .string(name) }
+                if inline, let cid = part.cid { item["cid"] = .string(cid) }
+                return .object(item)
+            }
+            let shown = parts.filter { part in part.cid.map { html.contains("cid:" + $0) } ?? false }
+            let attached = parts.filter { part in !shown.contains { $0.blobId == part.blobId && $0.cid == part.cid } }
+            var body: JSONValue = [
+                "type": "multipart/alternative",
+                "subParts": [["partId": "text", "type": "text/plain"], ["partId": "html", "type": "text/html"]],
+            ]
+            if !shown.isEmpty {
+                body = ["type": "multipart/related", "subParts": .array([body] + shown.map { leaf($0, inline: true) })]
+            }
+            if !attached.isEmpty {
+                body = ["type": "multipart/mixed", "subParts": .array([body] + attached.map { leaf($0, inline: false) })]
+            }
+            email["bodyStructure"] = body
+        } else if !parts.isEmpty {
+            email["attachments"] = .array(parts.map { part in
+                var item: [String: JSONValue] = [
+                    "blobId": .string(part.blobId), "type": .string(part.type), "disposition": "attachment",
+                ]
+                if let name = part.name { item["name"] = .string(name) }
+                if let cid = part.cid { item["cid"] = .string(cid) }  // a draft's picture, shown in its Markdown
+                return .object(item)
+            })
+        }
+        if !message.inReplyTo.isEmpty { email["inReplyTo"] = .strings(message.inReplyTo) }
+        if !message.references.isEmpty { email["references"] = .strings(message.references) }
+        return email
+    }
+
+    /// A draft's own header naming the format it's written in ("markdown"); see `emailObject`.
+    static let draftFormatHeader = "X-MailMateJ-Format"
+
+    /// Blob ids of files uploaded for drafts, by their contents' hash, so saving a draft again doesn't
+    /// upload its files again.
+    private var uploads: [String: String] = [:]
+
+    private func upload(_ file: OutgoingFile, accountId: String) async throws -> String {
+        let key = SHA256.hash(data: file.data).map { String(format: "%02x", $0) }.joined()
+        if let blobId = uploads[key] { return blobId }
+        let blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
+        uploads[key] = blobId
+        return blobId
+    }
+
+    // MARK: Drafts
+
+    /// Saves a message as a draft in Drafts, removing the drafts it replaces in the same call. Returns
+    /// the new draft's id.
+    public func saveDraft(_ message: OutgoingMessage, replacing old: [String]) async throws -> String {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        guard let drafts = try store.mailbox(accountId: account.id, role: "drafts") else {
+            throw SendError.noMailbox(role: "drafts")
+        }
+        func attempt() async throws -> String {
+            var set: [String: JSONValue] = [
+                "accountId": .string(accountId),
+                "create": ["draft": .object(try await emailObject(message, accountId: accountId, drafts: drafts, asDraft: true))],
+            ]
+            if !old.isEmpty { set["destroy"] = .strings(old) }
+            var request = JMAPRequest()
+            let call = request.call("Email/set", set)
+            let result = try await client.send(request).arguments(call)
+            if let error = result["notCreated"]?["draft"] { throw SendError.rejected(Self.setErrorText(error)) }
+            guard let id = result["created"]?["draft"]?["id"]?.stringValue else {
+                throw JMAPError.invalidResponse("no draft id")
+            }
+            return id
+        }
+        do {
+            return try await attempt()
+        } catch SendError.rejected where !uploads.isEmpty {
+            uploads = [:]  // an uploaded file the server has since dropped: upload again
+            return try await attempt()
+        }
+    }
+
+    /// Removes drafts for good (a message not kept, or sent).
+    public func destroyDrafts(_ remoteIds: [String]) async throws {
+        guard !remoteIds.isEmpty else { return }
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(remoteIds)])
+        _ = try await client.send(request)
+        try store.deleteMessages(accountId: account.id, remoteIds: remoteIds)
+    }
+
+    /// A draft as written, to go on with it in the composer.
+    public func loadDraft(remoteId: String) async throws -> SavedDraft {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let get = request.call("Email/get", [
+            "accountId": .string(accountId), "ids": .strings([remoteId]),
+            "properties": [
+                "from", "to", "cc", "bcc", "replyTo", "subject", "inReplyTo", "references", "textBody", "htmlBody",
+                "bodyValues", "attachments", .string("header:\(Self.draftFormatHeader):asText"),
+            ],
+            "fetchTextBodyValues": true, "fetchHTMLBodyValues": true,
+        ])
+        guard let email = try await client.send(request).arguments(get)["list"]?.arrayValue?.first else {
+            throw JMAPError.invalidResponse("the draft is gone")
+        }
+        func addresses(_ key: String) -> [EmailAddress] {
+            (email[key]?.arrayValue ?? []).map { EmailAddress(name: $0["name"]?.stringValue, email: $0["email"]?.stringValue) }
+        }
+        func strings(_ key: String) -> [String] { email[key]?.arrayValue?.compactMap(\.stringValue) ?? [] }
+        func text(_ key: String) -> String? {
+            let ids = (email[key]?.arrayValue ?? []).compactMap { $0["partId"]?.stringValue }
+            let values = ids.compactMap { email["bodyValues"]?[$0]?["value"]?.stringValue }
+            return values.isEmpty ? nil : values.joined(separator: "\n")
+        }
+        var draft = SavedDraft()
+        draft.from = addresses("from").first?.email?.lowercased()
+        draft.to = addresses("to")
+        draft.cc = addresses("cc")
+        draft.bcc = addresses("bcc")
+        draft.replyTo = addresses("replyTo")
+        draft.subject = email["subject"]?.stringValue ?? ""
+        draft.text = text("textBody") ?? text("htmlBody").map(Self.plainText(fromHTML:)) ?? ""
+        draft.isMarkdown = email["header:\(Self.draftFormatHeader):asText"]?.stringValue?
+            .trimmingCharacters(in: .whitespaces).lowercased() == "markdown"
+        draft.inReplyTo = strings("inReplyTo")
+        draft.references = strings("references")
+        draft.attachments = (email["attachments"]?.arrayValue ?? []).compactMap { part in
+            guard let blobId = part["blobId"]?.stringValue else { return nil }
+            return MessagePart(
+                blobId: blobId, cid: part["cid"]?.stringValue, type: part["type"]?.stringValue ?? "application/octet-stream",
+                name: part["name"]?.stringValue, size: part["size"]?.intValue)
+        }
+        return draft
     }
 
     /// Redirects a message as it is (a rule's Redirect): submits the stored email to new recipients,

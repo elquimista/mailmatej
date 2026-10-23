@@ -222,6 +222,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if let subject = ProcessInfo.processInfo.environment["MMJ_DEBUG_OPEN_DRAFT"] {
+                    // Opens the draft with this subject as a double-click on it does, then logs the window.
+                    let store = AppModel.shared.store
+                    let id = ((try? store.messageIDs(scope: .role("drafts"))) ?? []).first { (try? store.detail(id: $0))?.subject == subject }
+                    if let id {
+                        AppModel.shared.openDraft(messageId: id, window: windowController?.window)
+                        if ProcessInfo.processInfo.environment["MMJ_DEBUG_OPEN_TWICE"] != nil {
+                            try? await Task.sleep(for: .seconds(2))
+                            AppModel.shared.openDraft(messageId: id, window: windowController?.window)
+                        }
+                        try? await Task.sleep(for: .seconds(3))
+                        ComposeWindowController.debugLogFrontmost()
+                        if let action = ProcessInfo.processInfo.environment["MMJ_DEBUG_DRAFT_THEN"] {
+                            await ComposeWindowController.debugEditThen(action, text: "\nMore text.")
+                        }
+                    } else {
+                        NSLog("MMJ draft: no draft \"\(subject)\"")
+                    }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_QUIT"] != nil,
                     let window = ComposeWindowController.debugSnapshotFrontmost()
                 {
@@ -411,17 +430,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// Unsent messages aren't discarded silently: quitting asks first. Then, with changes still on their
-    /// way to the servers, it waits for them (see QuitProgress) and quits once they're done. The wait
-    /// isn't held inside the quit itself: while AppKit waits on a quit, the main actor's tasks don't run,
-    /// so the work could never finish. The quit is called off, and made again when the work is done.
+    /// Unsent messages are saved as drafts first. Then, with changes still on their way to the servers,
+    /// it waits for them (see QuitProgress) and quits once they're done. The wait isn't held inside the
+    /// quit itself: while AppKit waits on a quit, the main actor's tasks don't run, so the work could
+    /// never finish. The quit is called off, and made again when the work is done.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quittingAfterWork { return .terminateNow }
-        let asked = ComposeWindowController.confirmQuit { discard in
-            sender.reply(toApplicationShouldTerminate: false)  // out of the quit, so the work can run
-            if discard { DispatchQueue.main.async { self.quitAfterPendingWork() } }
+        let saving = ComposeWindowController.saveUnsentBeforeQuit { saved in
+            if saved { self.quitAfterPendingWork() }  // else the one not saved says why, and the app stays
         }
-        if asked { return .terminateLater }
+        if saving { return .terminateCancel }
         guard let model = AppModel.shared, model.pendingWork > 0 else { return .terminateNow }
         quitAfterPendingWork()
         return .terminateCancel
