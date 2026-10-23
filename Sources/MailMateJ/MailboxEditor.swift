@@ -73,6 +73,9 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         // Narrow enough to be out of the way, wide enough for a rule's rows beside the rule list.
         window.minSize = NSSize(width: 960, height: 360)
         window.setFrameAutosaveName("MailboxEditor")
+        // Tab goes from field to field in reading order (description, conditions, actions), as in MailMate,
+        // also as rows come and go.
+        window.autorecalculatesKeyViewLoop = true
         super.init(window: window)
         window.delegate = self
 
@@ -125,6 +128,10 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
                 lines.append(line)
             }
             NSLog("MMJ split menu: " + lines.joined(separator: "\n"))
+        }
+
+        static func debugTab(count: Int) {
+            if let window = shared?.window { debugLogTabOrder(in: window, count: count) }
         }
 
         static func debugPressAddRule() { (shared?.content.debugPane as? RulesPane)?.debugPressAdd() }
@@ -675,3 +682,43 @@ private final class UnifiedSubmailboxesPane: NSObject, EditorPane {
         refresh()
     }
 }
+
+#if DEBUG
+    /// Focuses a window's topmost editable text field, then presses Tab `count` times (as typed),
+    /// logging where the focus goes each time.
+    @MainActor
+    func debugLogTabOrder(in window: NSWindow, count: Int) {
+        guard let content = window.contentView else { return }
+        func fields(_ view: NSView) -> [NSTextField] {
+            view.subviews.flatMap { sub -> [NSTextField] in
+                if let field = sub as? NSTextField, field.isEditable, !field.isHiddenOrHasHiddenAncestor { return [field] }
+                return fields(sub)
+            }
+        }
+        func describe(_ responder: NSResponder?) -> String {
+            var view = responder as? NSView
+            if let editor = responder as? NSTextView, editor.isFieldEditor { view = editor.delegate as? NSView }
+            guard let view else { return String(describing: responder.map { type(of: $0) }) }
+            let frame = view.convert(view.bounds, to: nil)
+            let value = (view as? NSTextField)?.stringValue ?? (view as? NSPopUpButton)?.titleOfSelectedItem ?? ""
+            return "\(type(of: view)) \"\(value)\" at \(Int(frame.minX)),\(Int(content.bounds.height - frame.maxY))"
+        }
+        let top = fields(content).min { a, b in
+            let fa = a.convert(a.bounds, to: nil), fb = b.convert(b.bounds, to: nil)
+            return fa.maxY != fb.maxY ? fa.maxY > fb.maxY : fa.minX < fb.minX
+        }
+        window.makeFirstResponder(top)
+        var lines = ["start " + describe(window.firstResponder)]
+        for _ in 0..<count {
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                if let event = NSEvent.keyEvent(
+                    with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, characters: "\t", charactersIgnoringModifiers: "\t",
+                    isARepeat: false, keyCode: 48)
+                { window.sendEvent(event) }
+            }
+            lines.append("tab → " + describe(window.firstResponder))
+        }
+        NSLog("MMJ tab order:\n" + lines.joined(separator: "\n"))
+    }
+#endif

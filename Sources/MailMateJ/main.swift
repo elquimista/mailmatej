@@ -201,6 +201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_SEND"] != nil {
                     try? await Task.sleep(for: .seconds(2))
                     ComposeWindowController.debugSendFrontmost(ProcessInfo.processInfo.environment)
+                    if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_TAB"] ?? ""),
+                        let window = ComposeWindowController.debugSnapshotFrontmost()
+                    { debugLogTabOrder(in: window, count: count) }
                     try? await Task.sleep(for: .milliseconds(500))
                     writeSnapshot(of: ComposeWindowController.debugSnapshotFrontmost(), to: path.replacingOccurrences(of: ".png", with: "-compose.png"))
                     // Also a real screen capture of just that window (what the display shows).
@@ -306,6 +309,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let row = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_RULE_ROW"] ?? "") {
                         MailboxEditorWindowController.debugSelectRule(row: row)
                         try? await Task.sleep(for: .milliseconds(500))
+                    }
+                    if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_TAB"] ?? "") {
+                        MailboxEditorWindowController.debugTab(count: count)  // Tab through the editor's fields
                     }
                     if let points = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SCROLL"] ?? "") {
                         MailboxEditorWindowController.debugScrollSidebar(by: points)
