@@ -3,9 +3,8 @@ import MailStore
 
 /// MailMate's Displayed Count: what a sidebar mailbox's badge counts, by sidebar key, kept in the app's
 /// preferences. A mailbox without a choice inherits the one of the mailbox it sits in; with none
-/// anywhere above, it keeps its usual count (unread, or none for Sent, Drafts and the like). Include
-/// Submailboxes counts the mailbox's messages together with those of every mailbox inside it (each
-/// message once), inherited the same way.
+/// anywhere above, it counts unread messages. Include Submailboxes counts the mailbox's messages
+/// together with those of every mailbox inside it (each message once), inherited the same way.
 enum DisplayedCounts {
     enum Kind: String, CaseIterable {
         case none, all, unread, flagged, unreplied
@@ -62,7 +61,7 @@ enum DisplayedCounts {
                 let kind = kind(for: node.key) ?? inherited
                 let include = includesSubmailboxes(node.key) ?? inheritedInclude
                 if node.kind != .header, kind != nil || include == true, let scope = node.scope {
-                    let counted = kind ?? usualKind(node)
+                    let counted = kind ?? .unread
                     let lists = include == true ? scopes(node) : [scope]
                     node.badge = count(counted, of: lists, store: store)
                 }
@@ -82,14 +81,5 @@ enum DisplayedCounts {
         case .unreplied: counting = .unreplied
         }
         return (try? store.count(scopes: lists, counting: counting)) ?? 0
-    }
-
-    /// What a mailbox counts without a choice: unread, except where MailMate shows no count.
-    private static func usualKind(_ node: SidebarNode) -> Kind {
-        switch node.scope {
-        case .role(let role)?: role == "inbox" || role == "junk" ? .unread : .none
-        case .allMessages?, .everything?: .none
-        default: ["sent", "trash", "drafts"].contains(node.role ?? "") ? .none : .unread
-        }
     }
 }

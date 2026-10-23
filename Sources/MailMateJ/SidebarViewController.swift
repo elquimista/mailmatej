@@ -370,19 +370,21 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let accountsByID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
         for (role, title, symbol) in unifiedItems where role == "inbox" || roles.contains(role) {
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
-            if role == "inbox" || role == "junk" { node.badge = counts.unreadByRole[role] ?? 0 }
+            node.badge = counts.unreadByRole[role] ?? 0
             node.children = submailboxes(of: node, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
             // Smart mailboxes made inside it, before its submailboxes.
             node.children = smartNodes(store: store, accounts: accountsByID, inside: MessageScope.role(role).key) + node.children
-            narrow(node, store: store, showsUnread: role == "inbox" || role == "junk")
+            narrow(node, store: store)
             unified.children.append(node)
         }
         let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "envelope", scope: .allMessages)  // MailMate's
+        all.badge = (try? store.count(scope: .allMessages, counting: .unread)) ?? 0
         all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
-        narrow(all, store: store, showsUnread: false)
+        narrow(all, store: store)
         // MailMate's special mailbox for everything, Junk and Deleted Messages included.
         let everything = SidebarNode(
             key: "unified.everything", kind: .unified, title: "All / Junk / Deleted", symbol: "envelope", scope: .everything)
+        everything.badge = (try? store.count(scope: .everything, counting: .unread)) ?? 0
         everything.children = smartNodes(store: store, accounts: accountsByID, inside: MessageScope.everything.key)
         all.children = [everything] + smartNodes(store: store, accounts: accountsByID, inside: MessageScope.allMessages.key) + all.children
         unified.children.append(all)
@@ -489,14 +491,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// A special mailbox whose Conditions tab narrows it: its submailboxes show only what it shows, and
     /// its counts come from here (the server's count the whole mailboxes).
-    private static func narrow(_ node: SidebarNode, store: MailStore, showsUnread: Bool) {
+    private static func narrow(_ node: SidebarNode, store: MailStore) {
         guard let key = node.scope?.key, store.hasSpecialCondition(key: key) else { return }
-        if showsUnread, let scope = node.scope { node.badge = (try? store.count(scope: scope, counting: .unread)) ?? 0 }
+        if let scope = node.scope { node.badge = (try? store.count(scope: scope, counting: .unread)) ?? 0 }
         func wrap(_ nodes: [SidebarNode]) {
             for child in nodes {
                 if let scope = child.scope {
                     child.scope = .within(key, scope)
-                    if showsUnread { child.badge = (try? store.count(scope: .within(key, scope), counting: .unread)) ?? 0 }
+                    child.badge = (try? store.count(scope: .within(key, scope), counting: .unread)) ?? 0
                 }
                 wrap(child.children)
             }
@@ -533,7 +535,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         case .role(let role):
             children = known.filter { $0.role == role }.sorted(by: order).map { box in
                 child(box.accountId, accounts[box.accountId]!.name, .mailbox(box.id), accountId: box.accountId,
-                      badge: role == "inbox" || role == "junk" ? box.unreadEmails : 0, role: role)
+                      badge: box.unreadEmails, role: role)
             }
         case .flagged, .allMessages:
             let flagged = scope == .flagged
@@ -543,7 +545,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             func sourceNodes(_ boxes: [MailboxRecord]) -> [SidebarNode] {
                 boxes.map { box in
                     child("src.\(box.id)", source(box), flagged ? .flaggedInMailbox(box.id) : .mailbox(box.id),
-                          accountId: box.accountId, badge: flagged ? counts.flaggedByMailbox[box.id] ?? 0 : 0, role: box.role)
+                          accountId: box.accountId, badge: flagged ? counts.flaggedByMailbox[box.id] ?? 0 : box.unreadEmails, role: box.role)
                 }
             }
             if settings.splitsByAccount {
@@ -552,7 +554,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     .map { account in
                         let node = child(
                             "acct.\(account.id)", account.name, flagged ? .flaggedInAccount(account.id) : .allInAccount(account.id),
-                            accountId: account.id, badge: flagged ? counts.flaggedByAccount[account.id] ?? 0 : 0, role: nil)
+                            accountId: account.id,
+                            badge: flagged ? counts.flaggedByAccount[account.id] ?? 0
+                                : sources.filter { $0.accountId == account.id }.reduce(0) { $0 + $1.unreadEmails },
+                            role: nil)
                         if settings.splitsBySource { node.children = sourceNodes(sources.filter { $0.accountId == account.id }) }
                         return node
                     }
@@ -578,7 +583,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     key: "mailbox.\(accountId).\(box.remoteId)", kind: .mailbox, title: box.name,
                     symbol: Self.symbol(forRole: box.role), scope: .mailbox(box.id), accountId: accountId)
                 node.role = box.role
-                if box.role != "sent" && box.role != "trash" && box.role != "drafts" { node.badge = box.unreadEmails }
+                node.badge = box.unreadEmails
                 node.children = build(box.remoteId)
                 return node
             }
