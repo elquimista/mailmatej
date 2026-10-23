@@ -299,6 +299,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
 
         func debugSelect(key: String) { select(key: key) }
+
+        func debugDuplicate(key: String) {
+            guard let node = find(key, in: roots) else { return NSLog("MMJ duplicate: no \(key)") }
+            duplicate(node)
+            NSLog("MMJ sidebar order: \(roots.map { "\($0.title): " + $0.children.map(\.title).joined(separator: ", ") }.joined(separator: " | "))")
+        }
     #endif
 
     /// Selects a row by key (as a click would), opening the rows above it. Returns whether it exists.
@@ -847,6 +853,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if node.kind == .smart {
             add("Edit Smart Mailbox…", #selector(editMailboxClicked(_:)))
             add("Rename Smart Mailbox", #selector(renameClicked(_:)))
+            add("Duplicate Smart Mailbox", #selector(duplicateClicked(_:)))
             menu.addItem(.separator())
             add("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:)))
             return
@@ -1066,6 +1073,28 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
         }
     #endif
+
+    /// MailMate's Duplicate Mailbox: a copy right after it (see `MailStore.duplicateSmartMailbox`), with
+    /// its color, selected with its name ready to edit.
+    @objc private func duplicateClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        duplicate(node)
+    }
+
+    func duplicate(_ node: SidebarNode) {
+        guard case .smart(let id)? = node.scope, let copy = try? model.store.duplicateSmartMailbox(id: id) else { return }
+        let key = "smart.\(copy)"
+        if let color = MailboxColors.color(for: node.key) { MailboxColors.set(color, for: key) }
+        if MailboxColors.usesColorInList(node.key) { MailboxColors.setUsesColorInList(true, for: key) }
+        // Right after the original in the Mailboxes section's dragged order, too.
+        var order = UserDefaults.standard.stringArray(forKey: Self.orderDefaultsKey) ?? []
+        if let at = order.firstIndex(of: node.key) {
+            order.insert(key, at: at + 1)
+            UserDefaults.standard.set(order, forKey: Self.orderDefaultsKey)
+        }
+        reload()
+        if select(key: key) { beginRename(key: key, thenEdit: false) }
+    }
 
     @objc private func renameClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }

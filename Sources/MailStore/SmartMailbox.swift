@@ -708,6 +708,24 @@ extension MailStore {
         return id
     }
 
+    /// A copy of smart mailbox `id` (its sources, conditions, submailbox settings and icon), named
+    /// "<name> copy", right after it among its siblings. Smart mailboxes inside it aren't copied.
+    public func duplicateSmartMailbox(id: Int64) throws -> Int64? {
+        guard let original = try smartMailboxes().first(where: { $0.id == id }) else { return nil }
+        let json = String(decoding: try JSONEncoder().encode(original.definition), as: UTF8.self)
+        let copy = try dbPool.write { db -> Int64 in
+            try db.execute(
+                sql: "UPDATE smart_mailbox SET sortOrder = sortOrder + 1 WHERE parentId IS ? AND parentKey IS ? AND sortOrder > ?",
+                arguments: [original.parentId, original.parentKey, original.sortOrder])
+            try db.execute(
+                sql: "INSERT INTO smart_mailbox (parentId, parentKey, name, definition, sortOrder) VALUES (?, ?, ?, ?, ?)",
+                arguments: [original.parentId, original.parentKey, original.name + " copy", json, original.sortOrder + 1])
+            return db.lastInsertedRowID
+        }
+        try refreshSmartCatalog()
+        return copy
+    }
+
     /// Moves a smart mailbox (dragged in the sidebar) to `index` among `parentId`'s smart mailboxes
     /// (the top level for nil). A smart mailbox can't go inside itself or one inside it.
     /// `parentKey` puts it inside a special mailbox instead (for a top-level one).

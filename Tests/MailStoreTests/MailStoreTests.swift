@@ -27,6 +27,19 @@ import Testing
             addresses: [.init(role: .from, name: nil, email: from), .init(role: .to, name: nil, email: to)])
     }
 
+    @Test func duplicatingASmartMailboxCopiesItRightAfterIt() throws {
+        let first = try store.createSmartMailbox(name: "Credit", parentId: nil)
+        let second = try store.createSmartMailbox(name: "Other", parentId: nil)
+        var definition = SmartDefinition(sources: SmartSources(scopes: ["role:inbox"]))
+        definition.condition = .compound(.all, [.rule(.fromDomain, .is, "payoneer.com")])
+        try store.updateSmartMailbox(id: first, definition: definition)
+        let copy = try #require(try store.duplicateSmartMailbox(id: first))
+        let all = try store.smartMailboxes().filter { $0.parentId == nil }.sorted { $0.sortOrder < $1.sortOrder }
+        #expect(all.map(\.id) == [first, copy, second])
+        #expect(all[1].name == "Credit copy")
+        #expect(all[1].definition == definition)
+    }
+
     @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),
