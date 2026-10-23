@@ -461,6 +461,14 @@ public actor JMAPAccountSync {
     /// local copy (already changed by the caller) shows the server's state, and an error is thrown.
     public func update(remoteIds: [String], patch: [String: JSONValue]) async throws {
         guard !remoteIds.isEmpty else { return }
+        if remoteIds.count > 500 {
+            // In batches, within what servers take in one call (Mark All Messages as Read on a big mailbox).
+            // Re-applying a batch already made, should a later one fail and the change be retried, is harmless.
+            for start in stride(from: 0, to: remoteIds.count, by: 500) {
+                try await update(remoteIds: Array(remoteIds[start..<min(start + 500, remoteIds.count)]), patch: patch)
+            }
+            return
+        }
         let accountId = try remoteAccountId(try await client.currentSession())
         var request = JMAPRequest()
         let set = request.call("Email/set", [

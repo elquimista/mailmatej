@@ -47,10 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1))
                 }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_EMPTY"] {
-                    // "<sidebar key>[|erase]": logs its Empty item; with erase, empties it as Erase does.
+                    // "<sidebar keys>[|erase|read]": logs their Mark All Read and Empty items; erase or read
+                    // does that one as its menu item does.
                     let parts = spec.split(separator: "|").map(String.init)
                     for key in parts[0].split(separator: ",").map(String.init) {
-                        windowController?.debugEmpty(key: key, erase: parts.count > 1)
+                        windowController?.debugEmpty(key: key, choose: parts.count > 1 ? parts[1] : nil)
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }

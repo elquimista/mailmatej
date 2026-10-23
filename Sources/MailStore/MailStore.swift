@@ -470,6 +470,14 @@ public final class MailStore: Sendable {
         public var remoteId: String
     }
 
+    /// A list's unread messages.
+    public func unreadIDs(scope: MessageScope) throws -> [Int64] {
+        let (filter, args) = self.filter(scope: scope, search: nil)
+        return try dbPool.read { db in
+            try Int64.fetchAll(db, sql: "SELECT m.id FROM message m WHERE \(filter) AND NOT m.isSeen", arguments: args)
+        }
+    }
+
     /// Whether a message is a draft (`$draft`).
     public func isDraft(id: Int64) throws -> Bool {
         try dbPool.read { db in try Bool.fetchOne(db, sql: "SELECT isDraft FROM message WHERE id = ?", arguments: [id]) ?? false }

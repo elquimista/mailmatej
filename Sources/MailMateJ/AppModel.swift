@@ -289,6 +289,12 @@ final class AppModel {
         }
     }
 
+    /// Marks every message a mailbox shows as read: here at once, then on the servers.
+    func markAllRead(_ scope: MessageScope) {
+        guard let ids = try? store.unreadIDs(scope: scope), !ids.isEmpty else { return }
+        perform(.markRead, on: ids) { _ in false }
+    }
+
     /// Erases every message a mailbox shows (Empty "Deleted Messages"): gone here at once, then deleted
     /// for good on the servers.
     func emptyMailbox(_ scope: MessageScope) {

@@ -305,14 +305,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         func debugSelect(key: String) { select(key: key) }
 
-        /// Logs a mailbox's Empty item (title, enabled) and, with `erase`, empties it as Erase does.
-        func debugEmpty(key: String, erase: Bool) {
+        /// Logs a mailbox's message items (title, enabled); `choose` ("erase", "read") does one as its
+        /// menu item does (Erase confirmed).
+        func debugEmpty(key: String, choose: String?) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ empty: no \(key)") }
             let menu = NSMenu()
-            addEmptyItem(node, to: menu)
-            let item = menu.items.last { !$0.isSeparatorItem }
-            NSLog("MMJ empty: \(key) item=\(item?.title ?? "none") enabled=\(item?.action != nil)")
-            if erase, item?.action != nil, let scope = node.scope { model.emptyMailbox(scope) }
+            addMessageItems(node, to: menu)
+            let items = menu.items.filter { !$0.isSeparatorItem }
+            NSLog("MMJ empty: \(key) items=\(items.map { "\($0.title)\($0.action == nil ? " (off)" : "")" })")
+            guard let scope = node.scope else { return }
+            if choose == "erase", items.contains(where: { $0.title.hasPrefix("Empty") && $0.action != nil }) { model.emptyMailbox(scope) }
+            if choose == "read" { model.markAllRead(scope) }
         }
 
         func debugDuplicate(key: String) {
@@ -879,17 +882,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             add("Edit Smart Mailbox…", #selector(editMailboxClicked(_:)))
             add("Rename Smart Mailbox", #selector(renameClicked(_:)))
             add("Duplicate Smart Mailbox", #selector(duplicateClicked(_:)))
+            addMessageItems(node, to: menu)
             menu.addItem(.separator())
             add("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:)))
             return
         }
         if node.kind == .unified {
             add("Edit Mailbox…", #selector(editMailboxClicked(_:)))
-            addEmptyItem(node, to: menu)
+            addMessageItems(node, to: menu)
             return
         }
+        if node.kind != .header { addMessageItems(node, to: menu) }
         guard let accountId = node.accountId else { return }
-        if addEmptyItem(node, to: menu) { menu.addItem(.separator()) }
+        menu.addItem(.separator())
         let sync = menu.addItem(withTitle: "Sync Now", action: #selector(syncClicked(_:)), keyEquivalent: "")
         sync.representedObject = accountId
         sync.target = self
@@ -910,25 +915,39 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
-    // MARK: Empty
+    // MARK: Mark All Read, Empty
 
-    /// MailMate's Empty "Deleted Messages"…, for a Deleted Messages mailbox (unified, or an account's),
-    /// greyed out when it's empty. Returns whether it was added.
-    @discardableResult
-    private func addEmptyItem(_ node: SidebarNode, to menu: NSMenu) -> Bool {
+    /// MailMate's group for a mailbox's messages: Mark All Messages as Read (greyed out with nothing
+    /// unread) and, for Deleted Messages, Empty "Deleted Messages"….
+    private func addMessageItems(_ node: SidebarNode, to menu: NSMenu) {
+        guard let scope = node.scope else { return }
+        menu.addItem(.separator())
+        let read = menu.addItem(withTitle: "Mark All Messages as Read", action: #selector(markAllReadClicked(_:)), keyEquivalent: "")
+        read.target = self
+        read.representedObject = node
+        if ((try? model.store.count(scope: scope, counting: .unread)) ?? 0) == 0 { read.action = nil }
+        addEmptyItem(node, to: menu)
+    }
+
+    @objc private func markAllReadClicked(_ sender: NSMenuItem) {
+        guard let scope = (sender.representedObject as? SidebarNode)?.scope else { return }
+        model.markAllRead(scope)
+    }
+
+    /// Empty "Deleted Messages"…, for a Deleted Messages mailbox (unified, or an account's), greyed out
+    /// when it's empty.
+    private func addEmptyItem(_ node: SidebarNode, to menu: NSMenu) {
         let isTrash: Bool
         switch node.scope {
         case .role("trash")?: isTrash = true
         case .within(_, .role("trash"))?: isTrash = true
         default: isTrash = node.role == "trash"
         }
-        guard isTrash, let scope = node.scope else { return false }
-        menu.addItem(.separator())
+        guard isTrash, let scope = node.scope else { return }
         let item = menu.addItem(withTitle: "Empty “\(emptyName(node))”…", action: #selector(emptyClicked(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = node
         if ((try? model.store.count(scope: scope, counting: .all)) ?? 0) == 0 { item.action = nil }
-        return true
     }
 
     /// The mailbox's own name, as MailMate names it: an account's row under Deleted Messages is that
