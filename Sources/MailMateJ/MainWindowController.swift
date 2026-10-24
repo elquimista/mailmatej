@@ -44,7 +44,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private enum ReloadReason { case scopeChanged, searchChanged, sortChanged, dataChanged, threadsChanged }
-    /// The main list groups conversations (View → Show Threads), remembered across launches.
+    /// The main list groups conversations (View → Organize by Thread), remembered across launches.
     private var showsThreads = UserDefaults.standard.object(forKey: "ShowThreads") as? Bool ?? true
     /// Threads opened in the lists, for this run of the app (threads start collapsed, as in MailMate).
     private var expandedThreads: Set<String> = []
@@ -776,6 +776,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebar.newSmartMailbox(inside: sidebar.selectedNode)
     }
 
+    /// The selected mailbox's commands, for the Mailbox menu (see `SidebarViewController.menuGroups`).
+    var mailboxMenuGroups: [[NSMenuItem]] {
+        sidebar.selectedNode.map { sidebar.menuGroups(for: $0, newSmartMailbox: false) } ?? []
+    }
+
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?
 
@@ -856,6 +861,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             #selector(previousUnreadMessage(_:)), #selector(nextThread(_:)), #selector(previousThread(_:)),
             #selector(nextUnreadThread(_:)), #selector(previousUnreadThread(_:)):
             return !editing && !activeList.ids.isEmpty
+        case #selector(goBack(_:)): return historyIndex > 0
+        case #selector(goForward(_:)): return historyIndex < history.count - 1
         case #selector(rootOfThread(_:)), #selector(lastOfThread(_:)):
             return !editing && showsThreads && activeList.selectedID != nil
         case #selector(quickLookAttachments(_:)), #selector(saveAttachments(_:)), #selector(openAttachments(_:)):

@@ -130,6 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(3))
                     NSLog("MMJ source: \(windowController?.debugSource(row: 0) ?? "-")")
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENUBAR"] != nil,
+                    let menu = NSApp.mainMenu?.item(withTitle: "Mailbox")?.submenu
+                {
+                    menu.delegate?.menuNeedsUpdate?(menu)  // as opening it does
+                    NSLog("MMJ Mailbox menu: \(menu.items.map { $0.isSeparatorItem ? "—" : $0.title + ($0.isEnabled && ($0.action != nil || $0.submenu != nil) ? "" : " (off)") })")
+                }
                 if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_RESULT"] {
                     // "thread", "people", "cancel", comma-separated: as the toolbar buttons and Cancel do.
                     NSLog("MMJ result before: \(windowController?.debugListState ?? "-")")
@@ -533,11 +539,13 @@ enum MainMenu {
         app.addItem(.separator())
         app.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
+        // File, Edit and View grouped as MailMate groups them, with the commands MailMateJ has.
         let file = submenu(main, "File")
         file.addItem(withTitle: "New Message", action: #selector(MainWindowController.newMessage(_:)), keyEquivalent: "n")
-        file.addItem(withTitle: "Add Account…", action: #selector(MainWindowController.addAccount(_:)), keyEquivalent: "")
         file.addItem(.separator())
-        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        file.addItem(.separator())
+        file.addItem(withTitle: "Add Account…", action: #selector(MainWindowController.addAccount(_:)), keyEquivalent: "")
 
         let edit = submenu(main, "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -546,24 +554,31 @@ enum MainMenu {
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(.separator())
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         edit.addItem(withTitle: "Find…", action: #selector(MainWindowController.focusSearch(_:)), keyEquivalent: "f")
             .keyEquivalentModifierMask = [.command, .option]
 
         let view = submenu(main, "View")
-        view.addItem(withTitle: "Show Threads", action: #selector(MainWindowController.toggleThreads(_:)), keyEquivalent: "")
+        view.addItem(withTitle: "Organize by Thread", action: #selector(MainWindowController.toggleThreads(_:)), keyEquivalent: "T")
+        view.addItem(.separator())
+        view.addItem(withTitle: "Back in History", action: #selector(MainWindowController.goBack(_:)), keyEquivalent: "[")
+        view.addItem(withTitle: "Forward in History", action: #selector(MainWindowController.goForward(_:)), keyEquivalent: "]")
+        view.addItem(.separator())
         view.addItem(withTitle: "Toggle Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s")
             .keyEquivalentModifierMask = [.command, .control]
+        view.addItem(.separator())
         view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
             .keyEquivalentModifierMask = [.command, .control]
 
+        // MailMate's Mailbox menu: New Smart Mailbox, the selected mailbox's commands (filled in as the
+        // menu opens), then syncing.
         let mailbox = submenu(main, "Mailbox")
+        mailbox.addItem(withTitle: "New Smart Mailbox", action: #selector(MainWindowController.newSmartMailbox(_:)), keyEquivalent: "n")
+            .keyEquivalentModifierMask = [.command, .control]
         mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
-        mailbox.addItem(.separator())
-        let newSmart = mailbox.addItem(
-            withTitle: "New Smart Mailbox", action: #selector(MainWindowController.newSmartMailbox(_:)), keyEquivalent: "n")
-        newSmart.keyEquivalentModifierMask = [.command, .option]
+        mailbox.delegate = MailboxMenu.shared
 
         // MailMate's Message menu and shortcuts, for the commands MailMateJ has.
         let message = submenu(main, "Message")
@@ -615,6 +630,29 @@ enum MainMenu {
         NSApp.windowsMenu = window
 
         return main
+    }
+
+    /// Fills the Mailbox menu with the selected mailbox's commands each time it opens, between New Smart
+    /// Mailbox and Get All Mail (which stay, for their shortcuts).
+    @MainActor
+    final class MailboxMenu: NSObject, NSMenuDelegate {
+        static let shared = MailboxMenu()
+
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            guard let newSmart = menu.items.first, let getAll = menu.items.last, newSmart !== getAll else { return }
+            menu.removeAllItems()
+            menu.addItem(newSmart)
+            let controller = NSApp.mainWindow?.windowController as? MainWindowController
+                ?? NSApp.windows.lazy.compactMap { $0.windowController as? MainWindowController }.first
+            let groups = controller?.mailboxMenuGroups ?? []
+            for group in groups {
+                menu.addItem(.separator())
+                group.forEach(menu.addItem)
+            }
+            // With the selected account's Sync Now, as MailMate's Synchronize sits with its sync items.
+            if groups.last?.first?.title != "Sync Now" { menu.addItem(.separator()) }
+            menu.addItem(getAll)
+        }
     }
 
     private static func submenu(_ main: NSMenu, _ title: String) -> NSMenu {

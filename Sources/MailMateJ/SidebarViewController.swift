@@ -339,9 +339,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         /// menu item does (Erase confirmed).
         func debugEmpty(key: String, choose: String?) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ empty: no \(key)") }
-            let menu = NSMenu()
-            addMessageItems(node, to: menu)
-            let items = menu.items.filter { !$0.isSeparatorItem }
+            let items = messageItems(node)
             NSLog("MMJ empty: \(key) items=\(items.map { "\($0.title)\($0.action == nil ? " (off)" : "")" })")
             guard let scope = node.scope else { return }
             if choose == "erase", items.contains(where: { $0.title.hasPrefix("Empty") && $0.action != nil }) { model.emptyMailbox(scope) }
@@ -885,73 +883,72 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
-        func add(_ title: String, _ action: Selector) {
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
-            item.representedObject = node
-            item.target = self
+        for (index, group) in menuGroups(for: node, newSmartMailbox: true).enumerated() {
+            if index > 0 { menu.addItem(.separator()) }
+            group.forEach(menu.addItem)
         }
-        if node.key == "header.mailboxes" || node.kind == .unified || node.kind == .smart {
-            add("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))
-            menu.addItem(.separator())
+    }
+
+    /// A mailbox's commands, grouped as MailMate's Mailbox menu and context menu group them: New Smart
+    /// Mailbox; the account; Displayed Count, Color and Symbol; editing the mailbox; its messages;
+    /// syncing. The sidebar's context menu and the Mailbox menu (for the selected mailbox) show these.
+    func menuGroups(for node: SidebarNode, newSmartMailbox: Bool) -> [[NSMenuItem]] {
+        func item(_ title: String, _ action: Selector, _ object: Any? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.representedObject = object ?? node
+            item.target = self
+            return item
+        }
+        var groups: [[NSMenuItem]] = []
+        if newSmartMailbox, node.key == "header.mailboxes" || node.kind == .unified || node.kind == .smart {
+            groups.append([item("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))])
+        }
+        if node.kind == .account, let accountId = node.accountId {
+            groups.append([item("Edit Account…", #selector(editAccountClicked(_:)), accountId), item("Remove Account…", #selector(removeClicked(_:)))])
         }
         if node.kind != .header {
-            let count = menu.addItem(withTitle: "Displayed Count", action: nil, keyEquivalent: "")
+            let count = NSMenuItem(title: "Displayed Count", action: nil, keyEquivalent: "")
             count.submenu = countMenu(for: node)
-            let color = menu.addItem(withTitle: "Color", action: nil, keyEquivalent: "")
+            let color = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
             color.submenu = colorMenu(for: node)
-            let symbol = menu.addItem(withTitle: "Symbol", action: nil, keyEquivalent: "")
+            let symbol = NSMenuItem(title: "Symbol", action: nil, keyEquivalent: "")
             symbol.submenu = symbolMenu(for: node)
-            menu.addItem(.separator())
+            groups.append([count, color, symbol])
         }
         if node.kind == .smart {
-            add("Edit Smart Mailbox…", #selector(editMailboxClicked(_:)))
-            add("Rename Smart Mailbox", #selector(renameClicked(_:)))
-            add("Duplicate Smart Mailbox", #selector(duplicateClicked(_:)))
-            addMessageItems(node, to: menu)
-            menu.addItem(.separator())
-            add("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:)))
-            return
+            groups.append([
+                item("Edit Smart Mailbox…", #selector(editMailboxClicked(_:))),
+                item("Rename Smart Mailbox", #selector(renameClicked(_:))),
+                item("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:))),
+                item("Duplicate Smart Mailbox", #selector(duplicateClicked(_:))),
+            ])
+        } else if node.kind == .unified {
+            groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
         }
-        if node.kind == .unified {
-            add("Edit Mailbox…", #selector(editMailboxClicked(_:)))
-            addMessageItems(node, to: menu)
-            return
-        }
-        if node.kind != .header { addMessageItems(node, to: menu) }
-        guard let accountId = node.accountId else { return }
-        menu.addItem(.separator())
-        let sync = menu.addItem(withTitle: "Sync Now", action: #selector(syncClicked(_:)), keyEquivalent: "")
-        sync.representedObject = accountId
-        sync.target = self
-        if node.kind == .account {
-            if let warning = node.warning {
-                menu.addItem(.separator())
-                let firstLine = warning.split(separator: "\n").first.map(String.init) ?? warning
-                let item = menu.addItem(withTitle: firstLine, action: nil, keyEquivalent: "")
-                item.isEnabled = false
+        if node.kind != .header { groups.append(messageItems(node)) }
+        if node.kind != .unified, node.kind != .smart, let accountId = node.accountId {
+            var sync = [item("Sync Now", #selector(syncClicked(_:)), accountId)]
+            if node.kind == .account, let warning = node.warning {  // why it last failed, under it
+                let line = NSMenuItem(title: warning.split(separator: "\n").first.map(String.init) ?? warning, action: nil, keyEquivalent: "")
+                line.isEnabled = false
+                sync.append(line)
             }
-            menu.addItem(.separator())
-            let edit = menu.addItem(withTitle: "Edit Account…", action: #selector(editAccountClicked(_:)), keyEquivalent: "")
-            edit.representedObject = accountId
-            edit.target = self
-            let remove = menu.addItem(withTitle: "Remove Account…", action: #selector(removeClicked(_:)), keyEquivalent: "")
-            remove.representedObject = node
-            remove.target = self
+            groups.append(sync)
         }
+        return groups.filter { !$0.isEmpty }
     }
 
     // MARK: Mark All Read, Empty
 
     /// MailMate's group for a mailbox's messages: Mark All Messages as Read (greyed out with nothing
     /// unread) and, for Deleted Messages, Empty "Deleted Messages"….
-    private func addMessageItems(_ node: SidebarNode, to menu: NSMenu) {
-        guard let scope = node.scope else { return }
-        menu.addItem(.separator())
-        let read = menu.addItem(withTitle: "Mark All Messages as Read", action: #selector(markAllReadClicked(_:)), keyEquivalent: "")
+    private func messageItems(_ node: SidebarNode) -> [NSMenuItem] {
+        guard let scope = node.scope else { return [] }
+        let read = NSMenuItem(title: "Mark All Messages as Read", action: #selector(markAllReadClicked(_:)), keyEquivalent: "")
         read.target = self
         read.representedObject = node
         if ((try? model.store.count(scope: scope, counting: .unread)) ?? 0) == 0 { read.action = nil }
-        addEmptyItem(node, to: menu)
+        return [read] + (emptyItem(node).map { [$0] } ?? [])
     }
 
     @objc private func markAllReadClicked(_ sender: NSMenuItem) {
@@ -961,18 +958,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Empty "Deleted Messages"…, for a Deleted Messages mailbox (unified, or an account's), greyed out
     /// when it's empty.
-    private func addEmptyItem(_ node: SidebarNode, to menu: NSMenu) {
+    private func emptyItem(_ node: SidebarNode) -> NSMenuItem? {
         let isTrash: Bool
         switch node.scope {
         case .role("trash")?: isTrash = true
         case .within(_, .role("trash"))?: isTrash = true
         default: isTrash = node.role == "trash"
         }
-        guard isTrash, let scope = node.scope else { return }
-        let item = menu.addItem(withTitle: "Empty “\(emptyName(node))”…", action: #selector(emptyClicked(_:)), keyEquivalent: "")
+        guard isTrash, let scope = node.scope else { return nil }
+        let item = NSMenuItem(title: "Empty “\(emptyName(node))”…", action: #selector(emptyClicked(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = node
         if ((try? model.store.count(scope: scope, counting: .all)) ?? 0) == 0 { item.action = nil }
+        return item
     }
 
     /// The mailbox's own name, as MailMate names it: an account's row under Deleted Messages is that
