@@ -193,20 +193,28 @@ enum MailboxColors {
 
     // MARK: Menu swatches
 
+    /// A swatch drawn in a 13 pt square, in an image one point taller: a menu row (22 pt) centers a
+    /// 13 pt image on a half point, which cut off the circles' top or bottom; 14 pt sits on whole points.
+    private static func swatchImage(width: CGFloat = 13, _ draw: @escaping (NSRect) -> Void) -> NSImage {
+        NSImage(size: NSSize(width: width, height: 14), flipped: false) { _ in
+            draw(NSRect(x: 0, y: 1, width: width, height: 13))
+            return true
+        }
+    }
+
     /// MailMate's swatch (measured at 1x): a 13 pt ring, 1 pt wide, around a 9 pt dot, both in the color.
     static func swatch(_ color: @escaping () -> NSColor) -> NSImage {
-        NSImage(size: NSSize(width: 13, height: 13), flipped: false) { rect in
+        swatchImage { rect in
             color().set()
             let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
             ring.lineWidth = 1
             ring.stroke()
             NSBezierPath(ovalIn: rect.insetBy(dx: 2, dy: 2)).fill()
-            return true
         }
     }
 
     /// Custom…: a dashed ring around a grey dot.
-    static let customSwatch = NSImage(size: NSSize(width: 13, height: 13), flipped: false) { rect in
+    static let customSwatch = swatchImage { rect in
         NSColor.labelColor.withAlphaComponent(0.8).set()
         let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
         ring.lineWidth = 1
@@ -214,23 +222,21 @@ enum MailboxColors {
         ring.stroke()
         NSColor.systemGray.withAlphaComponent(0.9).set()
         NSBezierPath(ovalIn: rect.insetBy(dx: 2.5, dy: 2.5)).fill()
-        return true
     }
 
     /// Multicolor: seven dots, one in the middle and six around it.
-    static let multicolorSwatch = NSImage(size: NSSize(width: 15, height: 13), flipped: false) { rect in
+    static let multicolorSwatch = swatchImage(width: 15) { rect in
         let colors: [NSColor] = [.systemRed, .systemOrange, .systemPurple, .systemYellow, .systemBlue, .white]
         let center = NSPoint(x: rect.midX, y: rect.midY)
         let dot: CGFloat = 4.2
         for (i, color) in colors.enumerated() {
             let angle = CGFloat(i) * .pi / 3 + .pi / 3
-            let p = NSPoint(x: center.x + cos(angle) * 4.6, y: center.y + sin(angle) * 4.6)
+            let p = NSPoint(x: center.x + cos(angle) * 4.4, y: center.y + sin(angle) * 4.4)  // within the 13 pt square
             color.set()
             NSBezierPath(ovalIn: NSRect(x: p.x - dot / 2, y: p.y - dot / 2, width: dot, height: dot)).fill()
         }
         NSColor.systemGreen.set()
         NSBezierPath(ovalIn: NSRect(x: center.x - dot / 2, y: center.y - dot / 2, width: dot, height: dot)).fill()
-        return true
     }
 }
 

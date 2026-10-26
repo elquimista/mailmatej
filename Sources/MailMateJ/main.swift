@@ -72,6 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugMoveSidebar(spec)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_COLOR_MENU"] {
+                    windowController?.debugCaptureColorMenu(key: key, path: path.replacingOccurrences(of: ".png", with: "-colors.png"))
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_SYMBOL_MENU"] {
                     windowController?.debugSymbolMenu(key: key, path: path.replacingOccurrences(of: ".png", with: "-symbols.png"))
                 }

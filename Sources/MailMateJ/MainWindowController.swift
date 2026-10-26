@@ -622,6 +622,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugDuplicateSidebar(_ key: String) { sidebar.debugDuplicate(key: key) }
         func debugNewSmartMailbox(inside key: String) { sidebar.debugNewSmartMailbox(inside: key) }
         func debugSymbolMenu(key: String, path: String) { sidebar.debugSymbolMenu(key: key, path: path) }
+        func debugCaptureColorMenu(key: String, path: String) { sidebar.debugCaptureColorMenu(key: key, path: path) }
         func debugHeader(toggle: Bool) { sidebar.debugHeader(toggle: toggle) }
         func debugRowFrames() { sidebar.debugRowFrames() }
         var debugUnreadThreads: [String] { list.debugUnreadThreads() }

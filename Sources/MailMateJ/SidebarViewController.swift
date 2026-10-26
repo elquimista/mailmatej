@@ -1229,6 +1229,30 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         /// Logs the Symbol submenu for `key` ([x] when checked) and writes its first items' icons, side
         /// by side, to `path`.
+        /// Opens the mailbox's Color menu, captures its window as the screen shows it, then closes it.
+        func debugCaptureColorMenu(key: String, path: String) {
+            guard let node = find(key, in: roots), let window = view.window else { return NSLog("MMJ color menu: no \(key)") }
+            let menu = colorMenu(for: node)
+            let timer = Timer(timeInterval: 0.8, repeats: false) { _ in
+                let pid = ProcessInfo.processInfo.processIdentifier
+                let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+                if let id = windows.first(where: {
+                    ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == Int(CGWindowLevelForKey(.popUpMenuWindow))
+                })?[kCGWindowNumber as String] as? Int {
+                    let capture = Process()
+                    capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    capture.arguments = ["-x", "-o", "-l\(id)", path]
+                    try? capture.run()
+                    capture.waitUntilExit()
+                }
+                menu.cancelTracking()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+            menu.popUp(positioning: nil, at: NSPoint(x: 40, y: 200), in: window.contentView)
+        }
+
         func debugSymbolMenu(key: String, path: String) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ symbol menu: no \(key)") }
             let items = symbolMenu(for: node).items.filter { !$0.isSeparatorItem }
