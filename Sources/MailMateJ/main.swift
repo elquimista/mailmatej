@@ -393,6 +393,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_TAB"] ?? "") {
                         MailboxEditorWindowController.debugTab(count: count)  // Tab through the editor's fields
                     }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SCROLLING"] != nil {
+                        NSLog("MMJ editor scroll: \(MailboxEditorWindowController.debugEditorScroll)")
+                        if let scroll = MailboxEditorWindowController.debugEditor?.enclosingScrollView {
+                            scroll.contentView.scroll(to: NSPoint(x: 0, y: 200))  // as the scroll wheel would
+                            scroll.reflectScrolledClipView(scroll.contentView)
+                        }
+                    }
                     if let width = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SIDEBAR"] {
                         MailboxEditorWindowController.debugSidebarWidth(set: Double(width).map { CGFloat($0) })
                         try? await Task.sleep(for: .milliseconds(500))

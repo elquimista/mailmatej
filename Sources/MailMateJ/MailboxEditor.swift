@@ -113,7 +113,7 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
 
     #if DEBUG
         static func debugDumpMailboxMenu() {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugDumpMailboxMenu()
+            debugEditor?.debugDumpMailboxMenu()
         }
 
         /// Logs the Submailboxes tab's field pop-up: title and top-level items ((off) when greyed out).
@@ -145,6 +145,20 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
             if let width { split.splitView.setPosition(width, ofDividerAt: 0) }
         }
 
+        /// The rule editor's scroll view: its frame, the editor's height, and whether it can scroll.
+        static var debugEditorScroll: String {
+            guard let editor = debugEditor, let scroll = editor.enclosingScrollView else { return "no scroll view" }
+            return "scroll \(NSStringFromRect(scroll.frame)) editor \(NSStringFromRect(editor.frame)) scrollable \(editor.frame.height > scroll.contentSize.height)"
+        }
+
+        /// The rule editor of the tab on show, wherever it sits in the pane.
+        static var debugEditor: SmartRuleEditor? {
+            func find(_ view: NSView) -> SmartRuleEditor? {
+                (view as? SmartRuleEditor) ?? view.subviews.lazy.compactMap(find).first
+            }
+            return shared?.content.subviews.first.flatMap(find)
+        }
+
         static func debugPressAddRule() { (shared?.content.debugPane as? RulesPane)?.debugPressAdd() }
 
         static func debugClickAddRule() { (shared?.content.debugPane as? RulesPane)?.debugClickAdd() }
@@ -154,23 +168,23 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         }
 
         static func debugDuplicateAndUngroup() {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugDuplicateAndUngroup()
+            debugEditor?.debugDuplicateAndUngroup()
         }
 
         static func debugRemoveFirstRow() {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugRemoveFirstRow()
+            debugEditor?.debugRemoveFirstRow()
         }
 
         static func debugDrag(_ steps: String) {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugDrag(steps)
+            debugEditor?.debugDrag(steps)
         }
 
         static func debugTypeThenAdd(_ text: String) {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugTypeThenAdd(text)
+            debugEditor?.debugTypeThenAdd(text)
         }
 
         static func debugAddRow(text: String) {
-            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugAddRow(text: text)
+            debugEditor?.debugAddRow(text: text)
         }
 
         static func debugHoverTabs() { shared?.tabStrip.debugHover() }
@@ -511,12 +525,28 @@ private final class SmartRulesPane: EditorPane {
         hint.autoresizingMask = [.minXMargin]
         view.addSubview(hint)
 
-        editor.frame = NSRect(x: 20, y: 49, width: view.bounds.width - 40, height: editor.frame.height)
-        editor.autoresizingMask = [.width]
+        // In a scroll view down to the pane's bottom margin, so many rows scroll (the editor grows with them).
+        scroll.frame = NSRect(x: 20, y: 49, width: view.bounds.width - 40, height: view.bounds.height - 49 - 20)
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = editor
+        editor.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: editor.frame.height)
+        scroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrollResized), name: NSView.frameDidChangeNotification, object: scroll.contentView)
         editor.onChange = { [weak self] immediate in self?.scheduleSave(immediate: immediate) }
-        view.addSubview(editor)
+        view.addSubview(scroll)
         editor.load(specialKey.map { model.store.specialCondition(key: $0) }
             ?? (kind == .sources ? definition.sources.root : definition.condition))
+    }
+
+    private let scroll = NSScrollView()
+
+    /// The editor keeps the scroll view's width (its rows' text fields follow it).
+    @objc private func scrollResized() {
+        editor.setFrameSize(NSSize(width: scroll.contentSize.width, height: editor.frame.height))
     }
 
     @objc private func changed() { scheduleSave(immediate: true) }
