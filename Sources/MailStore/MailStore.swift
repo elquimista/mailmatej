@@ -650,6 +650,41 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// The remote ids of an account's stored messages (to tell which are new, and which are gone).
+    public func remoteIDs(accountId: String) throws -> Set<String> {
+        try dbPool.read { db in
+            Set(try String.fetchAll(db, sql: "SELECT remoteId FROM message WHERE accountId = ?", arguments: [accountId]))
+        }
+    }
+
+    /// The mailboxes' message and unread counts, counted from the stored messages (for servers that
+    /// don't keep them per mailbox, as Gmail's labels).
+    public func recountMailboxes(accountId: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE mailbox SET
+                        totalEmails = (SELECT count(*) FROM message_mailbox mm WHERE mm.mailboxId = mailbox.id),
+                        unreadEmails = (SELECT count(*) FROM message_mailbox mm JOIN message m ON m.id = mm.messageId
+                                        WHERE mm.mailboxId = mailbox.id AND NOT m.isSeen)
+                    WHERE accountId = ?
+                    """, arguments: [accountId])
+        }
+    }
+
+    /// The mailboxes' counts as stored, by remote id.
+    public func mailboxCounts(accountId: String) throws -> [String: (total: Int, unread: Int)] {
+        try dbPool.read { db in
+            var counts: [String: (total: Int, unread: Int)] = [:]
+            for row in try Row.fetchAll(
+                db, sql: "SELECT remoteId, totalEmails, unreadEmails FROM mailbox WHERE accountId = ?", arguments: [accountId])
+            {
+                counts[row["remoteId"]] = (row["totalEmails"], row["unreadEmails"])
+            }
+            return counts
+        }
+    }
+
     /// Messages stored without any mailbox: never so on a JMAP server, so left by a local change the app
     /// couldn't finish (quit while archiving into a new Archive, say). The next sync fetches them again.
     public func remoteIDsWithoutMailbox(accountId: String) throws -> [String] {

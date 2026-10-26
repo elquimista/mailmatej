@@ -292,6 +292,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: .milliseconds(800))
                     }
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACTIONS"] {
+                    // "subject|action,action,…" on the newest message with that subject; after each, a sync,
+                    // then its mailboxes and flags as the server reports them. Actions: read, unread, flag,
+                    // unflag, archive, inbox, delete, junk, notjunk.
+                    let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+                    let model = AppModel.shared!
+                    func state(_ id: Int64) -> String {
+                        let boxes = ((try? model.store.mailboxIDs(messageIds: [id]))?[id] ?? []).compactMap { box in
+                            (try? model.store.mailboxes())?.first { $0.id == box }?.name
+                        }
+                        let row = (try? model.store.rows(ids: [id]))?.first
+                        return "mailboxes \(boxes.sorted()) seen \(row?.isSeen ?? false) flagged \(row?.isFlagged ?? false)"
+                    }
+                    let found = ((try? model.store.messageIDs(scope: .everything)) ?? []).first { (try? model.store.detail(id: $0))?.subject == parts[0] }
+                    if let id = found, let accountId = (try? model.store.refs(ids: [id]))?.first?.accountId {
+                        NSLog("MMJ message actions on \(parts[0]): before \(state(id))")
+                        for action in parts[1].split(separator: ",").map(String.init) {
+                            let message: AppModel.MessageAction? = switch action {
+                            case "read": .markRead
+                            case "unread": .markUnread
+                            case "flag": .flag
+                            case "unflag": .unflag
+                            case "archive": .archive
+                            case "inbox": .moveToRole("inbox")
+                            case "delete": .delete
+                            case "junk": .junk
+                            case "notjunk": .notJunk
+                            default: nil
+                            }
+                            guard let message else { continue }
+                            model.perform(message, on: [id]) { _ in false }
+                            try? await Task.sleep(for: .seconds(4))
+                            model.sync(accountId: accountId)
+                            try? await Task.sleep(for: .seconds(6))
+                            NSLog("MMJ message actions after \(action): \(state(id))")
+                        }
+                    } else {
+                        NSLog("MMJ message actions: no message \(parts[0])")
+                    }
+                }
                 if let actions = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS"] {
                     // Comma-separated toolbar actions, 3 s apart.
                     for name in actions.split(separator: ",") {
@@ -502,6 +542,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? capture.run()
                     capture.waitUntilExit()
                     alert.window.orderOut(nil)
+                }
+                if let list = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACCOUNT_TYPE"] {
+                    // Comma-separated addresses typed into a new account's window, one after another: logs the
+                    // account type each gives (and captures the window as <MMJ_SNAPSHOT_ACCOUNT>-<n>.png).
+                    windowController?.addAccount(nil)
+                    for (n, address) in list.split(separator: ",").map(String.init).enumerated() {
+                        windowController?.accountSettings?.debugTypeEmail(address, user: nil)
+                        try? await Task.sleep(for: .seconds(4))
+                        NSLog("MMJ account type \(address): \(windowController?.accountSettings?.debugTypeState ?? "-")")
+                        if let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_ACCOUNT"],
+                            let number = windowController?.accountSettings?.window?.windowNumber
+                        {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-\(n).png")]
+                            try? capture.run()
+                            capture.waitUntilExit()
+                        }
+                    }
+                    windowController?.accountSettings?.close()
                 }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_TYPE_EMAIL"] {
                     // "email" or "email|user": typed into a new account's window (the user name first, if given).

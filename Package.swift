@@ -27,7 +27,7 @@ let package = Package(
         // Sync engines (JMAP now, IMAP later) writing into MailStore.
         .target(
             name: "MailSync",
-            dependencies: ["JMAPKit", "MailStore", .product(name: "Markdown", package: "swift-markdown")]
+            dependencies: ["JMAPKit", "GmailKit", "MailStore", .product(name: "Markdown", package: "swift-markdown")]
         ),
         // The AppKit app.
         .executableTarget(name: "MailMateJ", dependencies: ["MailSync", "MailStore", "JMAPKit", "GmailKit"]),

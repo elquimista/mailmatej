@@ -53,9 +53,9 @@ var account =
 account.remoteAccountId = session.primaryMailAccountId
 try store.save(account)
 
-let coordinator = SyncCoordinator(store: store, credentials: { _ in credentials }) { status in
+let coordinator = SyncCoordinator(store: store, credentials: { _ in credentials }, onStatus: { status in
     if case .failed(let why) = status.phase { print("✗ \(why)") }
-}
+})
 try await coordinator.loadAccounts(push: false)
 
 let clock = ContinuousClock()

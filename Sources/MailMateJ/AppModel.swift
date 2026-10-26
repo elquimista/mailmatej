@@ -63,6 +63,7 @@ final class AppModel {
         coordinator = SyncCoordinator(
             store: store,
             credentials: Self.credentials(for:),
+            googleTokens: Self.googleTokens(for:),
             onStatus: { status in
                 Task { @MainActor in AppModel.shared?.statusChanged(status) }
             },
@@ -185,7 +186,7 @@ final class AppModel {
     }
 
     /// Adds a Gmail account: Google's sign-in opens in the browser (`loginHint` preselects the address),
-    /// then the account is saved with its refresh token in the keychain. It doesn't sync yet.
+    /// then the account is saved with its refresh token in the keychain and starts syncing.
     @discardableResult
     func addGmailAccount(_ draft: AccountDraft, loginHint: String?) async throws -> AccountRecord {
         guard let client = Self.googleClient else { throw GmailError.noClient }
@@ -203,8 +204,8 @@ final class AppModel {
             emailAddresses: draft.emailAddresses.isEmpty ? email : draft.emailAddresses)
         try Keychain.set(tokens.refreshToken, account: record.id)
         try store.save(record)
-        // Shown in the sidebar at once (it has no mailboxes until Gmail sync exists).
         refreshNow()
+        await coordinator.addAccount(record)
         return record
     }
 
@@ -1189,6 +1190,12 @@ final class AppModel {
                 }
             #endif
         }
+    }
+
+    /// A Gmail account's sign-in: the app's Google client and the account's refresh token.
+    nonisolated private static func googleTokens(for account: AccountRecord) throws -> GoogleTokenSource {
+        guard let client = googleClient else { throw GmailError.noClient }
+        return GoogleTokenSource(client: client, refreshToken: try Keychain.get(account: account.id))
     }
 
     nonisolated private static func credentials(for account: AccountRecord) throws -> Credentials {

@@ -1,4 +1,5 @@
 import Foundation
+import GmailKit
 import JMAPKit
 import MailStore
 import Network
@@ -33,9 +34,12 @@ public struct AccountSyncStatus: Sendable {
 /// Sync requests for an account that is already syncing are coalesced into one follow-up round.
 public actor SyncCoordinator {
     public typealias CredentialsProvider = @Sendable (AccountRecord) throws -> Credentials
+    /// A Gmail account's sign-in (its refresh token and the app's Google client).
+    public typealias GoogleTokensProvider = @Sendable (AccountRecord) throws -> GoogleTokenSource
 
     private let store: MailStore
     private let credentials: CredentialsProvider
+    private let googleTokens: GoogleTokensProvider
     /// New messages of an account, by remote id, after a sync (for rules).
     private let onArrived: @Sendable (String, [String]) -> Void
     private let onStatus: @Sendable (AccountSyncStatus) -> Void
@@ -46,6 +50,10 @@ public actor SyncCoordinator {
     private let urlSession: URLSession
 
     private var engines: [String: JMAPAccountSync] = [:]
+    /// Gmail accounts: no push, so each is checked every `gmailPollInterval`.
+    private var gmailEngines: [String: GmailAccountSync] = [:]
+    private var gmailPollTasks: [String: Task<Void, Never>] = [:]
+    private let gmailPollInterval: Duration = .seconds(60)
     private var statuses: [String: AccountSyncStatus] = [:]
     private var running: Set<String> = []
     private var pending: Set<String> = []
@@ -56,12 +64,15 @@ public actor SyncCoordinator {
     private let fastPollInterval: Duration = .seconds(20)
     /// Full downloads run for at most this many accounts at a time, separately from syncing.
     private let downloadLimiter = AsyncLimiter(limit: 3)
+    /// Gmail's quota is per account (and each paces itself), so more of them download at once.
+    private let gmailDownloadLimiter = AsyncLimiter(limit: 10)
     /// Pause between download batches of one account, to stay well under server rate limits.
     private let downloadPause: Duration = .milliseconds(500)
     private var pollTask: Task<Void, Never>?
 
     public init(
         store: MailStore, maxConcurrentSyncs: Int = 6, credentials: @escaping CredentialsProvider,
+        googleTokens: @escaping GoogleTokensProvider = { _ in throw GoogleOAuthError.signInExpired },
         onStatus: @escaping @Sendable (AccountSyncStatus) -> Void = { _ in },
         onArrived: @escaping @Sendable (_ accountId: String, _ remoteIds: [String]) -> Void = { _, _ in },
         onQueuedChangeRefused: @escaping @Sendable (_ accountId: String, _ error: Error) -> Void = { _, _ in }
@@ -69,6 +80,7 @@ public actor SyncCoordinator {
         self.store = store
         self.onQueuedChangeRefused = onQueuedChangeRefused
         self.credentials = credentials
+        self.googleTokens = googleTokens
         self.onStatus = onStatus
         self.onArrived = onArrived
         self.limiter = AsyncLimiter(limit: maxConcurrentSyncs)
@@ -107,7 +119,7 @@ public actor SyncCoordinator {
 
     /// Creates engines for all enabled accounts without syncing them.
     public func loadAccounts(push: Bool) throws {
-        for account in try store.accounts() where account.isEnabled && engines[account.id] == nil {
+        for account in try store.accounts() where account.isEnabled && engines[account.id] == nil && gmailEngines[account.id] == nil {
             register(account, push: push)
         }
     }
@@ -118,6 +130,7 @@ public actor SyncCoordinator {
         for task in downloadTasks.values { task.cancel() }
         downloadTasks.removeAll()
         for task in fastPollTasks.values { task.cancel() }
+        for task in gmailPollTasks.values { task.cancel() }
         fastPollTasks.removeAll()
         for task in pushTasks.values { task.cancel() }
         pushTasks.removeAll()
@@ -133,16 +146,18 @@ public actor SyncCoordinator {
         downloadTasks.removeValue(forKey: id)?.cancel()
         fastPollTasks.removeValue(forKey: id)?.cancel()
         engines.removeValue(forKey: id)
+        gmailEngines.removeValue(forKey: id)
+        gmailPollTasks.removeValue(forKey: id)?.cancel()
         statuses.removeValue(forKey: id)
         pending.remove(id)
     }
 
     public func syncAll() {
-        for id in engines.keys { requestSync(id) }
+        for id in Array(engines.keys) + Array(gmailEngines.keys) { requestSync(id) }
     }
 
     public func requestSync(_ accountId: String) {
-        guard engines[accountId] != nil else { return }
+        guard engines[accountId] != nil || gmailEngines[accountId] != nil else { return }
         if running.contains(accountId) {
             pending.insert(accountId)
             return
@@ -158,12 +173,14 @@ public actor SyncCoordinator {
     }
 
     public func downloadBlob(accountId: String, blobId: String, type: String, name: String) async throws -> Data {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        if let gmail = gmailEngines[accountId] { return try await gmail.downloadBlob(blobId: blobId, type: type, name: name) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.downloadBlob(blobId: blobId, type: type, name: name)
     }
 
     public func fetchBody(messageId: Int64, accountId: String) async throws -> MessageBody {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        if let gmail = gmailEngines[accountId] { return try await gmail.fetchBody(messageId: messageId) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.fetchBody(messageId: messageId)
     }
 
@@ -179,12 +196,13 @@ public actor SyncCoordinator {
     public func ensureIdentities(accountId: String, addresses: [String], name: String) async throws
         -> [(email: String, reason: String)]
     {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.ensureIdentities(addresses, name: name)
     }
 
     public func createMailbox(accountId: String, name: String, role: String?, parentRemoteId: String? = nil) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        if let gmail = gmailEngines[accountId] { return try await gmail.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId)
     }
 
@@ -192,12 +210,22 @@ public actor SyncCoordinator {
     public func importMessage(
         accountId: String, _ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date
     ) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        try await importInto(accountId, raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+    }
+
+    private func importInto(
+        _ accountId: String, _ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date
+    ) async throws {
+        if let gmail = gmailEngines[accountId] {
+            return try await gmail.importMessage(raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+        }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.importMessage(raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
     }
 
     public func restore(accountId: String, remoteIds: [String]) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        if let gmail = gmailEngines[accountId] { return try await gmail.restore(remoteIds: remoteIds) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.restore(remoteIds: remoteIds)
     }
 
@@ -245,21 +273,25 @@ public actor SyncCoordinator {
     /// Makes one change. Returns what's left of it when part went through and the rest couldn't (a move's
     /// delete after its copy was confirmed), so a retry doesn't copy the message twice.
     private func make(_ change: QueuedChange, accountId: String) async throws -> QueuedChange? {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        let gmail = gmailEngines[accountId]
+        let engine = engines[accountId]
+        guard gmail != nil || engine != nil else { throw notLoaded(accountId) }
+        func destroy(_ remoteIds: [String]) async throws {
+            if let gmail { try await gmail.destroy(remoteIds: remoteIds) } else { try await engine!.destroy(remoteIds: remoteIds) }
+        }
         switch change {
         case .update(let remoteIds, let patch):
-            try await engine.update(remoteIds: remoteIds, patch: patch)
+            if let gmail { try await gmail.update(remoteIds: remoteIds, patch: patch) } else { try await engine!.update(remoteIds: remoteIds, patch: patch) }
         case .destroy(let remoteIds):
-            try await engine.destroy(remoteIds: remoteIds)
+            try await destroy(remoteIds)
         case .moveAcross(let remoteId, let blobId, let targetAccountId, let mailboxRemoteId, let keywords, let receivedAt):
-            guard let target = engines[targetAccountId] else { throw JMAPError.invalidResponse("account not loaded") }
             guard let raw = store.blobs.read(accountId: accountId, blobId: blobId) else {
                 throw JMAPError.invalidResponse("the message isn’t stored locally")
             }
-            try await target.importMessage(raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+            try await importInto(targetAccountId, raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
             requestSync(targetAccountId)
             do {
-                try await engine.destroy(remoteIds: [remoteId])
+                try await destroy([remoteId])
             } catch where ErrorText.isUnreachable(error) {
                 return .destroy(remoteIds: [remoteId])
             }
@@ -294,8 +326,8 @@ public actor SyncCoordinator {
                 // not deleted, or not moved, come back.
                 switch change {
                 case .update: break
-                case .destroy(let remoteIds): try? await engines[accountId]?.restore(remoteIds: remoteIds)
-                case .moveAcross(let remoteId, _, _, _, _, _): try? await engines[accountId]?.restore(remoteIds: [remoteId])
+                case .destroy(let remoteIds): try? await restore(accountId: accountId, remoteIds: remoteIds)
+                case .moveAcross(let remoteId, _, _, _, _, _): try? await restore(accountId: accountId, remoteIds: [remoteId])
                 }
                 onQueuedChangeRefused(accountId, error)
             }
@@ -311,47 +343,48 @@ public actor SyncCoordinator {
 
     /// Sends a message from the account (see `JMAPAccountSync.send`), then syncs so it shows in Sent.
     public func send(accountId: String, _ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         defer { requestSync(accountId) }
         try await engine.send(message, replacingDrafts: replacingDrafts)
     }
 
     /// Saves a draft (see `JMAPAccountSync.saveDraft`), then syncs so it shows in Drafts.
     public func saveDraft(accountId: String, _ message: OutgoingMessage, replacing old: [String]) async throws -> String {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         defer { requestSync(accountId) }
         return try await engine.saveDraft(message, replacing: old)
     }
 
     public func destroyDrafts(accountId: String, _ remoteIds: [String]) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.destroyDrafts(remoteIds)
     }
 
     public func loadDraft(accountId: String, remoteId: String) async throws -> SavedDraft {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.loadDraft(remoteId: remoteId)
     }
 
     public func renameMailbox(accountId: String, remoteId: String, to name: String) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        if let gmail = gmailEngines[accountId] { return try await gmail.renameMailbox(remoteId: remoteId, to: name) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.renameMailbox(remoteId: remoteId, to: name)
     }
 
     public func redirect(accountId: String, remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.redirect(remoteId: remoteId, to: recipients, identityId: identityId, mailFrom: mailFrom)
     }
 
     public func replyHeaders(accountId: String, remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
-        guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("account not loaded") }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.replyHeaders(remoteId: remoteId)
     }
 
     // MARK: Private
 
     private func register(_ account: AccountRecord, push: Bool) {
-        guard !account.isGmail else { return }  // Gmail accounts don't sync yet
+        if account.isGmail { return registerGmail(account, poll: push) }
         do {
             let engine = try JMAPAccountSync(
                 account: account, credentials: try credentials(account), store: store, urlSession: urlSession)
@@ -362,9 +395,43 @@ public actor SyncCoordinator {
         }
     }
 
+    /// A Gmail account: checked now and then every `gmailPollInterval` (each check is a few short
+    /// requests to Gmail's history, so there's no connection to go stale).
+    private func registerGmail(_ account: AccountRecord, poll: Bool) {
+        do {
+            gmailEngines[account.id] = GmailAccountSync(
+                account: account, tokens: try googleTokens(account), store: store, urlSession: urlSession)
+        } catch {
+            return update(account.id, failure: error)
+        }
+        guard poll else { return }
+        gmailPollTasks[account.id]?.cancel()
+        gmailPollTasks[account.id] = Task { [weak self, gmailPollInterval] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: gmailPollInterval)
+                await self?.requestSync(account.id)
+            }
+        }
+    }
+
     private func runSync(_ accountId: String) async {
         repeat {
             pending.remove(accountId)
+            if let gmail = gmailEngines[accountId] {
+                await limiter.acquire()
+                update(accountId, .syncing)
+                do {
+                    try await flushQueue(accountId)
+                    let result = try await gmail.sync()
+                    if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
+                    update(accountId, .idle, success: true)
+                    startDownloads(accountId)
+                } catch {
+                    update(accountId, failure: error)
+                }
+                await limiter.release()
+                continue
+            }
             guard let engine = engines[accountId] else { break }
             await limiter.acquire()
             update(accountId, .syncing)
@@ -386,30 +453,42 @@ public actor SyncCoordinator {
 
     /// Starts downloading the account's messages that aren't stored locally yet (no-op if running).
     public func startDownloads(_ accountId: String) {
-        guard downloadTasks[accountId] == nil, let engine = engines[accountId] else { return }
-        downloadTasks[accountId] = Task { await downloadLoop(accountId, engine: engine) }
+        guard downloadTasks[accountId] == nil else { return }
+        if let gmail = gmailEngines[accountId] {
+            downloadTasks[accountId] = Task {
+                // No pause between batches: Gmail's limit is per request, and the requests pace themselves.
+                await downloadLoop(accountId, name: gmail.account.name, gmail: true) { try await gmail.downloadNextBatch() }
+            }
+        } else if let engine = engines[accountId] {
+            downloadTasks[accountId] = Task {
+                await downloadLoop(accountId, name: engine.account.name) { try await engine.downloadNextBatch() }
+            }
+        }
     }
 
-    private func downloadLoop(_ accountId: String, engine: JMAPAccountSync) async {
+    private func downloadLoop(
+        _ accountId: String, name: String, gmail: Bool = false, next: @escaping () async throws -> JMAPAccountSync.DownloadBatchResult
+    ) async {
+        let limiter = gmail ? gmailDownloadLimiter : downloadLimiter
         reportDownloadProgress(accountId, active: true)
-        await downloadLimiter.acquire()
+        await limiter.acquire()
         var backoff = 5.0
         while !Task.isCancelled {
             do {
                 reportBusyMailboxes(accountId, (try? store.mailboxIdsOfPendingDownloads(accountId: accountId, limit: 25)) ?? [])
-                let result = try await engine.downloadNextBatch()
+                let result = try await next()
                 reportDownloadProgress(accountId, active: true)
                 if result.processed == 0 { break }
                 backoff = 5
-                try? await Task.sleep(for: downloadPause)
+                if !gmail { try? await Task.sleep(for: downloadPause) }
             } catch {
-                syncLog.error("Download failed for \(engine.account.name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
+                syncLog.error("Download failed for \(name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
                 if backoff > 600 { break }  // Give up until the next sync restarts it.
                 try? await Task.sleep(for: .seconds(backoff))
                 backoff *= 2
             }
         }
-        await downloadLimiter.release()
+        await limiter.release()
         downloadTasks[accountId] = nil
         reportBusyMailboxes(accountId, [])
         reportDownloadProgress(accountId, active: false)
@@ -496,8 +575,17 @@ public actor SyncCoordinator {
         }
     }
 
+    /// Why an account can't do something: Gmail accounts sync, but changes and sending come later.
+    private func notLoaded(_ accountId: String) -> Error {
+        gmailEngines[accountId] != nil ? GmailNotYet() : JMAPError.invalidResponse("account not loaded")
+    }
+
+    public struct GmailNotYet: LocalizedError {
+        public var errorDescription: String? { "Gmail accounts can’t do this yet: sending and drafts come next." }
+    }
+
     private func update(_ accountId: String, failure error: Error) {
-        let name = engines[accountId]?.account.name ?? accountId
+        let name = engines[accountId]?.account.name ?? gmailEngines[accountId]?.account.name ?? accountId
         syncLog.error("Sync failed for \(name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
         update(accountId, .failed(ErrorText.friendly(error)), detail: ErrorText.technical(error))
     }

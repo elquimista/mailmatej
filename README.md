@@ -28,7 +28,9 @@ Add accounts with the toolbar button or **File → Add Account…**, which opens
 - **Stalwart / other JMAP**: the server's host name (autodiscovers via `/.well-known/jmap`; Port and Require SSL for anything unusual), user name and password.
 - **Fastmail**: `fastmail.com` as the server and an API token (Settings → Privacy & Security → API tokens) as the password.
 
-- **Gmail**: `gmail.com` as the server, then **Sign In…**: Google's sign-in opens in your browser. This needs a Google OAuth client built into the app (see [Gmail](#gmail)). Gmail accounts can be added, but don't sync yet.
+- **Gmail and Google Workspace**: type the address; **Account Type** switches to Gmail by itself (for gmail.com, and for domains whose mail servers are Google's), or choose it. **Sign In…** opens Google's sign-in in your browser. This needs a Google OAuth client built into the app (see [Gmail](#gmail)). Gmail accounts sync (labels as mailboxes, checked every minute), and marking, flagging, archiving, moving, deleting and Junk work as on other accounts; sending and drafts come later. Archive is MailMate's "[Gmail]/Archive" label (made when first needed) plus mail with no label, so both apps agree. Full download is paced under Gmail's quota of 6,000 units a minute per account: about 300 messages' headers a minute, then about 90 whole messages a minute.
+
+Account Type also fills in the server where the address tells it: Fastmail by its mail servers, other domains by their JMAP DNS record (`_jmap._tcp`).
 
 Double-click an account in the sidebar (or **Edit Account…** in its context menu) to change it; the password is kept unless a new one is typed. **Email Address(es)** takes `address`, `<address>` or `Name <address>`, comma-separated. Those addresses are the From choices, in that order; ones the server has no identity for are sent through the account's own identity. Their name is the account's **Full Name**, whatever name the server's identity has; a name given in Email Address(es) wins for its address.
 
@@ -49,7 +51,7 @@ Gmail accounts sign in with Google (OAuth) and use the Gmail API. Google needs a
 6. Under **Audience**, click **Publish app** and confirm, so the status reads **In production**. While it says **Testing**, Google ends each sign-in after 7 days.
 7. Run `scripts/bundle.sh` (and `scripts/bundle.sh debug`). The client is built into the app from that file.
 
-Then add the account: **File → Add Account…**, `gmail.com` as the server, and **Sign In…**. Because the app isn't verified by Google, the sign-in page warns "Google hasn't verified this app". Click **Advanced → Go to MailMateJ (unsafe)**, then allow access. That's expected for a personal client. An unverified app can be used by at most 100 Google accounts in total, which includes friends using your build. The app keeps the sign-in (a refresh token) in the keychain.
+Then add the account: **File → Add Account…**, the address (Account Type becomes Gmail), and **Sign In…**. Because the app isn't verified by Google, the sign-in page warns "Google hasn't verified this app". Click **Advanced → Go to MailMateJ (unsafe)**, then allow access. That's expected for a personal client. An unverified app can be used by at most 100 Google accounts in total, which includes friends using your build. The app keeps the sign-in (a refresh token) in the keychain.
 
 For releases built on GitHub, add the JSON file's contents as the repository secret `GOOGLE_OAUTH_CLIENT_JSON`. Google treats a desktop app's client secret as public, so shipping it inside the app is normal.
 
