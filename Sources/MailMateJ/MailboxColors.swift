@@ -172,6 +172,13 @@ enum MailboxColors {
         }
     }
 
+    /// A mailbox's icon for menus: its chosen symbol in black and white (a template, so it turns white
+    /// on a highlighted row), as MailMate's menus show it; only the sidebar shows colors.
+    static func menuImage(key: String, symbol: String) -> NSImage? {
+        NSImage(systemSymbolName: MailboxSymbols.symbol(for: key) ?? symbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+    }
+
     /// A symbol filled with a color, as a plain (non-template) image the selection doesn't recolor.
     /// Drawn on demand, so dynamic colors follow the appearance.
     private static func tinted(_ symbol: NSImage, _ color: NSColor) -> NSImage {

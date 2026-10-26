@@ -2,7 +2,7 @@ import AppKit
 import MailStore
 
 /// MailMate's mailbox menu, for pull-down buttons: the sidebar's "Mailboxes" and "Sources" sections,
-/// each mailbox with its icon and, when it has children, a submenu. As in MailMate, such a parent can
+/// each mailbox with its icon (its chosen symbol, in black and white) and, when it has children, a submenu. As in MailMate, such a parent can
 /// itself be chosen by clicking it, which AppKit doesn't do on its own (see `poll`). Its first item is
 /// the pull-down's title: the chosen mailbox.
 @MainActor
@@ -30,7 +30,7 @@ final class MailboxMenu: NSObject {
             let item = NSMenuItem(title: node.title, action: #selector(chosen(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = node.scope?.key
-            item.image = NSImage(systemSymbolName: node.symbol, accessibilityDescription: nil)
+            item.image = MailboxColors.menuImage(key: node.key, symbol: node.symbol)  // the symbol chosen for it
             if let key = node.scope?.key, disabled.contains(key) {
                 item.isEnabled = false
                 item.action = nil

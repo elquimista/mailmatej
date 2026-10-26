@@ -139,6 +139,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menu.delegate?.menuNeedsUpdate?(menu)  // as opening it does
                     NSLog("MMJ Mailbox menu: \(menu.items.map { $0.isSeparatorItem ? "—" : $0.title + ($0.isEnabled && ($0.action != nil || $0.submenu != nil) ? "" : " (off)") })")
                 }
+                if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_MENU_ICONS"] {
+                    // The mailbox menu's first items (icon and title) drawn to `path`, with Inbox given a red
+                    // star for the run (then put back).
+                    MailboxSymbols.set("star", for: "unified.inbox")
+                    MailboxColors.set(.system("red"), for: "unified.inbox")
+                    let menu = MailboxMenu().build(roots: SidebarViewController.buildTree(model: AppModel.shared), selection: "")
+                    let items = menu.items.filter { $0.image != nil }.prefix(8)
+                    let image = NSImage(size: NSSize(width: 220, height: CGFloat(items.count) * 22), flipped: true) { _ in
+                        NSColor.windowBackgroundColor.setFill()
+                        NSRect(x: 0, y: 0, width: 220, height: CGFloat(items.count) * 22).fill()
+                        for (i, item) in items.enumerated() {
+                            item.image?.draw(in: NSRect(x: 6, y: CGFloat(i) * 22 + 3, width: item.image!.size.width, height: item.image!.size.height))
+                            (item.title as NSString).draw(at: NSPoint(x: 32, y: CGFloat(i) * 22 + 3),
+                                                          withAttributes: [.font: NSFont.menuFont(ofSize: 13), .foregroundColor: NSColor.labelColor])
+                        }
+                        return true
+                    }
+                    if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                    MailboxSymbols.set(nil, for: "unified.inbox")
+                    var colors = UserDefaults.standard.dictionary(forKey: "MailboxColors") ?? [:]
+                    colors["unified.inbox"] = nil
+                    UserDefaults.standard.set(colors, forKey: "MailboxColors")
+                }
                 if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_SEARCH"] {
                     // Searches, ";"-separated ("" clears), logging the list after each.
                     for text in steps.split(separator: ";", omittingEmptySubsequences: false) {
