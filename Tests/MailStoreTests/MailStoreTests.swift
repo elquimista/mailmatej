@@ -87,6 +87,20 @@ import Testing
         #expect(try store.messageIDs(scope: .smart(id)).count == 1)
     }
 
+    @Test func messagesAnsweringTheSameMissingMessageThreadByArrival() {
+        // A Zendesk ticket: each message "replies" to the ticket's id, which no message has.
+        let rows = [
+            MailStore.ThreadInput(id: 3, account: "a", at: 300, seen: false, messageId: "c@z", inReplyTo: "ticket@z"),
+            MailStore.ThreadInput(id: 1, account: "a", at: 100, seen: false, messageId: "a@z", inReplyTo: "ticket@z"),
+            MailStore.ThreadInput(id: 2, account: "a", at: 200, seen: false, messageId: "b@z", inReplyTo: "ticket@z"),
+            MailStore.ThreadInput(id: 4, account: "a", at: 400, seen: false, messageId: "d@z", inReplyTo: "other@z"),
+        ]
+        #expect(MailStore.parents(rows) == [2: 1, 3: 2])
+        let threaded = MailStore.thread(rows, expanded: ["a:1"], opened: [2])
+        #expect(threaded.first { $0.id == 1 }?.size == 3)
+        #expect(threaded.map { "\($0.id):\($0.depth)" }.contains("3:2"))
+    }
+
     @Test func quotedTextSplitsPlainAndHTML() {
         let plain = QuotedText.split(plain: "Sounds good.\n\nOn 1 Oct, Ann wrote:\n> invoice attached\n>> older")
         #expect(plain.unquoted == "Sounds good.\n\nOn 1 Oct, Ann wrote:")

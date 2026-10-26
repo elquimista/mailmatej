@@ -903,17 +903,29 @@ public final class MailStore: Sendable {
     /// (its In-Reply-To, or without one the last of its References), when that message is in the list.
     /// Nothing further up the References counts, so where the message in between isn't listed (a reply
     /// of yours, in Sent, between two messages in the Inbox) the thread splits, as in MailMate.
+    ///
+    /// Messages answering the same message that isn't there are one conversation too, each under the one
+    /// before it (by arrival), as MailMate shows them: help desks (Zendesk) make every message of a ticket
+    /// "reply" to the ticket's own id, which no message has.
     static func parents(_ rows: [ThreadInput]) -> [Int64: Int64] {
         var byMessageId: [String: Int64] = [:]
         for row in rows {
             if let mid = row.messageId, byMessageId[row.account + " " + mid] == nil { byMessageId[row.account + " " + mid] = row.id }
         }
         var parents: [Int64: Int64] = [:]
+        var answeringMissing: [String: [ThreadInput]] = [:]
         for row in rows {
-            guard let direct = row.inReplyTo ?? row.references.last,
-                let parent = byMessageId[row.account + " " + direct], parent != row.id
-            else { continue }
-            parents[row.id] = parent
+            guard let direct = row.inReplyTo ?? row.references.last else { continue }
+            let key = row.account + " " + direct
+            if let parent = byMessageId[key] {
+                if parent != row.id { parents[row.id] = parent }
+            } else {
+                answeringMissing[key, default: []].append(row)
+            }
+        }
+        for siblings in answeringMissing.values where siblings.count > 1 {
+            let ordered = siblings.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
+            for (previous, row) in zip(ordered, ordered.dropFirst()) { parents[row.id] = previous.id }
         }
         return parents
     }
