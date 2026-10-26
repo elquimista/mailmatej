@@ -1254,8 +1254,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func duplicate(_ node: SidebarNode) {
         guard case .smart(let id)? = node.scope, let copy = try? model.store.duplicateSmartMailbox(id: id) else { return }
         let key = "smart.\(copy)"
+        // Looks and counts as the original does: color, symbol, displayed count.
         if let color = MailboxColors.color(for: node.key) { MailboxColors.set(color, for: key) }
         if MailboxColors.usesColorInList(node.key) { MailboxColors.setUsesColorInList(true, for: key) }
+        if let symbol = MailboxSymbols.symbol(for: node.key) { MailboxSymbols.set(symbol, for: key) }
+        if let kind = DisplayedCounts.kind(for: node.key) { DisplayedCounts.set(kind, for: key) }
+        if let include = DisplayedCounts.includesSubmailboxes(node.key) { DisplayedCounts.setIncludesSubmailboxes(include, for: key) }
         // Right after the original in the Mailboxes section's dragged order, too.
         var order = UserDefaults.standard.stringArray(forKey: Self.orderDefaultsKey) ?? []
         if let at = order.firstIndex(of: node.key) {
