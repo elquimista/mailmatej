@@ -213,7 +213,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private var listUnderBar: NSLayoutConstraint!
 
     #if DEBUG
-        var debugResultBar: String { "bar \(NSStringFromRect(resultBar.frame)) hidden \(resultBar.isHidden) view \(NSStringFromRect(view.frame)) \(type(of: view))" }
+        var debugResultBar: String { resultBar.isHidden ? "no bar" : "bar \"\(resultBar.debugTitle)\"" }
     #endif
 
     /// MailMate's bar over a search result's list ("Same thread"), with Cancel; nil hides it.
@@ -1032,6 +1032,10 @@ final class ResultBar: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    #if DEBUG
+        var debugTitle: String { label.stringValue }
+    #endif
 
     func show(title: String, symbol: String, onCancel: @escaping () -> Void) {
         label.stringValue = title

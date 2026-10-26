@@ -238,6 +238,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebar.onSelect = { [weak self] node in
             guard let self, let scope = node.scope else { return }
             leaveResult()
+            // A search stays on, now within the mailbox chosen; ending it then stays here too.
+            if !movingForSearch { searchBack = nil }
             hasMailbox = true
             saveView()
             self.scope = scope
@@ -287,12 +289,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// How many messages the list holds, as of its last load.
     private var messageCount = 0
 
+    /// What the list shows: the mailbox (or a thread or correspondence result), narrowed by any search;
+    /// no mailbox, nothing.
+    private var shownScope: MessageScope { hasMailbox ? scope : .smart(-1) }  // .smart(-1) matches nothing
+
     private func reloadList(_ reason: ReloadReason) {
         loadGeneration += 1
         let generation = loadGeneration
         let (store, sort) = (model.store, list.sort)
-        // No mailbox: an empty list (a scope that matches nothing).
-        let scope = hasMailbox ? self.scope : MessageScope.smart(-1)
+        let scope = shownScope
         let search: String? = search.isEmpty ? nil : search
         let (threaded, savedExpanded, savedOpened) = (showsThreads, expandedThreads, openedMessages)
         let result = self.result.map { ($0.kind, $0.anchor, $0.email, $0.opening) }
@@ -598,6 +603,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugEmpty(key: String, choose: String?) { sidebar.debugEmpty(key: key, choose: choose) }
 
         /// Shows the selected message's thread ("thread") or correspondence ("people"), or ends it ("cancel").
+        /// Searches as typing in the search field and pressing Return would ("" clears it).
+        func debugSearch(_ text: String) {
+            if text.hasPrefix("@") { return _ = sidebar.select(key: String(text.dropFirst())) }  // "@key": choose a mailbox
+            searchField?.stringValue = text
+            if let field = searchField { searchChanged(field) }
+        }
+
         func debugResult(_ kind: String) {
             switch kind {
             case "thread": showResult(.thread)
@@ -611,7 +623,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         var debugListState: String {
-            "scope \(scopeTitle) rows \(list.ids.count) messages \(messageCount) selected \(list.selectedIDs) title \(window?.title ?? "") \(list.debugResultBar)"
+            "sidebar \(sidebar.selectedKey ?? "-") scope \(scopeTitle) rows \(list.ids.count) messages \(messageCount) selected \(list.selectedIDs) title \(window?.title ?? "") \(list.debugResultBar)"
         }
         /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
         func debugShowProgress() { updateProgress() }
@@ -924,13 +936,41 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private func clearSearch() {
         searchField?.stringValue = ""
         if window?.firstResponder === searchField?.currentEditor() { window?.makeFirstResponder(list.tableView) }
-        search = ""
-        reloadList(.searchChanged)
+        applySearch("")
     }
 
     @objc private func searchChanged(_ sender: NSSearchField) {
         guard sender.stringValue != search else { return }
-        search = sender.stringValue
+        applySearch(sender.stringValue)
+    }
+
+    /// The mailbox (sidebar key) a search left, to go back to when it ends.
+    private var searchBack: String?
+    /// Set while a search selects All Messages in the sidebar (which doesn't end the search).
+    private var movingForSearch = false
+
+    /// As MailMate: a search starts in All Messages, so the sidebar goes there, and the list's bar says
+    /// what it finds ("Message contains “php”"); choosing another mailbox searches that one. Ending it
+    /// (Cancel, Escape, emptying the field) stays in the mailbox chosen, or, still in the All Messages it
+    /// went to, goes back to where it started. Within a thread or correspondence result it searches that.
+    private func applySearch(_ text: String) {
+        let starting = search.isEmpty && !text.isEmpty
+        search = text
+        guard result == nil else { return reloadList(.searchChanged) }
+        if text.isEmpty {
+            list.showResultBar(nil)
+            let back = searchBack
+            searchBack = nil
+            if let back, back != sidebar.selectedKey, sidebar.select(key: back) { return }  // reloads as it's chosen
+            return reloadList(.searchChanged)
+        }
+        list.showResultBar("Message contains “\(text)”", symbol: "magnifyingglass") { [weak self] in self?.clearSearch() }
+        if starting, sidebar.selectedKey != "unified.all" {
+            searchBack = sidebar.selectedKey
+            movingForSearch = true
+            defer { movingForSearch = false }
+            if sidebar.select(key: "unified.all") { return }  // reloads as it's chosen
+        }
         reloadList(.searchChanged)
     }
 
@@ -1486,7 +1526,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Messages that stay in the list (archived in All Messages, say) stay.
     private func removeLeavingRows(_ ids: [Int64]) {
         let shown = ids.filter(list.ids.contains)
-        guard !shown.isEmpty, let staying = try? model.store.ids(shown, in: scope) else { return }
+        guard !shown.isEmpty, let staying = try? model.store.ids(shown, in: shownScope) else { return }
         let leaving = Set(shown).subtracting(staying)
         guard !leaving.isEmpty else { return }
         let next = selectAfterMove.flatMap { leaving.isSuperset(of: $0.moved) ? $0.next : nil }

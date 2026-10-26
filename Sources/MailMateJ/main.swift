@@ -139,6 +139,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menu.delegate?.menuNeedsUpdate?(menu)  // as opening it does
                     NSLog("MMJ Mailbox menu: \(menu.items.map { $0.isSeparatorItem ? "—" : $0.title + ($0.isEnabled && ($0.action != nil || $0.submenu != nil) ? "" : " (off)") })")
                 }
+                if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_SEARCH"] {
+                    // Searches, ";"-separated ("" clears), logging the list after each.
+                    for text in steps.split(separator: ";", omittingEmptySubsequences: false) {
+                        windowController?.debugSearch(String(text))
+                        try? await Task.sleep(for: .seconds(2))
+                        NSLog("MMJ search \"\(text)\": \(windowController?.debugListState ?? "-")")
+                    }
+                }
                 if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_RESULT"] {
                     // "thread", "people", "cancel", comma-separated: as the toolbar buttons and Cancel do.
                     NSLog("MMJ result before: \(windowController?.debugListState ?? "-")")
