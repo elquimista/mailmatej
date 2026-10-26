@@ -339,6 +339,15 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         }
     }
 
+    /// Scrolls `edge` into view while the selection, if any, is in view now and stays in view.
+    func scrollToEdge(_ edge: Int64?) {
+        guard let edge, let row = ids.firstIndex(of: edge), !isFullyVisible(edge) else { return }
+        let selected = selectedIDs
+        guard selected.allSatisfy(isFullyVisible), let anchor = scrollAnchor else { return }
+        tableView.scrollRowToVisible(row)
+        if !selected.allSatisfy(isFullyVisible) { restore(anchor) }
+    }
+
     @discardableResult
     private func restore(_ anchor: ScrollAnchor) -> Bool {
         guard let row = ids.firstIndex(of: anchor.id) else { return false }

@@ -98,6 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: .milliseconds(400))
                     }
                 }
+                if let row = Int(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SELECT_ROW"] ?? "") {
+                    windowController?.debugSelectRow(row)
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
                 // MMJ_SNAPSHOT_ROUNDTRIP=<sidebar key>: switch to that mailbox and back before the snapshot.
                 if let row = Int(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_CORR_ROW"] ?? "") {
                     try? await Task.sleep(for: .milliseconds(600))
@@ -236,7 +240,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let key = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_ROUNDTRIP"] {
                     writeSnapshot(of: windowController?.window, to: path.replacingOccurrences(of: ".png", with: "-before.png"))
                     windowController?.debugSelectSidebar(key: key)
-                    try? await Task.sleep(for: .seconds(1))
+                    // MMJ_SNAPSHOT_AWAY=<seconds>: stay there that long (e.g. for mail to arrive meanwhile).
+                    try? await Task.sleep(for: .seconds(Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_AWAY"] ?? "1") ?? 1))
                     windowController?.debugSelectSidebar(key: "unified.inbox")
                     try? await Task.sleep(for: .seconds(1))
                 }

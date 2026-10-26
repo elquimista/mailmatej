@@ -373,6 +373,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .scopeChanged:
                 if let saved = remembered[scope], saved.selection.contains(where: ids.contains) {
                     list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
+                    // Mail that arrived while away shows at once, unless that scrolls the selection away.
+                    list.scrollToEdge(newestEnd)
                     if let main = list.selectedID, !saved.correspondenceSelection.isEmpty {
                         pendingCorrespondence = (main, saved)
                         restoredDisplay = saved.displayed
@@ -783,6 +785,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             let clip = scrollView.contentView
             clip.scroll(to: NSPoint(x: 0, y: clip.bounds.minY + points))
             scrollView.reflectScrolledClipView(clip)
+        }
+
+        /// Selects a row (negative: counted from the end, -1 the last) and brings it into view.
+        func debugSelectRow(_ row: Int) {
+            let row = row < 0 ? list.ids.count + row : row
+            guard list.ids.indices.contains(row) else { return }
+            list.tableView.selectRowIndexes([row], byExtendingSelection: false)
+            list.tableView.scrollRowToVisible(row)
         }
 
         /// Moves the main list selection down one row, as the down-arrow key would.
