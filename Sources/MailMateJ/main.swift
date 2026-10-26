@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 if let id = Int64(ProcessInfo.processInfo.environment["MMJ_DEBUG_DELETE_SMART"] ?? "") {
                     try? await Task.sleep(for: .seconds(1))
-                    AppModel.shared.deleteSmartMailbox(id: id)  // as Delete Smart Mailbox… does
+                    AppModel.shared.deleteSmartMailbox(id: id)  // as Delete Mailbox does
                     try? await Task.sleep(for: .seconds(1))
                 }
                 NSLog("MMJ inbox badge before: \(windowController?.debugInboxBadge ?? -1)")

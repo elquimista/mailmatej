@@ -917,10 +917,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         if node.kind == .smart {
             groups.append([
-                item("Edit Smart Mailbox…", #selector(editMailboxClicked(_:))),
-                item("Rename Smart Mailbox", #selector(renameClicked(_:))),
-                item("Delete Smart Mailbox…", #selector(deleteSmartClicked(_:))),
-                item("Duplicate Smart Mailbox", #selector(duplicateClicked(_:))),
+                // MailMate's titles: "Mailbox", as for any mailbox (only New Smart Mailbox says "Smart").
+                item("Edit Mailbox…", #selector(editMailboxClicked(_:))),
+                item("Rename Mailbox…", #selector(renameClicked(_:))),
+                item("Delete Mailbox", #selector(deleteSmartClicked(_:))),
+                item("Duplicate Mailbox", #selector(duplicateClicked(_:))),
             ])
         } else if node.kind == .unified {
             groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
