@@ -397,6 +397,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         MailboxEditorWindowController.debugSidebarWidth(set: Double(width).map { CGFloat($0) })
                         try? await Task.sleep(for: .milliseconds(500))
                     }
+                    if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_DRAG_ROWS"] {
+                        MailboxEditorWindowController.debugDrag(steps)  // "from:x:y;..." in the editor
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
                     if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_TYPE_ADD"] {
                         MailboxEditorWindowController.debugTypeThenAdd(text)  // type into a condition, then its ⊕
                         try? await Task.sleep(for: .milliseconds(500))

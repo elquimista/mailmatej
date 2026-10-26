@@ -161,6 +161,10 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
             (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugRemoveFirstRow()
         }
 
+        static func debugDrag(_ steps: String) {
+            (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugDrag(steps)
+        }
+
         static func debugTypeThenAdd(_ text: String) {
             (shared?.content.subviews.first?.subviews.first { $0 is SmartRuleEditor } as? SmartRuleEditor)?.debugTypeThenAdd(text)
         }

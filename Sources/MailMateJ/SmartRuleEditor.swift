@@ -555,6 +555,99 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         let path = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
         path.lineWidth = 1
         path.stroke()
+        if let drop {
+            // Where a dragged row will go: an accent line at the gap, starting at its level's indent with a
+            // small ring, as outline views show it.
+            let y = 1 + CGFloat(drop.gap) * Self.rowHeight - 1
+            let x = indent(drop.depth) - 4
+            NSColor.controlAccentColor.set()
+            NSRect(x: x + 6, y: y - 1, width: bounds.width - 10 - x - 6, height: 2).fill()
+            let ring = NSBezierPath(ovalIn: NSRect(x: x, y: y - 3, width: 6, height: 6))
+            ring.lineWidth = 1.5
+            ring.stroke()
+        }
+    }
+
+    // MARK: Dragging rows
+
+    /// Rows are dragged by their empty space (controls take their own clicks): up or down among the
+    /// others, and, by how far right the pointer is, into or out of Any/All groups, as in MailMate.
+    private var dragged: Row?
+    private var pressPoint: NSPoint?
+    private var drop: (gap: Int, depth: Int, parent: Row, index: Int)?
+
+    private func indent(_ depth: Int) -> CGFloat { (kind == .conditions ? 9 : 8) + CGFloat(depth) * 30 }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let rows = flatten()
+        let index = Int((point.y - 1) / Self.rowHeight)
+        guard rows.indices.contains(index), rows[index] !== root else { return super.mouseDown(with: event) }
+        window?.makeFirstResponder(self)  // ends any editing, keeping what was typed
+        dragged = rows[index]
+        pressPoint = point
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let dragged, let start = pressPoint else { return super.mouseDragged(with: event) }
+        let point = convert(event.locationInWindow, from: nil)
+        guard drop != nil || hypot(point.x - start.x, point.y - start.y) > 3 else { return }
+        NSCursor.closedHand.set()
+        autoscroll(with: event)
+        drop = dropTarget(for: dragged, at: point)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            dragged = nil
+            pressPoint = nil
+            drop = nil
+            needsDisplay = true
+            NSCursor.arrow.set()
+        }
+        guard let dragged, let drop else { return super.mouseUp(with: event) }
+        move(dragged, into: drop.parent, at: drop.index)
+    }
+
+    /// The rows in a row's branch: it and everything inside it.
+    private func branch(_ row: Row) -> [Row] { [row] + row.children.flatMap(branch) }
+
+    /// Where `row` would go if dropped at `point`: the gap between rows nearest the pointer, at the
+    /// level the pointer is over, within what that gap allows (into the group above, beside the row
+    /// above, or out of groups that end there).
+    private func dropTarget(for row: Row, at point: NSPoint) -> (gap: Int, depth: Int, parent: Row, index: Int)? {
+        let rows = flatten()
+        let moving = branch(row)
+        let gap = min(max(Int(((point.y - 1) / Self.rowHeight).rounded()), 1), rows.count)
+        // The rows either side of the gap, not counting the dragged branch (dropping next to itself).
+        guard let above = rows[..<gap].last(where: { r in !moving.contains { $0 === r } }) else { return nil }
+        let below = rows[gap...].first { r in !moving.contains { $0 === r } }
+        let maxDepth = above.isCompound ? above.depth + 1 : above.depth
+        let minDepth = max(1, below?.depth ?? 1)
+        guard minDepth <= maxDepth else { return nil }
+        let pointed = Int(((point.x - indent(0)) / 30).rounded(.down))
+        let depth = min(max(pointed, minDepth), maxDepth)
+        if depth == above.depth + 1 { return (gap, depth, above, 0) }  // first inside the group above
+        // Beside `above`, or beside the group around it at that level.
+        var sibling = above
+        while sibling.depth > depth, let parent = sibling.parent { sibling = parent }
+        guard let parent = sibling.parent, let index = parent.children.firstIndex(where: { $0 === sibling }) else { return nil }
+        return (gap, depth, parent, index + 1)
+    }
+
+    /// Moves a row (with what's inside it) to `index` among `parent`'s children.
+    private func move(_ row: Row, into parent: Row, at index: Int) {
+        guard let old = row.parent, let from = old.children.firstIndex(where: { $0 === row }) else { return }
+        var at = index
+        if old === parent, from < index { at -= 1 }  // its own place no longer counts
+        guard !(old === parent && at == from) else { return }  // dropped where it was
+        rebuildAll()  // keeps what's typed before the rows change
+        old.children.remove(at: from)
+        row.parent = parent
+        parent.children.insert(row, at: min(at, parent.children.count))
+        rebuildAll()
+        onChange(true)
     }
 
     // MARK: Actions
@@ -780,6 +873,33 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
             plusClicked(row.plus)
             NSLog("MMJ add: values \(flatten().filter { !$0.isCompound }.map { ($0.valueControl as? NSTextField)?.stringValue ?? $0.value })")
+        }
+
+        /// Drags row `from` (by its empty space at the right) to `x`, `y` in the editor, as the mouse would;
+        /// steps "from:x:y" separated by ";". Logs the conditions after each.
+        func debugDrag(_ steps: String) {
+            for step in steps.split(separator: ";") {
+                let n = step.split(separator: ":").compactMap { Double($0) }
+                guard n.count >= 3, let window else { continue }
+                func event(_ type: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+                    NSEvent.mouseEvent(
+                        with: type, location: convert(p, to: nil), modifierFlags: [], timestamp: 0,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+                let start = NSPoint(x: bounds.width - 80, y: 1 + (n[0] + 0.5) * Self.rowHeight)
+                let end = NSPoint(x: n[1], y: n[2])
+                mouseDown(with: event(.leftMouseDown, start))
+                mouseDragged(with: event(.leftMouseDragged, NSPoint(x: start.x, y: start.y + 5)))
+                mouseDragged(with: event(.leftMouseDragged, end))
+                let target = drop.map { "gap \($0.gap) depth \($0.depth)" } ?? "none"
+                if n.count > 3 { return NSLog("MMJ drag \(step) held at \(target)") }  // left mid-drag, to see the line
+                mouseUp(with: event(.leftMouseUp, end))
+                NSLog("MMJ drag \(step) → \(target): \(debugTreeText(root))")
+            }
+        }
+
+        private func debugTreeText(_ row: Row) -> String {
+            row.isCompound ? "\(row.match.rawValue)[" + row.children.map(debugTreeText).joined(separator: ", ") + "]" : currentValue(row)
         }
 
         func debugAddRow(text: String) {
