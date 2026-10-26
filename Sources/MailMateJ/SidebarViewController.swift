@@ -1394,19 +1394,24 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func removeClicked(_ sender: NSMenuItem) {
-        guard let node = sender.representedObject as? SidebarNode, let id = node.accountId, let window = view.window else {
-            return
+        guard let node = sender.representedObject as? SidebarNode, let id = node.accountId else { return }
+        // MailMate's: a panel of its own with the app's icon, Remove the default button.
+        if Self.removeAccountAlert(name: node.title).runModal() == .alertFirstButtonReturn {
+            model.removeAccount(id: id)
         }
+    }
+
+    static func removeAccountAlert(name: String) -> NSAlert {
         let alert = NSAlert()
-        alert.messageText = "Remove “\(node.title)”?"
-        alert.informativeText = "Local copies of its messages are deleted. Nothing changes on the server."
+        alert.messageText = "Remove Account?"
+        alert.informativeText = """
+            You are about to remove the JMAP account “\(name)”. Are you sure you want to do that?
+
+            Messages on the server are not going to be affected.
+            """
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.model.removeAccount(id: id)
-        }
+        return alert
     }
 }
 

@@ -446,6 +446,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ edit alert: \((sheet?.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []).joined(separator: " | "))")
                     NSLog("MMJ edit identities: \(((try? AppModel.shared.store.identities()) ?? []).filter { $0.accountId == p[0] }.map { "\($0.name) <\($0.email)>" })")
                 }
+                if let name = ProcessInfo.processInfo.environment["MMJ_DEBUG_REMOVE_ALERT"] {
+                    // The Remove Account alert, laid out and captured as it shows (without waiting for an answer).
+                    let alert = SidebarViewController.removeAccountAlert(name: name)
+                    alert.layout()
+                    alert.window.center()
+                    alert.window.orderFront(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    let capture = Process()
+                    capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    capture.arguments = ["-x", "-l\(alert.window.windowNumber)", path.replacingOccurrences(of: ".png", with: "-remove.png")]
+                    try? capture.run()
+                    capture.waitUntilExit()
+                    alert.window.orderOut(nil)
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_TYPE_EMAIL"] {
                     // "email" or "email|user": typed into a new account's window (the user name first, if given).
                     let parts = spec.split(separator: "|").map(String.init)
