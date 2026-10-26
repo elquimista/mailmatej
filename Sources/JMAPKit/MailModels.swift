@@ -51,6 +51,8 @@ public struct Email: Decodable, Sendable {
     public let ccGroups: [EmailAddressGroup]?
     public let subject: String?
     public let sentAt: Date?
+    /// The Date header as written ("Mon, 26 Oct 2026 09:27:08 +0200"), for the sender's time zone.
+    public let dateHeader: String?
     public let hasAttachment: Bool
     public let preview: String?
 
@@ -58,8 +60,9 @@ public struct Email: Decodable, Sendable {
     public static let properties: [String] = [
         "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt",
         "messageId", "inReplyTo", "references", "sender", "from", "to", "cc", "bcc", "replyTo",
-        "subject", "sentAt", "hasAttachment", "preview", groupedTo, groupedCc,
+        "subject", "sentAt", "hasAttachment", "preview", groupedTo, groupedCc, dateHeaderProperty,
     ]
+    public static let dateHeaderProperty = "header:Date:asText"
     public static let groupedTo = "header:To:asGroupedAddresses"
     public static let groupedCc = "header:Cc:asGroupedAddresses"
 
@@ -67,6 +70,7 @@ public struct Email: Decodable, Sendable {
         case id, blobId, threadId, mailboxIds, keywords, size, receivedAt, messageId, inReplyTo, references
         case sender, from, to, cc, bcc, replyTo, subject, sentAt, hasAttachment, preview
         case toGroups = "header:To:asGroupedAddresses", ccGroups = "header:Cc:asGroupedAddresses"
+        case dateHeader = "header:Date:asText"
     }
 }
 

@@ -134,6 +134,8 @@ public struct IncomingMessage: Sendable {
     public var size: Int
     public var receivedAt: Date
     public var sentAt: Date?
+    /// The sender's time zone (its Date header's offset), in minutes east of UTC.
+    public var sentZone: Int?
     public var messageIdHeader: String?
     public var inReplyTo: String?
     /// The References header's Message-IDs, oldest first.
@@ -146,8 +148,10 @@ public struct IncomingMessage: Sendable {
     public init(
         remoteId: String, threadId: String, blobId: String, mailboxRemoteIds: [String], keywords: [String],
         size: Int, receivedAt: Date, sentAt: Date?, messageIdHeader: String?, inReplyTo: String?,
-        subject: String, preview: String, hasAttachment: Bool, addresses: [Address], references: [String] = []
+        subject: String, preview: String, hasAttachment: Bool, addresses: [Address], references: [String] = [],
+        sentZone: Int? = nil
     ) {
+        self.sentZone = sentZone
         self.references = references
         self.remoteId = remoteId
         self.threadId = threadId

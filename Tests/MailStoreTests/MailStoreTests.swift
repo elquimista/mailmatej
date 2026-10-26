@@ -40,6 +40,41 @@ import Testing
         #expect(all[1].definition == definition)
     }
 
+    @Test func dateConditionsMatchPeriodsAndParts() throws {
+        func at(_ text: String) -> Double { try! Date(text, strategy: .iso8601).timeIntervalSince1970 }
+        var early = message("1", from: "a@x.com", at: at("2023-12-31T23:30:00Z"))
+        early.sentAt = Date(timeIntervalSince1970: at("2023-12-31T23:30:00Z"))
+        early.sentZone = 120  // 01:30 on 1 January 2024 for the sender, at +0200
+        var late = message("2", from: "b@x.com", at: at("2024-03-15T12:00:00Z"))
+        late.sentAt = Date(timeIntervalSince1970: at("2024-03-15T12:00:00Z"))
+        late.sentZone = -300
+        try store.upsertMessages(accountId: "acc", [early, late])
+        let ids = try store.messageIDs(scope: .allMessages, sort: MessageSort(key: .receivedAt, ascending: true))
+        func matching(_ field: SmartField, _ op: SmartOperator, _ value: String = "") throws -> [Int64] {
+            let id = try store.createSmartMailbox(name: "\(field.rawValue) \(op)", parentId: nil)
+            var definition = SmartDefinition(sources: SmartSources(scopes: ["all"]))
+            definition.condition = .compound(.all, [.rule(field, op, value)])
+            try store.updateSmartMailbox(id: id, definition: definition)
+            return try store.messageIDs(scope: .smart(id), sort: MessageSort(key: .receivedAt, ascending: true))
+        }
+        // Periods are this Mac's days and months; mid-March is clear of any time zone's edge.
+        #expect(try matching(.date, .isExactly, "2024-03") == [ids[1]])
+        #expect(try matching(.date, .isExactly, "15.03.2024") == [ids[1]])
+        #expect(try matching(.date, .isAfter, "2024-02") == [ids[1]])
+        #expect(try matching(.date, .isBefore, "2024-03-15") == [ids[0]])
+        #expect(try matching(.date, .exists) == ids)
+        #expect(try matching(.dateLocal, .isExactly, "2024-03") == [ids[1]])
+        #expect(try matching(.date, .isBefore, "not a date").isEmpty)
+        // Parts are in the sender's time zone, as written in its Date header.
+        #expect(try matching(.datePart(.year, local: false), .is, "2024") == ids)
+        #expect(try matching(.datePart(.day, local: false), .is, "2024-01-01") == [ids[0]])
+        #expect(try matching(.datePart(.zone, local: false), .is, "-0500") == [ids[1]])
+        #expect(try matching(.datePart(.formatted, local: false), .contains, "07:00:00 -0500") == [ids[1]])
+        #expect(try matching(.datePart(.month, local: false), .moreOrEqual, "2024-02") == [ids[1]])
+        #expect(try store.fieldValues(.datePart(.year, local: false), sources: SmartSources(scopes: ["all"])) == ["2024"])
+        #expect(MailStore.datePeriod("2024-02-30") == nil)
+    }
+
     @Test func quotedTextSplitsPlainAndHTML() {
         let plain = QuotedText.split(plain: "Sounds good.\n\nOn 1 Oct, Ann wrote:\n> invoice attached\n>> older")
         #expect(plain.unquoted == "Sounds good.\n\nOn 1 Oct, Ann wrote:")

@@ -285,8 +285,8 @@ public final class MailStore: Sendable {
             let upsert = try db.cachedStatement(sql: """
                 INSERT INTO message (accountId, remoteId, threadId, blobId, messageIdHeader, inReplyTo, subject,
                     sortSubject, fromDisplay, fromEmail, preview, size, receivedAt, sentAt, hasAttachment,
-                    isSeen, isFlagged, isAnswered, isDraft, referencesHeader)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isSeen, isFlagged, isAnswered, isDraft, referencesHeader, sentZone)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (accountId, remoteId) DO UPDATE SET
                     threadId = excluded.threadId, blobId = excluded.blobId,
                     messageIdHeader = excluded.messageIdHeader, inReplyTo = excluded.inReplyTo,
@@ -294,6 +294,7 @@ public final class MailStore: Sendable {
                     subject = excluded.subject, sortSubject = excluded.sortSubject,
                     fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
                     size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
+                    sentZone = coalesce(excluded.sentZone, sentZone),
                     hasAttachment = excluded.hasAttachment, isSeen = excluded.isSeen,
                     isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft,
                     downloadState = CASE WHEN blobId = excluded.blobId THEN downloadState ELSE 0 END
@@ -322,7 +323,7 @@ public final class MailStore: Sendable {
                     Self.sortSubject(m.subject), fromDisplay, from?.email.lowercased() ?? "", m.preview, m.size,
                     m.receivedAt.timeIntervalSince1970, m.sentAt?.timeIntervalSince1970, m.hasAttachment,
                     keywords.contains("$seen"), keywords.contains("$flagged"), keywords.contains("$answered"),
-                    keywords.contains("$draft"), m.references.joined(separator: " "),
+                    keywords.contains("$draft"), m.references.joined(separator: " "), m.sentZone,
                 ]
                 guard let id = try Int64.fetchOne(upsert, arguments: StatementArguments(args)) else { continue }
 
@@ -663,6 +664,26 @@ public final class MailStore: Sendable {
             try String.fetchAll(
                 db, sql: "SELECT remoteId FROM message WHERE accountId = ? AND recipientGroupsFetched = 0 LIMIT ?",
                 arguments: [accountId, limit])
+        }
+    }
+
+    /// Messages with a Date but no time zone yet (synced before v19): their zones are fetched by sync.
+    public func remoteIDsMissingSentZone(accountId: String, limit: Int) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(
+                db, sql: "SELECT remoteId FROM message WHERE accountId = ? AND sentAt IS NOT NULL AND sentZone IS NULL LIMIT ?",
+                arguments: [accountId, limit])
+        }
+    }
+
+    /// Stores the senders' time zones by remote id (0 where the Date header gives none, so it isn't asked again).
+    public func setSentZones(accountId: String, _ zones: [String: Int]) throws {
+        guard !zones.isEmpty else { return }
+        try dbPool.write { db in
+            for (remoteId, zone) in zones {
+                try db.execute(
+                    sql: "UPDATE message SET sentZone = ? WHERE accountId = ? AND remoteId = ?", arguments: [zone, accountId, remoteId])
+            }
         }
     }
 

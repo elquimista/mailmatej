@@ -45,6 +45,7 @@ public actor JMAPAccountSync {
         try await syncEmails(accountId, session: session, into: &result)
         try await fillInReferences(accountId)
         try await fillInRecipientGroups(accountId)
+        try await fillInSentZones(accountId)
         // Messages a local change left without a mailbox go back to the server's state.
         let stranded = try store.remoteIDsWithoutMailbox(accountId: account.id)
         if !stranded.isEmpty { try await refetch(stranded, accountId) }
@@ -452,6 +453,36 @@ public actor JMAPAccountSync {
             try store.addRecipientGroups(accountId: account.id, found)
             if missing.count < 500 { return }
         }
+    }
+
+    /// The senders' time zones of messages synced before they were stored (see the v19 migration).
+    private func fillInSentZones(_ accountId: String) async throws {
+        while true {
+            let missing = try store.remoteIDsMissingSentZone(accountId: account.id, limit: 500)
+            guard !missing.isEmpty else { return }
+            var request = JMAPRequest()
+            let get = request.call("Email/get", [
+                "accountId": .string(accountId), "ids": .strings(missing), "properties": .strings(["id", Email.dateHeaderProperty]),
+            ])
+            struct DateHeader: Decodable {
+                let id: String
+                let date: String?
+                enum CodingKeys: String, CodingKey { case id, date = "header:Date:asText" }
+            }
+            let list = try await client.send(request).decode(GetResponse<DateHeader>.self, get).list
+            var zones = Dictionary(uniqueKeysWithValues: missing.map { ($0, 0) })
+            for email in list { zones[email.id] = Self.zone(ofDateHeader: email.date) ?? 0 }
+            try store.setSentZones(accountId: account.id, zones)
+            if missing.count < 500 { return }
+        }
+    }
+
+    /// A Date header's time zone in minutes east of UTC: "+0200" is 120, "-0530" is -330; nil without one.
+    static func zone(ofDateHeader header: String?) -> Int? {
+        guard let header, let match = header.range(of: #"[+-]\d{4}\b"#, options: .regularExpression) else { return nil }
+        let text = header[match]
+        guard let hours = Int(text.dropFirst().prefix(2)), let minutes = Int(text.suffix(2)) else { return nil }
+        return (text.hasPrefix("-") ? -1 : 1) * (hours * 60 + minutes)
     }
 
     // MARK: Changes
@@ -952,7 +983,8 @@ public actor JMAPAccountSync {
             size: e.size, receivedAt: e.receivedAt, sentAt: e.sentAt,
             messageIdHeader: e.messageId?.first, inReplyTo: e.inReplyTo?.first,
             subject: e.subject ?? "", preview: e.preview ?? "", hasAttachment: e.hasAttachment,
-            addresses: addresses, references: e.references ?? [])
+            addresses: addresses, references: e.references ?? [],
+            sentZone: e.sentAt == nil ? nil : zone(ofDateHeader: e.dateHeader) ?? 0)
     }
 
     /// Parts worth keeping a reference to: body parts with a Content-ID (embedded images) and everything

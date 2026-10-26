@@ -317,6 +317,11 @@ enum Schema {
             }
         }
 
+        m.registerMigration("v19-sent-zone") { db in
+            // The sender's time zone (MailMate's Date parts are in it); filled in for existing mail by sync.
+            try db.execute(sql: "ALTER TABLE message ADD COLUMN sentZone INTEGER")
+        }
+
         return m
     }
 }

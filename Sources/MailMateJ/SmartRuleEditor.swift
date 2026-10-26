@@ -355,6 +355,15 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             return popup(context.accounts.map { ($0.name, $0.id) }, selected: value, width: nil, action: #selector(valueChosen(_:)))
         case .mailbox:
             return mailboxPopup(selected: value, width: 150, for: row)
+        case .days where op == .isExactly || op == .isBefore || op == .isAfter:
+            // A year, month or day: "2024", "2024-03", "2024-03-01".
+            let date = NSTextField(string: value)
+            date.controlSize = .small
+            date.font = Self.font
+            date.placeholderString = "YYYY-MM-DD"
+            date.delegate = self
+            date.frame = NSRect(x: 0, y: 0, width: 100, height: 19)
+            return date
         case .days:
             let holder = NSView(frame: NSRect(x: 0, y: 0, width: 84, height: 19))
             let number = NSTextField(string: value)
@@ -454,6 +463,15 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             let row = flatten().first(where: { $0.controls.contains { ($0 as? NSPopUpButton)?.menu === sender.menu } })
         else { return }
         if row.op.takesValue { row.value = currentValue(row) }
+        // Between a number of days and a date, the value changes kind: a sensible one to type over.
+        if row.field.kind == .days {
+            let isDate = [.isExactly, .isBefore, .isAfter].contains(op)
+            if isDate, MailStore.datePeriod(row.value) == nil {
+                row.value = Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
+            } else if !isDate, op.takesValue, Double(row.value) == nil {
+                row.value = "7"
+            }
+        }
         row.op = op
         rebuildRow(row)  // "is" shows a combo box, "contains" a plain field, "exists" none
         onChange(true)

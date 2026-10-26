@@ -188,10 +188,36 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public static let keyword = SmartField(rawValue: "keyword")
     /// "Message is ▸ Unread" (op `is`) or "Message is not ▸ …".
     public static let status = SmartField(rawValue: "status")
+    /// MailMate's Date (No Specifier): the message's Date header, when it was sent (else when it arrived).
+    public static let date = SmartField(rawValue: "date")
+    /// MailMate's Date ▸ » Local ▸ No Specifier: the same date, in this Mac's time zone (as the date
+    /// comparisons already are).
+    public static let dateLocal = SmartField(rawValue: "date.local")
     public static let received = SmartField(rawValue: "received")
     public static let sent = SmartField(rawValue: "sent")
     public static let mailbox = SmartField(rawValue: "mailbox")
     public static let account = SmartField(rawValue: "account")
+
+    /// MailMate's Date ▸ Day, Formatted, …: pieces of the date written "2026-10-26 09:27:08 +0200", in
+    /// the sender's time zone (» Local ▸: in this Mac's), matched as text.
+    public enum DatePart: String, CaseIterable, Sendable {
+        case day, formatted, hour, month, time, year, zone
+
+        public var title: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    }
+
+    public static func datePart(_ part: DatePart, local: Bool) -> SmartField {
+        SmartField(rawValue: local ? "date.local.\(part.rawValue)" : "date.\(part.rawValue)")
+    }
+
+    /// The date part this field matches, and whether in this Mac's time zone.
+    public var datePart: (part: DatePart, local: Bool)? {
+        let parts = rawValue.split(separator: ".").map(String.init)
+        guard parts.first == "date", parts.count == 2 || (parts.count == 3 && parts[1] == "local"),
+            let part = DatePart(rawValue: parts[parts.count - 1])
+        else { return nil }
+        return (part, parts.count == 3)
+    }
 
     public enum AddressHeader: String, CaseIterable, Sendable {
         case from, recipient, to, cc, bcc, any
@@ -277,7 +303,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public var kind: Kind {
         switch self {
         case .status: .status
-        case .received, .sent: .days
+        case .date, .dateLocal, .received, .sent: .days
         case .mailbox: .mailbox
         case .account: .account
         default: .text
@@ -308,11 +334,15 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         case .filename: return "Filename"
         case .keyword: return "Tags/Keywords"
         case .status: return "Message is"  // with its status: "Message is Read"
+        case .date: return "Date"
+        case .dateLocal: return "Date \u{2023} Local"
         case .received: return "Date \u{2023} Received"
         case .sent: return "Date \u{2023} Sent"
         case .mailbox: return "Source \u{2023} Mailbox"
         case .account: return "Source"  // » Source's No Specifier
-        default: return rawValue
+        default:
+            if let (part, local) = datePart { return "Date \u{2023} \(local ? "Local \u{2023} " : "")\(part.title)" }
+            return rawValue
         }
     }
 
@@ -322,7 +352,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         // MailMate's operator menu, in its groups (see `operatorGroups`).
         case .text: [.is, .isNot, .contains, .doesNotContain, .lessOrEqual, .moreOrEqual, .isIn, .isNotIn, .exists, .notExists]
         case .status, .mailbox, .account: [.is, .isNot]
-        case .days: [.withinLast, .notWithinLast]
+        case .days: [.withinLast, .notWithinLast, .isExactly, .isBefore, .isAfter, .exists, .notExists]
         }
     }
 
@@ -330,8 +360,8 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public var operatorGroups: [[SmartOperator]] {
         let ops = operators
         let groups: [[SmartOperator]] = [
-            [.is, .isNot, .contains, .doesNotContain, .lessOrEqual, .moreOrEqual], [.isIn, .isNotIn], [.exists, .notExists],
-            [.withinLast, .notWithinLast],
+            [.is, .isNot, .contains, .doesNotContain, .lessOrEqual, .moreOrEqual], [.isIn, .isNotIn],
+            [.withinLast, .notWithinLast, .isExactly, .isBefore, .isAfter], [.exists, .notExists],
         ]
         return groups.map { $0.filter(ops.contains) }.filter { !$0.isEmpty }
     }
@@ -345,6 +375,8 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
 public enum SmartOperator: String, Codable, Hashable, Sendable {
     case `is`, isNot, contains, doesNotContain, lessOrEqual, moreOrEqual, isIn, isNotIn, exists, notExists
     case withinLast, notWithinLast
+    /// Dates: in, before or after a year, month or day ("2024", "2024-03", "2024-03-01").
+    case isExactly, isBefore, isAfter
     /// No longer offered (MailMate has none); kept so saved conditions still read.
     case beginsWith, endsWith
 
@@ -360,8 +392,11 @@ public enum SmartOperator: String, Codable, Hashable, Sendable {
         case .isNotIn: "is not in"
         case .exists: "exists"
         case .notExists: "does not exist"
-        case .withinLast: "is in the last"
-        case .notWithinLast: "is not in the last"
+        case .withinLast: "is within last"
+        case .notWithinLast: "is not within last"
+        case .isExactly: "is exactly"
+        case .isBefore: "is before"
+        case .isAfter: "is after"
         case .beginsWith: "begins with"
         case .endsWith: "ends with"
         }
@@ -563,8 +598,50 @@ extension MailStore {
         case .exists, .notExists: return ("\(column) <> ''", [])
         case .beginsWith: return ("substr(\(col), 1, length(?)) = ?", [v, v])
         case .endsWith: return ("substr(\(col), -length(?)) = ?", [v, v])
-        case .withinLast, .notWithinLast: return ("0", [])
+        case .withinLast, .notWithinLast, .isExactly, .isBefore, .isAfter: return ("0", [])
         }
+    }
+
+    /// A date part's text (see `SmartField.DatePart`) as SQL, from the message's Date (else its arrival),
+    /// in the sender's time zone (when known, else this Mac's) or, `local`, this Mac's.
+    static func dateText(_ part: SmartField.DatePart, local: Bool) -> String {
+        let date = "coalesce(m.sentAt, m.receivedAt)"
+        let localOffset = "(CAST(strftime('%s', \(date), 'unixepoch', 'localtime') AS INTEGER) - CAST(\(date) AS INTEGER))"
+        let offset = local ? localOffset : "coalesce(m.sentZone * 60, \(localOffset))"
+        let shifted = "(\(date) + \(offset))"
+        let zone = "printf('%s%02d%02d', CASE WHEN \(offset) < 0 THEN '-' ELSE '+' END, abs(\(offset)) / 3600, abs(\(offset)) % 3600 / 60)"
+        func format(_ f: String) -> String { "strftime('\(f)', \(shifted), 'unixepoch')" }
+        return switch part {
+        case .day: format("%Y-%m-%d")
+        case .month: format("%Y-%m")
+        case .year: format("%Y")
+        case .hour: format("%Y-%m-%d %H")
+        case .time: format("%H:%M:%S")
+        case .zone: zone
+        case .formatted: "(\(format("%Y-%m-%d %H:%M:%S")) || ' ' || \(zone))"
+        }
+    }
+
+    /// The period a date value names, in this Mac's time zone: a year ("2024"), month ("2024-03") or day
+    /// ("2024-03-01"), also day first ("01-03-2024", "03-2024"), with "-", "/" or "." between.
+    public static func datePeriod(_ value: String) -> (start: Date, end: Date)? {
+        let numbers = value.split(whereSeparator: { "-/. ".contains($0) }).map(String.init)
+        guard (1...3).contains(numbers.count), numbers.allSatisfy({ Int($0) != nil }) else { return nil }
+        let ordered = numbers.first!.count == 4 ? numbers : numbers.last!.count == 4 ? numbers.reversed() : []
+        guard let year = ordered.first.flatMap(Int.init), ordered.first?.count == 4 else { return nil }
+        var parts = DateComponents(year: year, month: 1, day: 1)
+        let unit: Calendar.Component
+        switch ordered.count {
+        case 1: unit = .year
+        case 2: parts.month = Int(ordered[1]); unit = .month
+        default: parts.month = Int(ordered[1]); parts.day = Int(ordered[2]); unit = .day
+        }
+        let calendar = Calendar.current
+        guard (1...12).contains(parts.month ?? 1), (1...31).contains(parts.day ?? 1), let start = calendar.date(from: parts),
+            calendar.component(.day, from: start) == parts.day ?? 1,  // not 31 February
+            let end = calendar.date(byAdding: unit, value: 1, to: start)
+        else { return nil }
+        return (start, end)
     }
 
     private func rule(
@@ -599,6 +676,10 @@ extension MailStore {
                 let (test, args) = Self.textTest("k.keyword", op, value, options)
                 return ("\(not)EXISTS (SELECT 1 FROM message_keyword k WHERE k.messageId = m.id AND \(test))", args)
             default:
+                if let (part, local) = field.datePart {
+                    let (test, args) = Self.textTest(Self.dateText(part, local: local), op, value, options)
+                    return ("\(not)(\(test))", args)
+                }
                 let (test, args) = Self.textTest("m.subject", op, value, options)
                 return ("\(not)(\(test))", args)
             }
@@ -606,9 +687,22 @@ extension MailStore {
             guard let status = SmartStatus(rawValue: value) else { return ("1", []) }
             return ("\(not)(\(status.sql))", [])
         case .days:
-            let days = Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
-            let column = field == .sent ? "coalesce(m.sentAt, m.receivedAt)" : "m.receivedAt"
-            return ("\(not)(\(column) >= ?)", [Date().timeIntervalSince1970 - days * 86_400])
+            let column = field == .received ? "m.receivedAt" : "coalesce(m.sentAt, m.receivedAt)"
+            switch op {
+            case .exists, .notExists:  // a Date header (a message always arrived)
+                return field == .received ? ("\(not)1", []) : ("\(not)(m.sentAt IS NOT NULL)", [])
+            case .isExactly, .isBefore, .isAfter:
+                guard let period = Self.datePeriod(value) else { return ("0", []) }
+                let (start, end) = (period.start.timeIntervalSince1970, period.end.timeIntervalSince1970)
+                return switch op {
+                case .isBefore: ("\(column) < ?", [start])
+                case .isAfter: ("\(column) >= ?", [end])
+                default: ("(\(column) >= ? AND \(column) < ?)", [start, end])
+                }
+            default:
+                let days = Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
+                return ("\(not)(\(column) >= ?)", [Date().timeIntervalSince1970 - days * 86_400])
+            }
         case .mailbox:
             return ("1", [])  // handled by `sql`, which knows the context
         case .account:
@@ -873,6 +967,8 @@ extension MailStore {
                 SELECT DISTINCT k.keyword AS v FROM message m JOIN message_keyword k ON k.messageId = m.id
                 WHERE \(filter) ORDER BY v COLLATE NOCASE LIMIT ?
                 """
+        } else if let (part, local) = field.datePart {
+            sql = "SELECT DISTINCT \(Self.dateText(part, local: local)) AS v FROM message m WHERE \(filter) ORDER BY v DESC LIMIT ?"
         } else if field == .subject {
             sql = "SELECT DISTINCT m.subject AS v FROM message m WHERE m.subject <> '' AND \(filter) ORDER BY v COLLATE NOCASE LIMIT ?"
         } else {

@@ -77,8 +77,18 @@ final class FieldMenu: NSObject {
             menu.addItem(parent(header.title, parts(header), id: "field|\(SmartField.address(header, .all).rawValue)"))
         }
         menu.addItem(choice("Subject", "field|\(SmartField.subject.rawValue)"))
-        menu.addItem(parent("Date", [choice("Received", "field|\(SmartField.received.rawValue)"),
-                                     choice("Sent", "field|\(SmartField.sent.rawValue)")]))
+        // MailMate's Date: No Specifier (the Date header), » Local ▸ and the parts; then when it arrived.
+        func dateParts(local: Bool) -> [NSMenuItem] {
+            // » Local has no Zone, as MailMate's: it would always be this Mac's.
+            SmartField.DatePart.allCases.filter { !local || $0 != .zone }
+                .map { choice($0.title, "field|\(SmartField.datePart($0, local: local).rawValue)") }
+        }
+        let local = [choice("No Specifier", "field|\(SmartField.dateLocal.rawValue)"), .separator()] + dateParts(local: true)
+        menu.addItem(parent("Date", [choice("No Specifier", "field|\(SmartField.date.rawValue)"), .separator(),
+                                     parent("\u{00BB} Local", local, id: "field|\(SmartField.dateLocal.rawValue)")]
+                                     + dateParts(local: false)
+                                     + [.separator(), choice("Received", "field|\(SmartField.received.rawValue)")],
+                            id: "field|\(SmartField.date.rawValue)"))
         menu.addItem(choice("Filename", "field|\(SmartField.filename.rawValue)"))
         menu.addItem(.separator())
         menu.addItem(choice("Tags/Keywords", "field|\(SmartField.keyword.rawValue)"))
