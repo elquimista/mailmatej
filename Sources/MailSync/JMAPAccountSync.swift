@@ -467,7 +467,7 @@ public actor JMAPAccountSync {
             struct DateHeader: Decodable {
                 let id: String
                 let date: String?
-                enum CodingKeys: String, CodingKey { case id, date = "header:Date:asText" }
+                enum CodingKeys: String, CodingKey { case id, date = "header:Date:asRaw" }
             }
             let list = try await client.send(request).decode(GetResponse<DateHeader>.self, get).list
             var zones = Dictionary(uniqueKeysWithValues: missing.map { ($0, 0) })

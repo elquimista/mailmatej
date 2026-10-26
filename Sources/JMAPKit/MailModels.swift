@@ -51,7 +51,9 @@ public struct Email: Decodable, Sendable {
     public let ccGroups: [EmailAddressGroup]?
     public let subject: String?
     public let sentAt: Date?
-    /// The Date header as written ("Mon, 26 Oct 2026 09:27:08 +0200"), for the sender's time zone.
+    /// The Date header as written (" Mon, 26 Oct 2026 09:27:08 +0200"), for the sender's time zone.
+    /// Raw: the Text form is only allowed for unstructured headers (RFC 8621 §4.1.2), and Fastmail
+    /// refuses the whole request over it.
     public let dateHeader: String?
     public let hasAttachment: Bool
     public let preview: String?
@@ -62,7 +64,7 @@ public struct Email: Decodable, Sendable {
         "messageId", "inReplyTo", "references", "sender", "from", "to", "cc", "bcc", "replyTo",
         "subject", "sentAt", "hasAttachment", "preview", groupedTo, groupedCc, dateHeaderProperty,
     ]
-    public static let dateHeaderProperty = "header:Date:asText"
+    public static let dateHeaderProperty = "header:Date:asRaw"
     public static let groupedTo = "header:To:asGroupedAddresses"
     public static let groupedCc = "header:Cc:asGroupedAddresses"
 
@@ -70,7 +72,7 @@ public struct Email: Decodable, Sendable {
         case id, blobId, threadId, mailboxIds, keywords, size, receivedAt, messageId, inReplyTo, references
         case sender, from, to, cc, bcc, replyTo, subject, sentAt, hasAttachment, preview
         case toGroups = "header:To:asGroupedAddresses", ccGroups = "header:Cc:asGroupedAddresses"
-        case dateHeader = "header:Date:asText"
+        case dateHeader = "header:Date:asRaw"
     }
 }
 
