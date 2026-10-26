@@ -720,7 +720,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
         func debugContextMenu(row: Int, run: String?) -> [String] {
             let id = row < list.ids.count ? list.ids[row] : -1
-            return list.debugContextMenu(row: row, run: run) + ["message \(id)"]
+            let before = list.selectedIDs
+            let items = list.debugContextMenu(row: row, run: run)
+            let seen = (try? model.store.rows(ids: [id]).first?.isSeen).flatMap { $0 }
+            return items + ["message \(id)", "selected before \(before) after \(list.selectedIDs)", "seen \(seen.map(String.init) ?? "-")"]
         }
 
         /// Copies the row's message into its account's mailbox with this role too, as a rule's Copy does.
@@ -847,9 +850,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         if item.action == #selector(toggleThreads(_:)) { item.state = showsThreads ? .on : .off }
         // While text is being typed, keys such as ⌫ belong to the text, not the menu.
         let editing = window?.firstResponder is NSText
-        let ids = targetIDs
+        let ids = menuIDs(item)  // a context menu's own messages (a right-clicked one may not be selected)
         switch item.action {
-        case #selector(archiveMessages(_:)), #selector(junkMessages(_:)), #selector(deleteMessages(_:)),
+        case #selector(archiveMessages(_:)), #selector(junkMessages(_:)), #selector(notJunkMessages(_:)), #selector(deleteMessages(_:)),
             #selector(moveToMailbox(_:)), #selector(flagMessages(_:)), #selector(unflagMessages(_:)):
             return !editing && !ids.isEmpty
         case #selector(toggleReadState(_:)):
@@ -1285,9 +1288,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.compose(kind, messageId: ids[0], window: window)
     }
 
-    @objc func archiveMessages(_ sender: Any?) { moveAway(.archive) }
-    @objc func junkMessages(_ sender: Any?) { moveAway(.junk) }
-    @objc func notJunkMessages(_ sender: Any?) { moveAway(.notJunk) }
+    @objc func archiveMessages(_ sender: Any?) { moveAway(.archive, ids: menuIDs(sender)) }
+    @objc func junkMessages(_ sender: Any?) { moveAway(.junk, ids: menuIDs(sender)) }
+    @objc func notJunkMessages(_ sender: Any?) { moveAway(.notJunk, ids: menuIDs(sender)) }
+
+    /// The messages a context menu item acts on (the right-clicked one, or the selection it's in), else
+    /// the usual targets.
+    private func menuIDs(_ sender: Any?) -> [Int64] {
+        (sender as? NSMenuItem)?.representedObject as? [Int64] ?? targetIDs
+    }
     @objc func deleteMessages(_ sender: Any?) { moveAway(.delete) }
     @objc func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
     @objc func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
@@ -1304,7 +1313,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     /// MailMate's message context menu: Move to Archive, Move to Junk (Move Out of Junk when every
-    /// message is in Junk) and Move to Mailbox…, acting on the selection.
+    /// message is in Junk) and Move to Mailbox…, acting on `ids` (the right-clicked message, or the
+    /// selection it's in).
     private func addMessageItems(to menu: NSMenu, for ids: [Int64]) {
         let inJunk = (try? model.store.messageIDs(ids, inRole: "junk")) ?? []
         let allJunk = !ids.isEmpty && ids.allSatisfy(inJunk.contains)
@@ -1313,7 +1323,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             allJunk ? ("Move Out of Junk", #selector(notJunkMessages(_:))) : ("Move to Junk", #selector(junkMessages(_:))),
             ("Move to Mailbox…", #selector(moveToMailbox(_:))),
         ] {
-            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = ids
         }
         if let remove = removeFromMailboxItem(for: ids) { menu.addItem(remove) }
     }
@@ -1353,8 +1365,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
-    private func moveAway(_ action: AppModel.MessageAction) {
-        let ids = targetIDs
+    private func moveAway(_ action: AppModel.MessageAction, ids: [Int64]? = nil) {
+        let ids = ids ?? targetIDs
         selectNextAfterMoving(ids)
         perform(action, on: ids)
     }
@@ -1423,7 +1435,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: \(leaving.count) rows left the list at once") }
         #endif
         let before = list.selectedIDs
-        list.setIDs(list.ids.filter { !leaving.contains($0) }, selecting: next.map { [$0] } ?? [], scroll: .keepPosition)
+        // The next message when the selection itself went; else the selection stays (a right-clicked
+        // message moved away from outside it, say).
+        let kept = before.filter { !leaving.contains($0) }
+        let selecting = next.map { [$0] } ?? kept
+        list.setIDs(list.ids.filter { !leaving.contains($0) }, selecting: selecting, scroll: .keepPosition)
         if list.selectedIDs != before {  // the message pane follows the selection, as after a reload
             messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: list.selectedID)
@@ -1752,12 +1768,12 @@ extension MainWindowController {
     /// v: moves the selected messages to a mailbox (a Unified one moves each into its account's); g then l:
     /// shows a mailbox. Lists as MailMate's picker does: Unified mailboxes, then each account's mailboxes
     /// alphabetically (recently chosen ones first, see `MailboxPicker`).
-    fileprivate func pickMailbox(move: Bool) {
+    fileprivate func pickMailbox(move: Bool, ids: [Int64]? = nil) {
         guard let window else { return }
         let roots = SidebarViewController.buildTree(model: model)
         let boxes = (try? model.store.mailboxes()) ?? []
         let boxByID = Dictionary(boxes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let ids = targetIDs
+        let ids = ids ?? targetIDs
         let accounts = Set(((try? model.store.refs(ids: ids)) ?? []).map(\.accountId))
         if move && accounts.isEmpty { return NSSound.beep() }
 
@@ -1816,17 +1832,16 @@ extension MainWindowController {
                 onChoose: { [weak self] choice in
                     guard let self, let scope = choice.node.scope else { return }
                     switch scope {
-                    case .mailbox(let id): self.move(targetIDs, toMailboxId: id)
-                    case .role("archive"): moveAway(.archive)
-                    case .role("junk"): moveAway(.junk)
-                    case .role("trash"): moveAway(.delete)
-                    case .role(let role): moveAway(.moveToRole(role))
+                    case .mailbox(let id): self.move(ids, toMailboxId: id)
+                    case .role("archive"): moveAway(.archive, ids: ids)
+                    case .role("junk"): moveAway(.junk, ids: ids)
+                    case .role("trash"): moveAway(.delete, ids: ids)
+                    case .role(let role): moveAway(.moveToRole(role), ids: ids)
                     default: NSSound.beep()
                     }
                 },
                 onCreate: { [weak self] name, parent in
                     guard let self, case .mailbox(let parentId)? = parent.node.scope else { return }
-                    let ids = targetIDs
                     model.moveToNewMailbox(named: name, inside: parentId, messages: ids) { [weak self] action in
                         guard case .move(let created) = action else { return }
                         self?.move(ids, toMailboxId: created)
@@ -1923,7 +1938,7 @@ extension MainWindowController {
 
 /// The Message menu's commands that aren't toolbar buttons, as MailMate has them.
 extension MainWindowController {
-    @objc func moveToMailbox(_ sender: Any?) { pickMailbox(move: true) }
+    @objc func moveToMailbox(_ sender: Any?) { pickMailbox(move: true, ids: menuIDs(sender)) }
     @objc func goToMailbox(_ sender: Any?) { pickMailbox(move: false) }
 
     @objc func nextMessage(_ sender: Any?) { moveSelection(down: true, extending: false) }

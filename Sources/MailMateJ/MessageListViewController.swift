@@ -531,12 +531,10 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private func fillContextMenu(_ menu: NSMenu, row: Int) {
         menu.removeAllItems()
         guard row >= 0, row < ids.count else { return }
-        // The menu acts on the selection: a right-click outside it selects the clicked message first.
-        tableView.window?.makeFirstResponder(tableView)
-        if !tableView.selectedRowIndexes.contains(row) {
-            tableView.selectRowIndexes([row], byExtendingSelection: false)
-        }
-        addContextItems?(menu, selectedIDs)
+        // As in MailMate (and macOS lists): inside the selection the menu acts on the selection; outside
+        // it, on the clicked message alone, which isn't selected (so it isn't opened, nor marked read).
+        let targets = tableView.selectedRowIndexes.contains(row) ? selectedIDs : [ids[row]]
+        addContextItems?(menu, targets)
         if menu.numberOfItems > 0 { menu.addItem(.separator()) }
         let item = menu.addItem(withTitle: "Show in Finder", action: #selector(showInFinderClicked(_:)), keyEquivalent: "")
         item.target = self
@@ -554,7 +552,10 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             if path.count > 1 { item = item?.submenu?.items.first { $0.title == path[1] } }
             if let item, let action = item.action { NSApp.sendAction(action, to: item.target, from: item) }
             return menu.items.map { item in
-                item.isSeparatorItem ? "—" : item.title + (item.submenu.map { " [" + $0.items.map(\.title).joined(separator: ", ") + "]" } ?? "")
+                // Greyed out as the menu would show it (its target's validation).
+                let off = item.action != nil && (item.target as? NSMenuItemValidation)?.validateMenuItem(item) == false
+                return item.isSeparatorItem ? "—" : item.title + (off ? " (off)" : "")
+                    + (item.submenu.map { " [" + $0.items.map(\.title).joined(separator: ", ") + "]" } ?? "")
             }
         }
     #endif
