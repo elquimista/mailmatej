@@ -89,8 +89,12 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         let contentController = NSViewController()
         contentController.view = content
         split.addSplitViewItem(NSSplitViewItem(viewController: contentController))
+        // The sidebar's width as last dragged, as MailMate remembers it; MailMate's 219 pt the first time.
+        let saved = UserDefaults.standard.object(forKey: "NSSplitView Subview Frames MailboxEditorSplit") != nil
+        split.splitView.autosaveName = "MailboxEditorSplit"
+        split.splitView.identifier = .init("MailboxEditorSplit")
         window.contentViewController = split
-        split.splitView.setPosition(219, ofDividerAt: 0)
+        if !saved { split.splitView.setPosition(219, ofDividerAt: 0) }
 
         let toolbar = NSToolbar(identifier: "MailboxEditor")
         toolbar.delegate = self
@@ -132,6 +136,13 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
 
         static func debugTab(count: Int) {
             if let window = shared?.window { debugLogTabOrder(in: window, count: count) }
+        }
+
+        /// Logs the editor's sidebar width, then drags its divider to `width` (if given), as the pointer would.
+        static func debugSidebarWidth(set width: CGFloat?) {
+            guard let split = shared?.window?.contentViewController as? NSSplitViewController else { return }
+            NSLog("MMJ editor sidebar width: \(split.splitViewItems[0].viewController.view.frame.width)")
+            if let width { split.splitView.setPosition(width, ofDividerAt: 0) }
         }
 
         static func debugPressAddRule() { (shared?.content.debugPane as? RulesPane)?.debugPressAdd() }

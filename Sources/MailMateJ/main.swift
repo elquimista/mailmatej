@@ -393,6 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_TAB"] ?? "") {
                         MailboxEditorWindowController.debugTab(count: count)  // Tab through the editor's fields
                     }
+                    if let width = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SIDEBAR"] {
+                        MailboxEditorWindowController.debugSidebarWidth(set: Double(width).map { CGFloat($0) })
+                        try? await Task.sleep(for: .milliseconds(500))
+                    }
                     if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_TYPE_ADD"] {
                         MailboxEditorWindowController.debugTypeThenAdd(text)  // type into a condition, then its ⊕
                         try? await Task.sleep(for: .milliseconds(500))
