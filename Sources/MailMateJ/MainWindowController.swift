@@ -305,7 +305,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                     // Found again on each load, so new mail in the conversation shows up.
                     let ids = kind == .thread
                         ? (try? store.threadMemberIDs(of: anchor)) ?? [anchor]
-                        : (try? store.correspondenceIDs(email: email ?? "", keeping: anchor)) ?? [anchor]
+                        : (try? store.correspondenceIDs(email: email ?? "", keeping: anchor, fromOnly: kind == .from)) ?? [anchor]
                     scope = .messages(ids)
                     // The message's own conversation shown whole (the thread result is just that one), so
                     // the message itself is in view to select, as MailMate opens it.
@@ -601,6 +601,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             switch kind {
             case "thread": showResult(.thread)
             case "people": showResult(.correspondents)
+            case "from": showResult(.from)
+            case "fromorto": showResult(.fromOrTo)
             case "collapse", "expand":  // the first row's thread, as its chevron does
                 if let id = list.ids.first, let row = list.threadRows[id] { toggle(row, collapse: kind == "collapse") }
             default: endResult()
@@ -870,6 +872,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case #selector(rootOfThread(_:)), #selector(lastOfThread(_:)):
             return !editing && showsThreads && activeList.selectedID != nil
         case #selector(quickLookAttachments(_:)), #selector(saveAttachments(_:)), #selector(openAttachments(_:)):
+            // They act on the message on screen: from a context menu, only when that's the one clicked.
+            if let menuIDs = item.representedObject as? [Int64], menuIDs != messageView.displayedMessageID.map({ [$0] }) {
+                return false
+            }
             return messageView.hasAttachments
         case #selector(goToMailbox(_:)):
             return !editing
@@ -1063,10 +1069,27 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     // MARK: Thread and correspondence results
 
     private enum ResultKind {
+        /// The toolbar's: the conversation, and all mail with the correspondent.
         case thread, correspondents
+        /// The context menu's Find Messages ▸ (MailMate's): mail from the correspondent, or from or to them.
+        case from, fromOrTo
 
-        var title: String { self == .thread ? "Same thread" : "Correspondence" }
-        var symbol: String { self == .thread ? "list.bullet.indent" : "list.bullet" }
+        func title(_ email: String?) -> String {
+            switch self {
+            case .thread: "Same thread"
+            case .correspondents: "Correspondence"
+            case .from: "From “\(email ?? "")”"
+            case .fromOrTo: "From or To “\(email ?? "")”"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .thread: "list.bullet.indent"
+            case .correspondents: "list.bullet"
+            case .from, .fromOrTo: "magnifyingglass"
+            }
+        }
     }
 
     /// The search result on show: what it finds for which message (and its correspondent), and the
@@ -1083,7 +1106,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     private var result: Result?
 
-    @objc func showThreadResult(_ sender: Any?) { showResult(.thread) }
+    @objc func showThreadResult(_ sender: Any?) { showResult(.thread, anchor: menuIDs(sender).first) }
 
     /// Choosing a mailbox while a result shows: the result goes (its bar too), without going back.
     private func leaveResult() {
@@ -1091,15 +1114,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         result = nil
         list.showResultBar(nil)
     }
-    @objc func showCorrespondentsResult(_ sender: Any?) { showResult(.correspondents) }
+    @objc func showCorrespondentsResult(_ sender: Any?) { showResult(.correspondents, anchor: menuIDs(sender).first) }
+    @objc private func showFromResult(_ sender: Any?) { showResult(.from, anchor: menuIDs(sender).first) }
+    @objc private func showFromOrToResult(_ sender: Any?) { showResult(.fromOrTo, anchor: menuIDs(sender).first) }
 
     /// As MailMate: the selected message's conversation, or all mail between it and its correspondent,
     /// across All Messages, under a bar naming the search; that message stays selected. Cancel (or
     /// Escape, or choosing a mailbox) goes back to the mailbox it came from.
-    private func showResult(_ kind: ResultKind) {
-        guard let anchor = targetIDs.first else { return NSSound.beep() }
+    private func showResult(_ kind: ResultKind, anchor: Int64? = nil) {
+        guard let anchor = anchor ?? targetIDs.first else { return NSSound.beep() }
         var email: String?
-        if kind == .correspondents {
+        if kind != .thread {
             guard let found = try? model.store.correspondent(messageId: anchor, myAddresses: model.myAddresses) else {
                 return NSSound.beep()
             }
@@ -1113,7 +1138,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         list.colorKey = nil
         selectAfterMove = nil
         pendingHistorySelection = anchor  // selected once the result has loaded
-        list.showResultBar(kind.title, symbol: kind.symbol) { [weak self] in self?.endResult() }
+        list.showResultBar(kind.title(email), symbol: kind.symbol) { [weak self] in self?.endResult() }
         reloadList(.scopeChanged)
     }
 
@@ -1278,12 +1303,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     @objc func newMessage(_ sender: Any?) { model.compose(.new, messageId: targetIDs.first, window: window) }
-    @objc func reply(_ sender: Any?) { compose(.reply) }
-    @objc func replyAll(_ sender: Any?) { compose(.replyAll) }
-    @objc func forward(_ sender: Any?) { compose(.forward) }
+    @objc func reply(_ sender: Any?) { compose(.reply, ids: menuIDs(sender)) }
+    @objc func replyAll(_ sender: Any?) { compose(.replyAll, ids: menuIDs(sender)) }
+    @objc func forward(_ sender: Any?) { compose(.forward, ids: menuIDs(sender)) }
 
-    private func compose(_ kind: ComposeKind) {
-        let ids = targetIDs
+    private func compose(_ kind: ComposeKind, ids: [Int64]) {
         guard ids.count == 1 else { return NSSound.beep() }
         model.compose(kind, messageId: ids[0], window: window)
     }
@@ -1297,37 +1321,71 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private func menuIDs(_ sender: Any?) -> [Int64] {
         (sender as? NSMenuItem)?.representedObject as? [Int64] ?? targetIDs
     }
-    @objc func deleteMessages(_ sender: Any?) { moveAway(.delete) }
+    @objc func deleteMessages(_ sender: Any?) { moveAway(.delete, ids: menuIDs(sender)) }
     @objc func markRead(_ sender: Any?) { perform(.markRead, on: targetIDs) }
     @objc func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
-    @objc func flagMessages(_ sender: Any?) { perform(.flag, on: targetIDs) }
-    @objc func unflagMessages(_ sender: Any?) { perform(.unflag, on: targetIDs) }
+    @objc func flagMessages(_ sender: Any?) { perform(.flag, on: menuIDs(sender)) }
+    @objc func unflagMessages(_ sender: Any?) { perform(.unflag, on: menuIDs(sender)) }
     /// Message → Mark as Unread (Mark as Read when every selected message is unread).
     @objc func toggleReadState(_ sender: Any?) {
-        let rows = (try? model.store.rows(ids: targetIDs)) ?? []
-        perform(rows.contains(where: \.isSeen) ? .markUnread : .markRead, on: targetIDs)
+        let ids = menuIDs(sender)
+        let rows = (try? model.store.rows(ids: ids)) ?? []
+        perform(rows.contains(where: \.isSeen) ? .markUnread : .markRead, on: ids)
     }
     @objc func toggleFlag(_ sender: Any?) {
         let ids = targetIDs
         perform(allFlagged(ids) ? .unflag : .flag, on: ids)
     }
 
-    /// MailMate's message context menu: Move to Archive, Move to Junk (Move Out of Junk when every
-    /// message is in Junk) and Move to Mailbox…, acting on `ids` (the right-clicked message, or the
-    /// selection it's in).
+    /// MailMate's message context menu: its Message menu without the moving-around groups and Go to
+    /// Mailbox…, with Find Messages ▸ first, for the commands MailMateJ has. Every item acts on `ids`
+    /// (the right-clicked message, or the selection it's in).
     private func addMessageItems(to menu: NSMenu, for ids: [Int64]) {
-        let inJunk = (try? model.store.messageIDs(ids, inRole: "junk")) ?? []
-        let allJunk = !ids.isEmpty && ids.allSatisfy(inJunk.contains)
-        for (title, action) in [
-            ("Move to Archive", #selector(archiveMessages(_:))),
-            allJunk ? ("Move Out of Junk", #selector(notJunkMessages(_:))) : ("Move to Junk", #selector(junkMessages(_:))),
-            ("Move to Mailbox…", #selector(moveToMailbox(_:))),
-        ] {
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+        func item(_ title: String, _ action: Selector) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.representedObject = ids
+            return item
         }
-        if let remove = removeFromMailboxItem(for: ids) { menu.addItem(remove) }
+        // MailMate's Find Messages ▸ for the message's correspondent (its sender, or for mail I sent, its
+        // recipient), named in the titles.
+        var findGroup: [NSMenuItem] = []
+        if let first = ids.first, let email = try? model.store.correspondent(messageId: first, myAddresses: model.myAddresses) {
+            let find = NSMenu()
+            find.addItem(item(ResultKind.from.title(email), #selector(showFromResult(_:))))
+            find.addItem(item(ResultKind.fromOrTo.title(email), #selector(showFromOrToResult(_:))))
+            let findItem = NSMenuItem(title: "Find Messages", action: nil, keyEquivalent: "")
+            findItem.submenu = find
+            findGroup = [findItem]
+        }
+
+        let inJunk = (try? model.store.messageIDs(ids, inRole: "junk")) ?? []
+        let allJunk = !ids.isEmpty && ids.allSatisfy(inJunk.contains)
+        var actions = [
+            item("Reply", #selector(reply(_:))), item("Reply All", #selector(replyAll(_:))), item("Forward", #selector(forward(_:))),
+            item("Move to Archive", #selector(archiveMessages(_:))),
+            allJunk ? item("Move Out of Junk", #selector(notJunkMessages(_:))) : item("Move to Junk", #selector(junkMessages(_:))),
+            item("Move to Mailbox…", #selector(moveToMailbox(_:))),
+        ]
+        if let remove = removeFromMailboxItem(for: ids) { actions.append(remove) }
+        actions.append(item("Delete", #selector(deleteMessages(_:))))
+
+        let flags = NSMenu()
+        flags.addItem(item("Flag", #selector(flagMessages(_:))))
+        flags.addItem(item("Unflag", #selector(unflagMessages(_:))))
+        let flagItem = NSMenuItem(title: "Flag", action: nil, keyEquivalent: "")
+        flagItem.submenu = flags
+        let read = item("Mark as Unread", #selector(toggleReadState(_:)))  // its title follows the messages (validation)
+
+        let attachments = [
+            item("Save Attachments…", #selector(saveAttachments(_:))),
+            item("Quick Look Attachments…", #selector(quickLookAttachments(_:))),
+            item("Open Attachments", #selector(openAttachments(_:))),
+        ]
+        for (index, group) in [findGroup, actions, [flagItem, read], attachments].filter({ !$0.isEmpty }).enumerated() {
+            if index > 0 { menu.addItem(.separator()) }
+            group.forEach(menu.addItem)
+        }
     }
 
     /// Remove from Mailbox ▸ each mailbox the messages are in, for messages in several (a message in

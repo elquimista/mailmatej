@@ -1233,10 +1233,13 @@ public final class MailStore: Sendable {
     /// Mail exchanged with `email`, leaving out deleted messages (in Deleted Messages) as MailMate's
     /// Correspondence pane does, except `keeping` (the message it was opened for, wherever it is).
     public func correspondenceIDs(
-        email: String, via mine: String? = nil, sort: MessageSort = .newestFirst, limit: Int = 2000, keeping: Int64? = nil
+        email: String, via mine: String? = nil, sort: MessageSort = .newestFirst, limit: Int = 2000, keeping: Int64? = nil,
+        fromOnly: Bool = false
     ) throws -> [Int64] {
         try dbPool.read { db in
             let viaMine = mine == nil ? "" : " AND id IN (SELECT messageId FROM address WHERE email = ?)"
+            // `fromOnly`: mail `email` sent (MailMate's Find Messages ▸ From), not mail to it too.
+            let role = fromOnly ? " AND role = \(AddressRole.from.rawValue)" : ""
             var arguments: [any DatabaseValueConvertible] = [email.lowercased()]
             if let mine { arguments.append(mine.lowercased()) }
             arguments.append(keeping ?? -1)
@@ -1246,7 +1249,7 @@ public final class MailStore: Sendable {
                 sql: """
                     SELECT m.id FROM (
                         SELECT id, receivedAt, fromDisplay, sortSubject, size FROM message
-                        WHERE id IN (SELECT messageId FROM address WHERE email = ?)\(viaMine)
+                        WHERE id IN (SELECT messageId FROM address WHERE email = ?\(role))\(viaMine)
                           AND (id = ? OR id NOT IN (
                             SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
                             WHERE b.role = 'trash'))
