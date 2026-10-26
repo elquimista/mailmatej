@@ -493,6 +493,28 @@ import Testing
         #expect(try store.myAddresses().contains("support@other.com"))
     }
 
+    @Test func contentTypeConditionsTestTheMessagesParts() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "notifications@calendly.com", at: 100), message("2", from: "a@x.com", at: 200),
+        ])
+        let ids = try store.messageIDs(scope: .allMessages)  // newest first
+        try store.saveBody(messageId: ids[1], MessageBody(html: nil, text: "Invite"), parts: [
+            MessagePart(blobId: "c", cid: nil, type: "text/calendar", name: "invite.ics", size: 10),
+        ])
+        try store.saveBody(messageId: ids[0], MessageBody(html: nil, text: "Logo"), parts: [
+            MessagePart(blobId: "p", cid: nil, type: "image/png", name: nil, size: 10),
+        ])
+        func find(_ field: SmartField, _ op: SmartOperator, _ value: String) throws -> [Int64] {
+            try store.messageIDs(scope: .allMessages, search: .rule(field, op, value))
+        }
+        #expect(try find(.contentTypeSubtype, .is, "Calendar") == [ids[1]])
+        #expect(try find(.contentTypeType, .is, "image") == [ids[0]])
+        #expect(try find(.contentType, .is, "text/calendar") == [ids[1]])
+        #expect(try find(.contentTypeName, .endsWith, ".ics") == [ids[1]])
+        #expect(try find(.contentTypeSubtype, .isNot, "calendar") == [ids[0]])
+        #expect(try store.fieldValues(.contentTypeSubtype, sources: SmartSources()) == ["calendar", "png"])
+    }
+
     @Test func theFullNameIsTheIdentitiesName() throws {
         try store.replaceIdentities(accountId: "acc", [
             ("1", "Contact@x.com", "contact@x.com"), ("2", "", "me@example.com"), ("3", "Ada", "ada@x.com"),

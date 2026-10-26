@@ -213,6 +213,23 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     /// Fields matched in the search index (words, not exact strings): contains or doesn't.
     public var isFullText: Bool { [.body, .unquoted, .quoted, .headersOrUnquoted, .headersOrText].contains(self) }
     public static let filename = SmartField(rawValue: "filename")
+    /// MailMate's Content-Type header, of any of the message's parts kept (attachments, inline
+    /// pictures, calendar invites; not its text and HTML bodies): No Specifier is "text/calendar".
+    public static let contentType = SmartField(rawValue: "contentType")
+    public static let contentTypeType = SmartField(rawValue: "contentType.type")
+    public static let contentTypeSubtype = SmartField(rawValue: "contentType.subtype")
+    /// Its name parameter (the part's file name).
+    public static let contentTypeName = SmartField(rawValue: "contentType.name")
+    /// The SQL (on a part `p`) of a Content-Type field's value, for the Content-Type fields.
+    public var contentTypeColumn: String? {
+        switch self {
+        case .contentType: "p.type"
+        case .contentTypeType: "substr(p.type, 1, instr(p.type, '/') - 1)"
+        case .contentTypeSubtype: "substr(p.type, instr(p.type, '/') + 1)"
+        case .contentTypeName: "coalesce(p.name, '')"
+        default: nil
+        }
+    }
     /// MailMate's virtual header #Thread-Id: the thread's number (here its first message's id), so
     /// "is" finds the whole conversation as it is now, new replies included. What a thread result's
     /// Details shows; not in the field menu.
@@ -365,6 +382,10 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         case .headersOrUnquoted: return "Common Headers or Unquoted Text"
         case .headersOrText: return "Common Headers or Text"
         case .filename: return "Filename"
+        case .contentType: return "Content-Type"
+        case .contentTypeType: return "Content-Type \u{2023} Type"
+        case .contentTypeSubtype: return "Content-Type \u{2023} Subtype"
+        case .contentTypeName: return "Content-Type \u{2023} Name"
         case .threadId: return "\u{00BB} #Thread-Id"
         case .keyword: return "Tags/Keywords"
         case .status: return "Message is"  // with its status: "Message is Read"
@@ -771,6 +792,9 @@ extension MailStore {
                     return (op.isNegative ? "1" : "0", [])
                 }
                 return ("m.id \(not)IN (\(Self.placeholders(members.count)))", members)
+            case _ where field.contentTypeColumn != nil:
+                let (test, args) = Self.textTest(field.contentTypeColumn!, op, value, options)
+                return ("\(not)EXISTS (SELECT 1 FROM message_part p WHERE p.messageId = m.id AND \(test))", args)
             case .filename:
                 let (test, args) = Self.textTest("coalesce(p.name, '')", op, value, options)
                 return ("\(not)EXISTS (SELECT 1 FROM message_part p WHERE p.messageId = m.id AND p.name IS NOT NULL AND \(test))", args)
@@ -1059,6 +1083,11 @@ extension MailStore {
             sql = """
                 SELECT DISTINCT \(column) AS v FROM message m JOIN address a ON a.messageId = m.id
                 WHERE a.role IN (\(roles)) AND a.email <> '' AND \(filter) AND v <> '' ORDER BY v COLLATE NOCASE LIMIT ?
+                """
+        } else if let column = field.contentTypeColumn {
+            sql = """
+                SELECT DISTINCT lower(\(column)) AS v FROM message m JOIN message_part p ON p.messageId = m.id
+                WHERE \(filter) AND v <> '' ORDER BY v COLLATE NOCASE LIMIT ?
                 """
         } else if field == .filename {
             sql = """

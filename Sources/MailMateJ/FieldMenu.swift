@@ -101,6 +101,12 @@ final class FieldMenu: NSObject {
         menu.addItem(parent("\u{00BB} Source", [choice("No Specifier", "field|\(SmartField.account.rawValue)"), .separator(),
                                                choice("Mailbox", "field|\(SmartField.mailbox.rawValue)")],
                             id: "field|\(SmartField.account.rawValue)"))
+        // Content-Type, as MailMate lists it below » Source: the specifiers the parts kept can answer.
+        menu.addItem(parent("Content-Type", [choice("No Specifier", "field|\(SmartField.contentType.rawValue)"), .separator(),
+                                            choice("Name", "field|\(SmartField.contentTypeName.rawValue)"),
+                                            choice("Subtype", "field|\(SmartField.contentTypeSubtype.rawValue)"),
+                                            choice("Type", "field|\(SmartField.contentTypeType.rawValue)")],
+                            id: "field|\(SmartField.contentType.rawValue)"))
         prune(menu, enabled: enabled)
 
         // The pop-up shows the choice: the ticked top-level item, or a ticked copy first for one in a submenu.
