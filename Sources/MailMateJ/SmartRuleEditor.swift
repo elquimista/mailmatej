@@ -221,8 +221,13 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         row.plus.removeFromSuperview()
     }
 
+    /// Remakes every row's controls (after rows came or went). What's typed in a value field isn't kept
+    /// in its row as it's typed, so it's taken from the field first: otherwise the rows would come back
+    /// with their earlier values (⊕ left the row it copied as it was before the typing).
     private func rebuildAll() {
-        for row in flatten() { build(row) }
+        let rows = flatten()
+        for row in rows where !row.isCompound && row.op.takesValue && row.valueControl != nil { row.value = currentValue(row) }
+        for row in rows { build(row) }
         layoutRows()
     }
 
@@ -765,6 +770,18 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         }
 
         /// Clicks ⊕ on the root row (with ⌥ for a group) and types `text` into the new row's value.
+        /// Types `text` into the first condition's value (as typing does), clicks its ⊕, and logs every
+        /// condition's value.
+        func debugTypeThenAdd(_ text: String) {
+            guard let row = flatten().first(where: { !$0.isCompound && $0.valueControl is NSTextField }),
+                let field = row.valueControl as? NSTextField
+            else { return NSLog("MMJ add: no text condition") }
+            field.stringValue = text
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+            plusClicked(row.plus)
+            NSLog("MMJ add: values \(flatten().filter { !$0.isCompound }.map { ($0.valueControl as? NSTextField)?.stringValue ?? $0.value })")
+        }
+
         func debugAddRow(text: String) {
             plusClicked(root.plus)
             guard let row = root.children.first else { return }
