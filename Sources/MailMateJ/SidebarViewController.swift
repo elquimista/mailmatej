@@ -265,7 +265,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if let node = find(selectedKey, in: roots) ?? (previous == nil ? find("unified.inbox", in: roots) : nil) {
             var row = outline.row(forItem: node)
             if row < 0 {  // inside a collapsed row: open its ancestors
-                for ancestor in ancestors(of: node) { outline.expandItem(ancestor) }
+                reveal(node)
                 row = outline.row(forItem: node)
             }
             if row >= 0 {
@@ -360,7 +360,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         var row = outline.row(forItem: node)
         if row < 0 {
             // Inside a collapsed row: open its ancestors.
-            for ancestor in ancestors(of: node) { outline.expandItem(ancestor) }
+            reveal(node)
             row = outline.row(forItem: node)
         }
         guard row >= 0 else { return false }
@@ -376,6 +376,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         reload()
         if let node = selectedNode { onSelect?(node) }
     }
+
+    /// Opens the rows above a node to show it, without remembering them as opened: rows stay as the
+    /// user left them, so a mailbox the app selects itself (Inbox when the last one is gone, Go to Mailbox,
+    /// Back) doesn't reopen a row the user keeps closed at the next launch.
+    private func reveal(_ node: SidebarNode) {
+        revealing = true
+        defer { revealing = false }
+        for ancestor in ancestors(of: node) { outline.expandItem(ancestor) }
+    }
+
+    private var revealing = false
 
     private func expandRemembered(_ nodes: [SidebarNode]) {
         for node in nodes where expandedKeys.contains(node.key) {
@@ -852,6 +863,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
+        if revealing { return }  // opened to show a selection, not by the user
         expandedKeys.insert(node.key)
         UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
         if !isReloading { refreshStatusesAfterAnimation() }
