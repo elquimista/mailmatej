@@ -6,6 +6,10 @@ public struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendab
 
     public enum AuthKind: String, Codable, Sendable { case basic, bearer }
 
+    /// `kind` of a Gmail account (signed in with Google; its keychain secret is the refresh token).
+    public static let gmailKind = "gmail"
+    public var isGmail: Bool { kind == Self.gmailKind }
+
     public var id: String
     public var name: String
     public var kind: String

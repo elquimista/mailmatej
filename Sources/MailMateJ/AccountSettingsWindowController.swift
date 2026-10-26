@@ -1,9 +1,12 @@
 import AppKit
 import JMAPKit
+import GmailKit
 import MailStore
 
 /// "JMAP Account Settings": MailMate's IMAP Account Settings window for a JMAP account. JMAP both
 /// receives and sends, so one server section stands in for MailMate's IMAP and SMTP sections.
+/// "gmail.com" as the server makes it a Gmail account: no user name or password, Add opens Google's
+/// sign-in in the browser.
 ///
 /// Laid out with fixed frames at MailMate's positions (measured at 1x, y from the top of the content):
 /// labels right-aligned at 131 pt, fields from 143 pt, 306 pt wide (200 pt beside Port and Require SSL),
@@ -202,6 +205,13 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         descriptionField.stringValue = account.name
         fullNameField.stringValue = account.fullName
         emailField.stringValue = account.emailAddresses
+        if account.isGmail {
+            serverField.stringValue = "gmail.com"
+            serverField.isEnabled = false  // a Gmail account stays one
+            addButton.title = "Save"
+            updateAddButton()
+            return
+        }
         if let url = URLComponents(string: account.sessionURL) {
             let path = url.path == "/.well-known/jmap" ? "" : url.path
             serverField.stringValue = (url.host ?? "") + path
@@ -242,7 +252,26 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         return server.contains("fastmail.com")
     }
 
+    /// Gmail, signed in with Google rather than a password.
+    private var isGmail: Bool {
+        let server = serverField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        return ["gmail.com", "googlemail.com", "google.com", "imap.gmail.com"].contains(server)
+    }
+
     private func updateAddButton() {
+        let gmail = isGmail
+        // Gmail needs neither: Google's sign-in page asks.
+        for control in [userField, passwordField, portField] as [NSTextField] where control.isEnabled == gmail {
+            control.isEnabled = !gmail && (control !== portField || portCheckbox.state == .on)
+        }
+        portCheckbox.isEnabled = !gmail
+        sslCheckbox.isEnabled = !gmail
+        passwordField.placeholderString = gmail ? "Signs in with Google" : editing == nil ? "" : "Unchanged"
+        if gmail, editing == nil { addButton.title = "Sign In…" } else if editing == nil { addButton.title = "Add" }
+        if gmail || editing?.isGmail == true {
+            addButton.isEnabled = !isAdding
+            return
+        }
         let server = !serverField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty
         let user = isFastmail || !userName.isEmpty
         let port = portCheckbox.state == .off || Int(portField.stringValue).map { (1...65535).contains($0) } == true
@@ -274,6 +303,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
     }
 
     @objc private func add(_ sender: Any?) {
+        if isGmail || editing?.isGmail == true { return addGmail() }
         guard let url = sessionURL else {
             return showError("That doesn’t look like a server address.")
         }
@@ -315,6 +345,39 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         }
     }
 
+    /// Adds (or saves) a Gmail account: the browser opens Google's sign-in for the first address typed.
+    private func addGmail() {
+        let draft = AccountDraft(
+            name: descriptionField.stringValue.trimmingCharacters(in: .whitespaces),
+            sessionURL: URL(string: "https://gmail.googleapis.com/gmail/v1/users/me")!, username: "", authKind: .bearer,
+            secret: "", fullName: fullNameField.stringValue.trimmingCharacters(in: .whitespaces),
+            emailAddresses: emailField.stringValue.trimmingCharacters(in: .whitespaces))
+        isAdding = true
+        progress.startAnimation(nil)
+        updateAddButton()
+        Task {
+            defer {
+                isAdding = false
+                progress.stopAnimation(nil)
+                updateAddButton()
+            }
+            do {
+                if let editing {
+                    try await model.updateAccount(editing, with: draft)
+                } else {
+                    try await model.addGmailAccount(draft, loginHint: emailAddresses.first)
+                    NSApp.activate()  // back from the browser
+                }
+                close()
+            } catch GoogleOAuthError.cancelled {
+                NSApp.activate()
+            } catch {
+                NSApp.activate()
+                showError(AppModel.describe(error))
+            }
+        }
+    }
+
     @objc private func cancel(_ sender: Any?) { close() }
 
     private func showError(_ text: String) {
@@ -333,7 +396,8 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
             the user name if you leave User Name empty.
 
             JMAP Server is the server’s host name, e.g. mail.example.com. For Fastmail, enter fastmail.com \
-            and an API token (Settings → Privacy & Security → API tokens) as the password.
+            and an API token (Settings → Privacy & Security → API tokens) as the password. For Gmail, enter \
+            gmail.com: Sign In opens Google’s sign-in in your browser.
             """)
         text.preferredMaxLayoutWidth = 320
         let controller = NSViewController()

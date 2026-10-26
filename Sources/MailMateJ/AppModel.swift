@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 import JMAPKit
 import MailStore
 import MailSync
+import GmailKit
 import os
 
 extension Notification.Name {
@@ -153,7 +154,69 @@ final class AppModel {
     /// Saves edits to an account. If the server, user name, sign-in kind or password (`draft.secret`,
     /// empty to keep it) changed, they're checked against the server first, and the account reconnects
     /// with them; its messages stay. A server answering for a different account is refused.
+    // MARK: Gmail
+
+    /// The Google OAuth client baked into the app at build time (see scripts/bundle.sh); in debug
+    /// builds MMJ_GOOGLE_OAUTH_JSON can point at the client file instead.
+    nonisolated static var googleClient: GoogleClient? {
+        #if DEBUG
+            if let path = ProcessInfo.processInfo.environment["MMJ_GOOGLE_OAUTH_JSON"],
+                let data = FileManager.default.contents(atPath: path)
+            {
+                return GoogleClient(json: data)
+            }
+        #endif
+        guard let id = Bundle.main.object(forInfoDictionaryKey: "MMJGoogleClientID") as? String, !id.isEmpty else { return nil }
+        let secret = Bundle.main.object(forInfoDictionaryKey: "MMJGoogleClientSecret") as? String
+        return GoogleClient(id: id, secret: secret?.isEmpty == false ? secret : nil)
+    }
+
+    enum GmailError: LocalizedError {
+        case noClient
+        case alreadyAdded(String)
+        var errorDescription: String? {
+            switch self {
+            case .noClient:
+                "This build has no Google sign-in set up. Put the OAuth client file from Google Cloud at "
+                    + "google-oauth-client.json in the project and build again (see the README)."
+            case .alreadyAdded(let email): "\(email) is already added."
+            }
+        }
+    }
+
+    /// Adds a Gmail account: Google's sign-in opens in the browser (`loginHint` preselects the address),
+    /// then the account is saved with its refresh token in the keychain. It doesn't sync yet.
+    @discardableResult
+    func addGmailAccount(_ draft: AccountDraft, loginHint: String?) async throws -> AccountRecord {
+        guard let client = Self.googleClient else { throw GmailError.noClient }
+        let tokens = try await GoogleOAuth.authorize(client: client, loginHint: loginHint) { url in
+            Task { @MainActor in NSWorkspace.shared.open(url) }
+        }
+        let source = GoogleTokenSource(
+            client: client, refreshToken: tokens.refreshToken, accessToken: tokens.accessToken, expiry: tokens.expiry)
+        let email = try await GmailClient(tokens: source).profile().emailAddress.lowercased()
+        if try store.accounts().contains(where: { $0.isGmail && $0.username == email }) { throw GmailError.alreadyAdded(email) }
+        let record = AccountRecord(
+            name: draft.name.isEmpty ? email : draft.name, kind: AccountRecord.gmailKind,
+            sessionURL: "https://gmail.googleapis.com/gmail/v1/users/me", username: email, authKind: .bearer,
+            remoteAccountId: email, fullName: draft.fullName,
+            emailAddresses: draft.emailAddresses.isEmpty ? email : draft.emailAddresses)
+        try Keychain.set(tokens.refreshToken, account: record.id)
+        try store.save(record)
+        // Shown in the sidebar at once (it has no mailboxes until Gmail sync exists).
+        refreshNow()
+        return record
+    }
+
     func updateAccount(_ old: AccountRecord, with draft: AccountDraft) async throws {
+        if old.isGmail {  // Only the local details change: the sign-in stays.
+            var record = old
+            record.name = draft.name.isEmpty ? old.name : draft.name
+            record.fullName = draft.fullName
+            record.emailAddresses = draft.emailAddresses
+            try store.save(record)
+            return refreshNow()
+        }
         var record = old
         record.name = draft.name.isEmpty ? old.name : draft.name
         record.fullName = draft.fullName

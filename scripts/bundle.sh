@@ -31,6 +31,20 @@ if [ -n "${MMJ_VERSION:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MMJ_VERSION" \
     -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" "$APP/Contents/Info.plist"
 fi
+# The Google OAuth client for Gmail accounts: the JSON file Google Cloud downloads for a "Desktop app"
+# client, at google-oauth-client.json (not in git) or MMJ_GOOGLE_OAUTH_JSON. Without it, adding a Gmail
+# account says so.
+GOOGLE_JSON="${MMJ_GOOGLE_OAUTH_JSON:-google-oauth-client.json}"
+if [ -f "$GOOGLE_JSON" ]; then
+  GOOGLE_ID="$(plutil -extract installed.client_id raw -o - "$GOOGLE_JSON" 2>/dev/null || true)"
+  GOOGLE_SECRET="$(plutil -extract installed.client_secret raw -o - "$GOOGLE_JSON" 2>/dev/null || true)"
+  if [ -n "$GOOGLE_ID" ]; then
+    /usr/libexec/PlistBuddy -c "Add :MMJGoogleClientID string $GOOGLE_ID" \
+      -c "Add :MMJGoogleClientSecret string $GOOGLE_SECRET" "$APP/Contents/Info.plist"
+  else
+    echo "warning: $GOOGLE_JSON has no installed.client_id (is it a Desktop app client?)" >&2
+  fi
+fi
 cp "Resources/$ICON.icns" "$APP/Contents/Resources/AppIcon.icns"
 for bundle in "$BIN"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"

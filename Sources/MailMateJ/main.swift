@@ -515,6 +515,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.addAccount(nil)
                     windowController?.accountSettings?.debugAdd(spec)
                     try? await Task.sleep(for: .seconds(6))
+                    if let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_ACCOUNT"],
+                        let number = windowController?.accountSettings?.window?.windowNumber
+                    {
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(number)", path]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                    }
                     let added = (try? AppModel.shared.store.accounts())?.first { $0.name == "Dave (window test)" }
                     NSLog("MMJ account window: open=\(windowController?.accountSettings != nil) added=\(added.map { "\($0.sessionURL) user=\($0.username) fullName=\($0.fullName) emails=\($0.emailAddresses)" } ?? "no")")
                     NSLog("MMJ account window: my addresses include dave=\((try? AppModel.shared.store.myAddresses())?.contains("dave@mmj.test") ?? false)")

@@ -6,3 +6,5 @@ dev/stalwart/data/
 *.sqlite*
 .DS_Store
 .build-opt/
+# The Google OAuth client for Gmail (see README), kept out of the repository.
+google-oauth-client.json

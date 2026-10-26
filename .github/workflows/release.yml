@@ -5,6 +5,9 @@
 # certificate and its key) and MACOS_CERTIFICATE_PASSWORD secrets set, the app is signed with that
 # certificate, so it keeps its Team ID and the keychain doesn't ask again after updating. Without
 # them it is signed ad hoc.
+#
+# Gmail: with the GOOGLE_OAUTH_CLIENT_JSON secret (the Google Cloud client file's contents) the app
+# can sign in to Gmail accounts.
 name: Release
 
 on:
@@ -55,6 +58,16 @@ jobs:
 
       - name: Test
         run: swift test
+
+      - name: Add the Google sign-in client
+        env:
+          GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_OAUTH_CLIENT_JSON" ]; then
+            echo "::warning::No GOOGLE_OAUTH_CLIENT_JSON secret: the app can't add Gmail accounts."
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_OAUTH_CLIENT_JSON" > google-oauth-client.json
 
       - name: Build
         run: |

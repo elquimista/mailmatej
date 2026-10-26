@@ -351,6 +351,7 @@ public actor SyncCoordinator {
     // MARK: Private
 
     private func register(_ account: AccountRecord, push: Bool) {
+        guard !account.isGmail else { return }  // Gmail accounts don't sync yet
         do {
             let engine = try JMAPAccountSync(
                 account: account, credentials: try credentials(account), store: store, urlSession: urlSession)

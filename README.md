@@ -28,9 +28,30 @@ Add accounts with the toolbar button or **File → Add Account…**, which opens
 - **Stalwart / other JMAP**: the server's host name (autodiscovers via `/.well-known/jmap`; Port and Require SSL for anything unusual), user name and password.
 - **Fastmail**: `fastmail.com` as the server and an API token (Settings → Privacy & Security → API tokens) as the password.
 
+- **Gmail**: `gmail.com` as the server, then **Sign In…**: Google's sign-in opens in your browser. This needs a Google OAuth client built into the app (see [Gmail](#gmail)). Gmail accounts can be added, but don't sync yet.
+
 Double-click an account in the sidebar (or **Edit Account…** in its context menu) to change it; the password is kept unless a new one is typed. **Email Address(es)** takes `address`, `<address>` or `Name <address>`, comma-separated. Those addresses are the From choices, in that order; ones the server has no identity for are sent through the account's own identity. Their name is the account's **Full Name**, whatever name the server's identity has; a name given in Email Address(es) wins for its address.
 
 The two builds are separate apps: different bundle IDs, icons (a tilted postage stamp; Dev is orange with a DEV label) and data folders, `~/Library/Application Support/MailMateJ` and `…/MailMateJ Dev`. `MMJ_DATA_DIR` overrides the folder. Secrets are in the login keychain. The icons are drawn by `scripts/make-icon.swift`; regenerate them with `scripts/make-icons.sh`.
+
+### Gmail
+
+Gmail accounts sign in with Google (OAuth) and use the Gmail API. Google needs an OAuth client for the app, which you create once in Google Cloud. It's free.
+
+1. Open [console.cloud.google.com](https://console.cloud.google.com), sign in, and create a project (for example "MailMateJ").
+2. Go to **APIs & Services → Library**, find **Gmail API** and click **Enable**.
+3. Go to **Google Auth Platform** (APIs & Services → OAuth consent screen) and click **Get started**:
+   - App name "MailMateJ" and your address as the support email.
+   - Audience: **External**.
+   - Your address as the contact email. Accept the policy and click **Create**.
+4. Under **Data Access**, click **Add or remove scopes**. Under "Manually add scopes", enter `https://mail.google.com/`, click **Add to table**, then **Update** and **Save**.
+5. Under **Clients**, click **Create client**, choose **Desktop app**, name it and click **Create**. Download its JSON file and save it in this folder as `google-oauth-client.json`. Git ignores that file.
+6. Under **Audience**, click **Publish app** and confirm, so the status reads **In production**. While it says **Testing**, Google ends each sign-in after 7 days.
+7. Run `scripts/bundle.sh` (and `scripts/bundle.sh debug`). The client is built into the app from that file.
+
+Then add the account: **File → Add Account…**, `gmail.com` as the server, and **Sign In…**. Because the app isn't verified by Google, the sign-in page warns "Google hasn't verified this app". Click **Advanced → Go to MailMateJ (unsafe)**, then allow access. That's expected for a personal client. An unverified app can be used by at most 100 Google accounts in total, which includes friends using your build. The app keeps the sign-in (a refresh token) in the keychain.
+
+For releases built on GitHub, add the JSON file's contents as the repository secret `GOOGLE_OAUTH_CLIENT_JSON`. Google treats a desktop app's client secret as public, so shipping it inside the app is normal.
 
 ### Keychain prompts after rebuilding
 

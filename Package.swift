@@ -17,6 +17,8 @@ let package = Package(
     targets: [
         // Protocol layer: JMAP core + mail. No UI, no storage.
         .target(name: "JMAPKit"),
+        // Gmail: signing in with Google (OAuth for installed apps) and the Gmail API. No UI, no storage.
+        .target(name: "GmailKit"),
         // Local source of truth: SQLite schema, queries, raw .eml store.
         .target(
             name: "MailStore",
@@ -28,10 +30,11 @@ let package = Package(
             dependencies: ["JMAPKit", "MailStore", .product(name: "Markdown", package: "swift-markdown")]
         ),
         // The AppKit app.
-        .executableTarget(name: "MailMateJ", dependencies: ["MailSync", "MailStore", "JMAPKit"]),
+        .executableTarget(name: "MailMateJ", dependencies: ["MailSync", "MailStore", "JMAPKit", "GmailKit"]),
         // Headless sync tool for development and testing.
         .executableTarget(name: "mmj-sync", dependencies: ["MailSync", "MailStore", "JMAPKit"]),
         .testTarget(name: "JMAPKitTests", dependencies: ["JMAPKit"]),
+        .testTarget(name: "GmailKitTests", dependencies: ["GmailKit"]),
         .testTarget(name: "MailStoreTests", dependencies: ["MailStore"]),
         .testTarget(name: "MailSyncTests", dependencies: ["MailSync", "JMAPKit", "MailStore"]),
     ]
