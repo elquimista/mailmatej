@@ -493,6 +493,18 @@ import Testing
         #expect(try store.myAddresses().contains("support@other.com"))
     }
 
+    @Test func theFullNameIsTheIdentitiesName() throws {
+        try store.replaceIdentities(accountId: "acc", [
+            ("1", "Contact@x.com", "contact@x.com"), ("2", "", "me@example.com"), ("3", "Ada", "ada@x.com"),
+        ])
+        func names() throws -> [String: String] { Dictionary(uniqueKeysWithValues: try store.identities().map { ($0.email, $0.name) }) }
+        #expect(try names() == ["contact@x.com": "Contact@x.com", "me@example.com": "", "ada@x.com": "Ada"])  // no Full Name
+        var named = account
+        named.fullName = "SHS Home"
+        try store.save(named)
+        #expect(try names() == ["contact@x.com": "SHS Home", "me@example.com": "SHS Home", "ada@x.com": "SHS Home"])
+    }
+
     @Test func archiveFolderWithoutRoleIsUsed() throws {
         func box(_ id: String, _ name: String, role: String? = nil, parent: String? = nil) -> IncomingMailbox {
             IncomingMailbox(remoteId: id, parentRemoteId: parent, name: name, role: role, sortOrder: 0, totalEmails: 0, unreadEmails: 0)

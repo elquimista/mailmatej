@@ -131,13 +131,14 @@ public final class MailStore: Sendable {
     }
 
     private func allIdentities() throws -> [IdentityRecord] {
-        // In the accounts' order, then by address.
+        // In the accounts' order, then by address. The account's Full Name, when set, is the name,
+        // whatever the server's identity says (its name only when there's no Full Name).
         let rank = Dictionary(uniqueKeysWithValues: try accounts().enumerated().map { ($1.id, $0) })
         return try dbPool.read { db in
             try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT i.accountId, i.remoteId, CASE WHEN i.name = '' THEN a.fullName ELSE i.name END AS name, i.email
+                    SELECT i.accountId, i.remoteId, CASE WHEN a.fullName <> '' THEN a.fullName ELSE i.name END AS name, i.email
                     FROM identity i JOIN account a ON a.id = i.accountId
                     WHERE a.isEnabled ORDER BY i.email
                     """
