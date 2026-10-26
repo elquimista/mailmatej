@@ -298,7 +298,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let generation = loadGeneration
         let (store, sort) = (model.store, list.sort)
         let scope = shownScope
-        let search: String? = search.isEmpty ? nil : search
+        let search = searchCondition
         let (threaded, savedExpanded, savedOpened) = (showsThreads, expandedThreads, openedMessages)
         let result = self.result.map { ($0.kind, $0.anchor, $0.email, $0.opening) }
         let started = Date()
@@ -606,6 +606,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         /// Searches as typing in the search field and pressing Return would ("" clears it).
         func debugSearch(_ text: String) {
             if text.hasPrefix("@") { return _ = sidebar.select(key: String(text.dropFirst())) }  // "@key": choose a mailbox
+            // "!Details", "!Save", "!Cancel": the bar's buttons; "!+text": ⊕ on the conditions, the first one
+            // then "text"; "!name=X" / "!edit=X" / "!name": the name sheet's Save, Save and Edit…, Cancel.
+            if text.hasPrefix("!") {
+                let step = String(text.dropFirst())
+                if step.hasPrefix("+") { return searchEditor?.debugAddRow(text: String(step.dropFirst())) ?? () }
+                if step.hasPrefix("name=") { return MailboxNameSheet.debugFinish(name: String(step.dropFirst(5)), edit: false) }
+                if step.hasPrefix("edit=") { return MailboxNameSheet.debugFinish(name: String(step.dropFirst(5)), edit: true) }
+                if step == "name" { return MailboxNameSheet.debugFinish(name: nil, edit: false) }
+                return list.debugClickResultBar(step)
+            }
             searchField?.stringValue = text
             if let field = searchField { searchChanged(field) }
         }
@@ -623,7 +633,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         var debugListState: String {
-            "sidebar \(sidebar.selectedKey ?? "-") scope \(scopeTitle) rows \(list.ids.count) messages \(messageCount) selected \(list.selectedIDs) title \(window?.title ?? "") \(list.debugResultBar)"
+            "search \(searchCondition.map { String(describing: $0) } ?? "-") sheet \(MailboxNameSheet.debugIsShown) sidebar \(sidebar.selectedKey ?? "-") scope \(scopeTitle) rows \(list.ids.count) messages \(messageCount) selected \(list.selectedIDs) title \(window?.title ?? "") \(list.debugResultBar)"
         }
         /// Sorts the main list by a column, as a click on its header does ("unread", "flag", "date", ...).
         func debugShowProgress() { updateProgress() }
@@ -949,13 +959,24 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Set while a search selects All Messages in the sidebar (which doesn't end the search).
     private var movingForSearch = false
 
+    /// The search's conditions once Details has opened them (MailMate's "Custom Search"); nil while the
+    /// search is the field's text.
+    private var customSearch: SmartCondition?
+    private var searchEditor: SmartRuleEditor?
+    /// What the list is narrowed to: the custom search, or the field's text as Details would show it.
+    private var searchCondition: SmartCondition? { customSearch ?? .quickSearch(search) }
+    private var isSearching: Bool { !search.isEmpty || customSearch != nil }
+
     /// As MailMate: a search starts in All Messages, so the sidebar goes there, and the list's bar says
     /// what it finds ("Message contains “php”"); choosing another mailbox searches that one. Ending it
     /// (Cancel, Escape, emptying the field) stays in the mailbox chosen, or, still in the All Messages it
     /// went to, goes back to where it started. Within a thread or correspondence result it searches that.
+    /// Typing in the field replaces a custom search.
     private func applySearch(_ text: String) {
-        let starting = search.isEmpty && !text.isEmpty
+        let starting = !isSearching && !text.isEmpty
         search = text
+        customSearch = nil
+        searchEditor = nil
         guard result == nil else { return reloadList(.searchChanged) }
         if text.isEmpty {
             list.showResultBar(nil)
@@ -964,7 +985,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if let back, back != sidebar.selectedKey, sidebar.select(key: back) { return }  // reloads as it's chosen
             return reloadList(.searchChanged)
         }
-        list.showResultBar("Message contains “\(text)”", symbol: "magnifyingglass") { [weak self] in self?.clearSearch() }
+        showSearchBar()
         if starting, sidebar.selectedKey != "unified.all" {
             searchBack = sidebar.selectedKey
             movingForSearch = true
@@ -972,6 +993,66 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if sidebar.select(key: "unified.all") { return }  // reloads as it's chosen
         }
         reloadList(.searchChanged)
+    }
+
+    /// The search's bar: Details (until it has opened the conditions), Save, Cancel.
+    private func showSearchBar() {
+        let cancel: ResultBar.Button = ("Cancel", { [weak self] in self?.clearSearch() })
+        let save: ResultBar.Button = ("Save", { [weak self] in self?.saveSearch() })
+        if let searchEditor {
+            list.showResultBar("Custom Search", symbol: "magnifyingglass", buttons: [("Details", nil), save, cancel], editor: searchEditor)
+        } else {
+            list.showResultBar("Message contains “\(search)”", symbol: "magnifyingglass",
+                               buttons: [("Details", { [weak self] in self?.showSearchDetails() }), save, cancel])
+        }
+    }
+
+    /// MailMate's Details: the search as the condition it is (Common Headers or Unquoted Text contains
+    /// the text), in the bar, to change or add to; the list follows each change.
+    private func showSearchDetails() {
+        guard let condition = searchCondition else { return }
+        let editor = SmartRuleEditor(kind: .conditions, context: SmartRuleContext(model: model, editing: -1, mailboxKey: scope.key))
+        editor.inBar = true
+        editor.load(condition)
+        editor.onResize = { [weak self] in self?.list.resultBarResized() }
+        editor.onChange = { [weak self, weak editor] immediate in
+            guard let self, let editor, editor === searchEditor else { return }
+            searchEditTimer?.invalidate()
+            if immediate { return applySearchEdits() }
+            // Typing: once it pauses.
+            searchEditTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applySearchEdits() }
+            }
+        }
+        customSearch = condition
+        searchEditor = editor
+        showSearchBar()
+    }
+
+    private var searchEditTimer: Timer?
+
+    private func applySearchEdits() {
+        guard let searchEditor else { return }
+        customSearch = searchEditor.tree() ?? .compound(.all, [])
+        reloadList(.searchChanged)
+    }
+
+    /// MailMate's Save: asks for the mailbox's name, then keeps the search as a smart mailbox of the
+    /// mailbox searched, and shows it (Save and Edit… opens its editor too).
+    private func saveSearch() {
+        guard let window, let condition = searchEditor?.tree() ?? searchCondition else { return }
+        let sources = SmartSources(scopes: [scope.key])
+        MailboxNameSheet.ask(over: window, name: "Custom Search") { [weak self] name, edit in
+            guard let self, let id = model.createSmartMailbox(name: name, parentId: nil) else { return }
+            let root: SmartCondition = if case .compound = condition { condition } else { .compound(.all, [condition]) }
+            model.updateSmartMailbox(id: id, definition: SmartDefinition(sources: sources, condition: root))
+            searchBack = nil
+            clearSearch()
+            sidebar.reload()
+            let key = "smart.\(id)"
+            guard sidebar.select(key: key) else { return }
+            if edit { MailboxEditorWindowController.show(key: key, model: model, over: window, tab: .conditions) }
+        }
     }
 
     // MARK: Toolbar
@@ -1714,7 +1795,7 @@ extension MainWindowController {
         // Escape clears the search from anywhere in the window, as in MailMate (other text fields keep it
         // for cancelling their own editing).
         if let window, event.window === window, window.attachedSheet == nil, modifiers.isEmpty, event.keyCode == 53,
-            !search.isEmpty
+            isSearching
         {
             let editor = window.firstResponder as? NSText
             if editor == nil || editor?.delegate === searchField {
@@ -1724,7 +1805,7 @@ extension MainWindowController {
         }
         // With no search to clear, Escape ends a thread or correspondence result (as its Cancel does).
         if let window, event.window === window, window.attachedSheet == nil, modifiers.isEmpty, event.keyCode == 53,
-            search.isEmpty, result != nil, !(window.firstResponder is NSText)
+            !isSearching, result != nil, !(window.firstResponder is NSText)
         {
             endResult()
             return true

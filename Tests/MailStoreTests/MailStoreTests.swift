@@ -405,7 +405,7 @@ import Testing
         try store.deleteMessages(accountId: "acc", remoteIds: ["1"])
         #expect(try store.messageIDs(scope: .account("acc")).isEmpty)
         #expect(try store.correspondenceIDs(email: "a@x.com").isEmpty)
-        #expect(try store.messageIDs(scope: .account("acc"), search: "preview").isEmpty)
+        #expect(try store.messageIDs(scope: .account("acc"), search: .quickSearch("preview")).isEmpty)
     }
 
     @Test func correspondence() throws {
@@ -693,9 +693,9 @@ import Testing
             message("1", from: "a@x.com", at: 100, subject: "Quarterly planning"),
             message("2", from: "b@x.com", at: 200, subject: "Lunch"),
         ])
-        #expect(try store.messageIDs(scope: .allMessages, search: "quart").count == 1)
-        #expect(try store.messageIDs(scope: .allMessages, search: "b@x").count == 1)
-        #expect(try store.messageIDs(scope: .allMessages, search: "\"oops").isEmpty)
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("quart")).count == 1)
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("b@x")).count == 1)
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("\"oops")).isEmpty)
     }
 
     @Test func sortSubjectStripsReplyPrefixes() {

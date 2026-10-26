@@ -116,6 +116,12 @@ public indirect enum SmartCondition: Hashable, Sendable {
         case .compound(_, _, let enabled), .rule(_, _, _, let enabled, _): enabled
         }
     }
+
+    /// What the search field finds, as MailMate's Details shows it: Common Headers or Unquoted Text
+    /// contains the text (nil for blank text).
+    public static func quickSearch(_ text: String) -> SmartCondition? {
+        text.allSatisfy(\.isWhitespace) ? nil : .rule(.headersOrUnquoted, .contains, text)
+    }
 }
 
 extension SmartCondition: Codable {

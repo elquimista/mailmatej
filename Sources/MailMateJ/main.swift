@@ -145,6 +145,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         windowController?.debugSearch(String(text))
                         try? await Task.sleep(for: .seconds(2))
                         NSLog("MMJ search \"\(text)\": \(windowController?.debugListState ?? "-")")
+                        if let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"], let window = windowController?.window {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            let name = text.filter { $0.isLetter || $0.isNumber }
+                            // With a sheet up, the sheet's own window (it's a separate window on screen).
+                            let number = window.attachedSheet?.windowNumber ?? window.windowNumber
+                            capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-\(name).png")]
+                            try? capture.run()
+                            capture.waitUntilExit()
+                        }
                     }
                 }
                 if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_RESULT"] {

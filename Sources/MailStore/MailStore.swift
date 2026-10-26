@@ -875,7 +875,7 @@ public final class MailStore: Sendable {
     /// as in MailMate, at every level: replies show only for threads in `expanded`, and replies to a
     /// reply only under messages in `opened`.
     public func threadedMessages(
-        scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil, expanded: Set<String> = [],
+        scope: MessageScope, sort: MessageSort = .newestFirst, search: SmartCondition? = nil, expanded: Set<String> = [],
         opened: Set<Int64> = []
     ) throws -> ThreadedList {
         let (filter, args) = self.filter(scope: scope, search: search)
@@ -1035,7 +1035,7 @@ public final class MailStore: Sendable {
         return result
     }
 
-    public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: String? = nil) throws
+    public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: SmartCondition? = nil) throws
         -> [Int64]
     {
         let (filter, args) = self.filter(scope: scope, search: search)
@@ -1082,20 +1082,20 @@ public final class MailStore: Sendable {
     }
 
     /// The most recently received message in a list, whatever the list's sort order.
-    public func newestMessageID(scope: MessageScope, search: String? = nil) throws -> Int64? {
+    public func newestMessageID(scope: MessageScope, search: SmartCondition? = nil) throws -> Int64? {
         let (filter, args) = self.filter(scope: scope, search: search)
         let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY m.receivedAt DESC, m.id DESC LIMIT 1"
         return try dbPool.read { db in try Int64.fetchOne(db, sql: sql, arguments: args) }
     }
 
     /// WHERE clause (on a table aliased `m`) and arguments selecting a list's messages.
-    func filter(scope: MessageScope, search: String?) -> (String, StatementArguments) {
+    func filter(scope: MessageScope, search: SmartCondition?) -> (String, StatementArguments) {
         let (clause, args) = filterParts(scope: scope, search: search)
         return (clause, StatementArguments(args))
     }
 
     /// `filter`'s clause with its arguments as a list, to combine into larger queries (smart mailboxes).
-    func filterParts(scope: MessageScope, search: String?) -> (String, [(any DatabaseValueConvertible)?]) {
+    func filterParts(scope: MessageScope, search: SmartCondition?) -> (String, [(any DatabaseValueConvertible)?]) {
         var clauses: [String] = []
         var args: [(any DatabaseValueConvertible)?] = []
 
@@ -1176,9 +1176,10 @@ public final class MailStore: Sendable {
         default: break
         }
 
-        if let query = search.flatMap(Self.ftsQuery) {
-            clauses.append("m.id IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)")
-            args.append(query)
+        if let search {  // a search, as a condition (see SmartCondition.quickSearch)
+            let (clause, searchArgs) = sql(search)
+            clauses.append("(\(clause))")
+            args += searchArgs
         }
 
         return (clauses.joined(separator: " AND "), args)

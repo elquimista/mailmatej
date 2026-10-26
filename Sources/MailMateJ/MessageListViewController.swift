@@ -197,7 +197,6 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             resultBar.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
             resultBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             resultBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            resultBar.heightAnchor.constraint(equalToConstant: ResultBar.height),
             listUnderToolbar,
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -213,16 +212,27 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private var listUnderBar: NSLayoutConstraint!
 
     #if DEBUG
-        var debugResultBar: String { resultBar.isHidden ? "no bar" : "bar \"\(resultBar.debugTitle)\"" }
+        var debugResultBar: String {
+            resultBar.isHidden ? "no bar" : "bar \"\(resultBar.debugTitle)\" \(resultBar.debugButtons.joined(separator: " "))"
+        }
+        func debugClickResultBar(_ title: String) { resultBar.debugClick(title) }
     #endif
 
     /// MailMate's bar over a search result's list ("Same thread"), with Cancel; nil hides it.
     func showResultBar(_ title: String?, symbol: String = "", onCancel: @escaping () -> Void = {}) {
-        if let title { resultBar.show(title: title, symbol: symbol, onCancel: onCancel) }
+        showResultBar(title, symbol: symbol, buttons: [("Cancel", onCancel)])
+    }
+
+    /// The bar with its buttons (Cancel last) and a custom search's conditions below its title.
+    func showResultBar(_ title: String?, symbol: String, buttons: [ResultBar.Button], editor: NSView? = nil) {
+        resultBar.show(title: title ?? "", symbol: symbol, buttons: title == nil ? [] : buttons, editor: title == nil ? nil : editor)
         resultBar.isHidden = title == nil
         listUnderToolbar.isActive = title == nil
         listUnderBar.isActive = title != nil
     }
+
+    /// The custom search's conditions changed height.
+    func resultBarResized() { resultBar.editorResized() }
 
     // MARK: Data
 
@@ -1002,22 +1012,34 @@ final class ThreadFromCell: ColoredCell {
     }
 }
 
-/// The bar over a search result's list, as MailMate draws it (measured at 1x): 29 pt and a 1 pt line,
-/// a little lighter than the list; the search's symbol 9 pt in and its name in bold 11 pt grey; outlined
-/// buttons 18 pt tall with 4 pt corners, 7 pt from the right.
+/// The bar over a search result's list, as MailMate draws it (measured at 1x): 29 pt under the
+/// toolbar's line (which covers its top point) and a 1 pt line, a little lighter than the list; the
+/// search's symbol 9 pt in and its name 4 pt after it in bold 11 pt grey; outlined buttons 18 pt tall
+/// with 4 pt corners, 6 pt down, 8 pt apart and 7 pt from the right. A custom search's conditions
+/// follow in 25 pt rows (24 and a line) on the list's darker colour.
 final class ResultBar: NSView {
-    static let height: CGFloat = 30
+    static let height: CGFloat = 31
+    /// A button's title and action; no action shows it disabled (Details on a custom search).
+    typealias Button = (title: String, action: (() -> Void)?)
+
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
-    private let cancel = OutlineButton(title: "Cancel")
+    private var buttons: [OutlineButton] = []
+    private var editor: NSView?
+    private lazy var heightConstraint = heightAnchor.constraint(equalToConstant: Self.height)
 
     private static let background = NSColor(name: nil) {
         $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 40 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1) : NSColor(white: 0.93, alpha: 1)
     }
-    private static let line = NSColor(name: nil) {
+    static let line = NSColor(name: nil) {
         $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 62 / 255, green: 65 / 255, blue: 66 / 255, alpha: 1) : NSColor(white: 0.82, alpha: 1)
+    }
+    /// The conditions' rows: MailMate's show 11 darker than the bar.
+    static let rowFill = NSColor(name: nil) {
+        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 32 / 255, green: 36 / 255, blue: 39 / 255, alpha: 1) : NSColor(white: 0.97, alpha: 1)
     }
 
     override var isFlipped: Bool { true }
@@ -1028,42 +1050,73 @@ final class ResultBar: NSView {
         label.textColor = .secondaryLabelColor
         icon.contentTintColor = .secondaryLabelColor
         icon.imageScaling = .scaleNone
-        [icon, label, cancel].forEach(addSubview)
+        [icon, label].forEach(addSubview)
+        heightConstraint.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     #if DEBUG
         var debugTitle: String { label.stringValue }
+        var debugButtons: [String] { buttons.map { $0.isEnabled ? $0.title : "(\($0.title))" } }
+        func debugClick(_ title: String) { buttons.first { $0.title == title && $0.isEnabled }?.onClick() }
     #endif
 
-    func show(title: String, symbol: String, onCancel: @escaping () -> Void) {
+    /// `editor` (a search's conditions) goes below the title, as tall as it makes itself.
+    func show(title: String, symbol: String, buttons specs: [Button], editor: NSView? = nil) {
         label.stringValue = title
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
-        cancel.onClick = onCancel
+            .withSymbolConfiguration(.init(pointSize: symbol == "magnifyingglass" ? 11 : 12, weight: .regular))  // MailMate's 11 pt ink
+        buttons.forEach { $0.removeFromSuperview() }
+        buttons = specs.map { spec in
+            let button = OutlineButton(title: spec.title)
+            button.onClick = spec.action ?? {}
+            button.isEnabled = spec.action != nil
+            addSubview(button)
+            return button
+        }
+        if editor !== self.editor {
+            self.editor?.removeFromSuperview()
+            if let editor { addSubview(editor) }
+            self.editor = editor
+        }
+        editorResized()
+        needsLayout = true
+    }
+
+    /// Follows the conditions' height (rows came or went).
+    func editorResized() {
+        heightConstraint.constant = editor.map { 30 + $0.frame.height } ?? Self.height
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
         label.sizeToFit()
-        label.frame.origin = NSPoint(x: 28 - 2, y: ((29 - label.frame.height) / 2).rounded() + 1)
         // The symbol stands on the text's baseline and reaches its cap height, as MailMate's does.
         let size = icon.image?.size ?? .zero
-        let baseline = label.frame.minY + label.firstBaselineOffsetFromTop
         let ink = (icon.image?.alignmentRect ?? .zero)
-        // Its ink from 9 pt in (the symbol has 1 pt of space on its left), 4 pt before the text.
-        icon.frame = NSRect(x: 8, y: (baseline - size.height + ink.minY).rounded(), width: size.width, height: size.height)
-        let width = cancel.intrinsicContentSize.width
-        cancel.frame = NSRect(x: bounds.width - 7 - width, y: 5, width: width, height: 18)
+        // Its ink from 9 pt in (the symbol has 1 pt of space either side), the text's 4 pt after it (the
+        // label draws its text 2 pt in).
+        icon.frame.size = size
+        icon.frame.origin.x = 8
+        label.frame.origin = NSPoint(x: 8 + ink.maxX - 1 + 4 - 2, y: ((29 - label.frame.height) / 2).rounded() + 1)
+        let baseline = label.frame.minY + label.firstBaselineOffsetFromTop
+        icon.frame.origin.y = (baseline - size.height + ink.minY).rounded() + 1
+        var right = bounds.width - 7
+        for button in buttons.reversed() {
+            let width = button.intrinsicContentSize.width
+            button.frame = NSRect(x: right - width, y: 6, width: width, height: 18)
+            right -= width + 8
+        }
+        if let editor { editor.frame = NSRect(x: 0, y: 30, width: bounds.width, height: editor.frame.height) }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         Self.background.setFill()
         bounds.fill()
         Self.line.setFill()
-        NSRect(x: 0, y: 29, width: bounds.width, height: 1).fill()
+        NSRect(x: 0, y: 30, width: bounds.width, height: 1).fill()
     }
 }
 
@@ -1071,7 +1124,11 @@ final class ResultBar: NSView {
 /// corners, darker while pressed.
 final class OutlineButton: NSView {
     var onClick: () -> Void = {}
-    private let title: String
+    /// Disabled, its outline and title dim (MailMate's Details on a custom search) and it takes no clicks.
+    var isEnabled = true {
+        didSet { needsDisplay = true }
+    }
+    let title: String
     private var pressed = false {
         didSet { needsDisplay = true }
     }
@@ -1099,15 +1156,17 @@ final class OutlineButton: NSView {
             NSColor.labelColor.withAlphaComponent(0.15).setFill()
             box.fill()
         }
-        Self.outline.setStroke()
+        (isEnabled ? Self.outline : Self.outline.withAlphaComponent(0.45)).setStroke()
         box.lineWidth = 1
         box.stroke()
-        let text = NSAttributedString(string: title, attributes: [.font: Self.font, .foregroundColor: NSColor.labelColor])
+        let color = isEnabled ? NSColor.labelColor : NSColor.tertiaryLabelColor
+        let text = NSAttributedString(string: title, attributes: [.font: Self.font, .foregroundColor: color])
         let size = text.size()
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
         pressed = true
         while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             let inside = bounds.contains(convert(next.locationInWindow, from: nil))

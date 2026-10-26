@@ -87,6 +87,10 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     var onChange: (Bool) -> Void = { _ in }
     /// The editor's height changed (rows came or went).
     var onResize: () -> Void = {}
+    /// In a search's bar (MailMate's Custom Search): rows on the bar's colours without a box, a lone
+    /// condition on its own (no "All of the following" row until a second one joins it), and text
+    /// values at their own width.
+    var inBar = false
 
     @MainActor private final class Row {
         weak var parent: Row?
@@ -150,7 +154,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     func load(_ condition: SmartCondition) {
         for row in flatten() { remove(controlsOf: row) }
         root = makeRow(condition, parent: nil)
-        if !root.isCompound {  // A tree is always rooted in an Any/All row.
+        if !root.isCompound, !inBar {  // A tree is always rooted in an Any/All row.
             let group = Row(compound: true)
             group.match = kind == .sources ? .any : .all
             group.children = [root]
@@ -226,6 +230,14 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     /// in its row as it's typed, so it's taken from the field first: otherwise the rows would come back
     /// with their earlier values (⊕ left the row it copied as it was before the typing).
     private func rebuildAll() {
+        // In the bar, an All row left with one condition gives way to it.
+        if inBar, root.isCompound, root.match == .all, root.enabled, root.children.count == 1, let only = root.children.first,
+            !only.isCompound
+        {
+            remove(controlsOf: root)
+            only.parent = nil
+            root = only
+        }
         let rows = flatten()
         for row in rows where !row.isCompound && row.op.takesValue && row.valueControl != nil { row.value = currentValue(row) }
         for row in rows { build(row) }
@@ -238,7 +250,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     /// "No mailboxes added" (or conditions) with ⊕.
     private func build(_ row: Row) {
         remove(controlsOf: row)
-        if row === root, row.children.isEmpty {
+        if row === root, row.isCompound, row.children.isEmpty {
             let label = NSTextField(labelWithString: kind == .sources ? "No mailboxes added" : "No conditions added")
             label.font = Self.font
             label.sizeToFit()
@@ -516,7 +528,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         fieldMenu.install(in: popup, current: current, title: FieldMenu.title(field: row.field, op: row.op, value: row.value))
         popup.sizeToFit()
         let natural = ceil((popup.titleOfSelectedItem as NSString? ?? "").size(withAttributes: [.font: Self.font]).width) + 24
-        popup.frame.size.width = max(120, natural)
+        popup.frame.size.width = max(120, natural) + (inBar ? 1 : 0)  // the bar's is 1 pt wider (measured)
         return popup
     }
 
@@ -533,19 +545,22 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             let top = 1 + CGFloat(index) * Self.rowHeight
             // Measured from the box's edge: checkbox 9, controls 28 (8 without a checkbox), 7 apart; the
             // empty editor's text 8.
-            let isPlaceholder = row === root && row.children.isEmpty
-            var x = isPlaceholder ? 8 : (kind == .conditions ? 9 : 8) + CGFloat(row.depth) * 30
+            let isPlaceholder = row === root && row.isCompound && row.children.isEmpty
+            var x = isPlaceholder ? 8 : indent(row.depth)
             for (i, control) in row.controls.enumerated() {
                 let isCheckbox = kind == .conditions && i == 0 && !isPlaceholder
                 var frame = control.frame
+                // In the bar (no border to count), MailMate's controls sit 1 pt further left, 6 apart, and
+                // a text value is 150 wide (measured).
+                if inBar, control === row.valueControl, control is NSSearchField { frame.size.width = 150 }
                 frame.origin.x = isCheckbox ? x - 1 : x
                 frame.origin.y = (top + (Self.rowHeight - 1 - frame.height) / 2).rounded()
                 // As MailMate's: a text value field fills the row up to ⊖ ⊕, following the editor's width.
-                if control === row.valueControl, control is NSTextField, control === row.controls.last {
+                if control === row.valueControl, control is NSTextField, control === row.controls.last, !inBar {
                     frame.size.width = max(60, bounds.width - 10 - 18 - 20 - 6 - frame.origin.x)
                 }
                 control.frame = frame
-                x = isCheckbox ? x + 19 : x + frame.width + 7
+                x = isCheckbox ? x + 19 : x + frame.width + (inBar ? 6 : 7)
             }
             row.plus.frame.origin = NSPoint(x: bounds.width - 10 - 18, y: top + 3)
             row.minus.frame.origin = NSPoint(x: bounds.width - 10 - 18 - 20, y: top + 3)
@@ -574,17 +589,24 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         ? NSColor(white: 1, alpha: 0.135) : NSColor(white: 0, alpha: 0.15) }
 
     override func draw(_ dirtyRect: NSRect) {
-        Self.rowFill.setFill()
-        bounds.fill()
-        Self.separator.setFill()
         let count = flatten().count
-        for index in 1..<max(1, count) {
-            NSRect(x: 1, y: CGFloat(index) * Self.rowHeight, width: bounds.width - 2, height: 1).fill()
+        if inBar {  // the bar's line above, between and below the rows
+            ResultBar.rowFill.setFill()
+            bounds.fill()
+            ResultBar.line.setFill()
+            for index in 0...count { NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: 1).fill() }
+        } else {
+            Self.rowFill.setFill()
+            bounds.fill()
+            Self.separator.setFill()
+            for index in 1..<max(1, count) {
+                NSRect(x: 1, y: CGFloat(index) * Self.rowHeight, width: bounds.width - 2, height: 1).fill()
+            }
+            Self.border.setStroke()
+            let path = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+            path.lineWidth = 1
+            path.stroke()
         }
-        Self.border.setStroke()
-        let path = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        path.lineWidth = 1
-        path.stroke()
         if let drop {
             // Where a dragged row will go: an accent line at the gap, starting at its level's indent with a
             // small ring, as outline views show it.
@@ -606,7 +628,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     private var pressPoint: NSPoint?
     private var drop: (gap: Int, depth: Int, parent: Row, index: Int)?
 
-    private func indent(_ depth: Int) -> CGFloat { (kind == .conditions ? 9 : 8) + CGFloat(depth) * 30 }
+    private func indent(_ depth: Int) -> CGFloat { (kind == .conditions && !inBar ? 9 : 8) + CGFloat(depth) * 30 }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -744,6 +766,12 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
 
     @objc private func plusClicked(_ sender: NSButton) {
         guard let row = row(containing: sender) else { return }
+        if inBar, row === root, !row.isCompound {  // the bar's lone condition gets an All row above it
+            let group = Row(compound: true)
+            group.children = [row]
+            row.parent = group
+            root = group
+        }
         // The new condition is a copy of this one (on an Any/All row, of its first condition), the
         // common case; with ⌥, that copy in a new group.
         let source = row.isCompound ? row.children.first : row
@@ -822,6 +850,9 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             parent.children.insert(contentsOf: row.children, at: index)
             row.children = []
             removed = [row]
+        } else if !row.isCompound {  // the bar's lone condition: none left
+            removed = [row]
+            root = Row(compound: true)
         } else {
             row.children.forEach(walk)
             row.children = []
