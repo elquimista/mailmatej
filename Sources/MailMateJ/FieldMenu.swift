@@ -77,7 +77,7 @@ final class FieldMenu: NSObject {
             menu.addItem(parent(header.title, parts(header), id: "field|\(SmartField.address(header, .all).rawValue)"))
         }
         menu.addItem(choice("Subject", "field|\(SmartField.subject.rawValue)"))
-        // MailMate's Date: No Specifier (the Date header), » Local ▸ and the parts; then when it arrived.
+        // MailMate's Date: No Specifier, » Local ▸ and the parts (of when the message arrived).
         func dateParts(local: Bool) -> [NSMenuItem] {
             // » Local has no Zone, as MailMate's: it would always be this Mac's.
             SmartField.DatePart.allCases.filter { !local || $0 != .zone }
@@ -86,8 +86,7 @@ final class FieldMenu: NSObject {
         let local = [choice("No Specifier", "field|\(SmartField.dateLocal.rawValue)"), .separator()] + dateParts(local: true)
         menu.addItem(parent("Date", [choice("No Specifier", "field|\(SmartField.date.rawValue)"), .separator(),
                                      parent("\u{00BB} Local", local, id: "field|\(SmartField.dateLocal.rawValue)")]
-                                     + dateParts(local: false)
-                                     + [.separator(), choice("Received", "field|\(SmartField.received.rawValue)")],
+                                     + dateParts(local: false),
                             id: "field|\(SmartField.date.rawValue)"))
         menu.addItem(choice("Filename", "field|\(SmartField.filename.rawValue)"))
         menu.addItem(.separator())

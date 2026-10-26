@@ -188,7 +188,9 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public static let keyword = SmartField(rawValue: "keyword")
     /// "Message is ▸ Unread" (op `is`) or "Message is not ▸ …".
     public static let status = SmartField(rawValue: "status")
-    /// MailMate's Date (No Specifier): the message's Date header, when it was sent (else when it arrived).
+    /// MailMate's Date (No Specifier). Here it's when the message arrived: what filtering by date nearly
+    /// always means ("new this week", "older than a year"), and what MailMate's own recent-mail mailbox
+    /// tests. The Date header the sender's mail app wrote can be off (delays, send later, backdating).
     public static let date = SmartField(rawValue: "date")
     /// MailMate's Date ▸ » Local ▸ No Specifier: the same date, in this Mac's time zone (as the date
     /// comparisons already are).
@@ -198,8 +200,8 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public static let mailbox = SmartField(rawValue: "mailbox")
     public static let account = SmartField(rawValue: "account")
 
-    /// MailMate's Date ▸ Day, Formatted, …: pieces of the date written "2026-10-26 09:27:08 +0200", in
-    /// the sender's time zone (» Local ▸: in this Mac's), matched as text.
+    /// MailMate's Date ▸ Day, Formatted, …: pieces of the date (its arrival) written "2026-10-26 09:27:08
+    /// +0200", in the sender's time zone (» Local ▸: in this Mac's), matched as text.
     public enum DatePart: String, CaseIterable, Sendable {
         case day, formatted, hour, month, time, year, zone
 
@@ -602,10 +604,10 @@ extension MailStore {
         }
     }
 
-    /// A date part's text (see `SmartField.DatePart`) as SQL, from the message's Date (else its arrival),
-    /// in the sender's time zone (when known, else this Mac's) or, `local`, this Mac's.
+    /// A date part's text (see `SmartField.DatePart`) as SQL, from when the message arrived, in the
+    /// sender's time zone (from its Date header, when known, else this Mac's) or, `local`, this Mac's.
     static func dateText(_ part: SmartField.DatePart, local: Bool) -> String {
-        let date = "coalesce(m.sentAt, m.receivedAt)"
+        let date = "m.receivedAt"
         let localOffset = "(CAST(strftime('%s', \(date), 'unixepoch', 'localtime') AS INTEGER) - CAST(\(date) AS INTEGER))"
         let offset = local ? localOffset : "coalesce(m.sentZone * 60, \(localOffset))"
         let shifted = "(\(date) + \(offset))"
@@ -687,10 +689,11 @@ extension MailStore {
             guard let status = SmartStatus(rawValue: value) else { return ("1", []) }
             return ("\(not)(\(status.sql))", [])
         case .days:
-            let column = field == .received ? "m.receivedAt" : "coalesce(m.sentAt, m.receivedAt)"
+            // Date (and Received, from before) is the arrival; Sent, from before, the Date header.
+            let column = field == .sent ? "coalesce(m.sentAt, m.receivedAt)" : "m.receivedAt"
             switch op {
-            case .exists, .notExists:  // a Date header (a message always arrived)
-                return field == .received ? ("\(not)1", []) : ("\(not)(m.sentAt IS NOT NULL)", [])
+            case .exists, .notExists:  // every message arrived; a sent date needs a Date header
+                return field == .sent ? ("\(not)(m.sentAt IS NOT NULL)", []) : ("\(not)1", [])
             case .isExactly, .isBefore, .isAfter:
                 guard let period = Self.datePeriod(value) else { return ("0", []) }
                 let (start, end) = (period.start.timeIntervalSince1970, period.end.timeIntervalSince1970)

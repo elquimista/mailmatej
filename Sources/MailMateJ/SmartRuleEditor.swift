@@ -191,6 +191,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     private func currentValue(_ row: Row) -> String {
         switch row.valueControl {
         case _ where row.mailboxMenu != nil: return row.value  // mailbox menus set it directly
+        case let picker as NSDatePicker: return Self.dayText(picker.dateValue)
         case let popup as NSPopUpButton: return popup.selectedItem?.representedObject as? String ?? row.value
         case let field as NSTextField: return field.stringValue
         case let holder?: return (holder.subviews.first as? NSTextField)?.stringValue ?? row.value
@@ -356,14 +357,17 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         case .mailbox:
             return mailboxPopup(selected: value, width: 150, for: row)
         case .days where op == .isExactly || op == .isBefore || op == .isAfter:
-            // A year, month or day: "2024", "2024-03", "2024-03-01".
-            let date = NSTextField(string: value)
-            date.controlSize = .small
-            date.font = Self.font
-            date.placeholderString = "YYYY-MM-DD"
-            date.delegate = self
-            date.frame = NSRect(x: 0, y: 0, width: 100, height: 19)
-            return date
+            // MailMate's: a day in a date field with a stepper ("3/13/2024", in this Mac's format).
+            let picker = NSDatePicker()
+            picker.datePickerStyle = .textFieldAndStepper
+            picker.datePickerElements = .yearMonthDay
+            picker.controlSize = .small
+            picker.font = Self.font
+            picker.dateValue = MailStore.datePeriod(value)?.start ?? Calendar.current.startOfDay(for: Date())
+            picker.target = self
+            picker.action = #selector(dateChosen(_:))
+            picker.sizeToFit()
+            return picker
         case .days:
             let holder = NSView(frame: NSRect(x: 0, y: 0, width: 84, height: 19))
             let number = NSTextField(string: value)
@@ -467,7 +471,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         if row.field.kind == .days {
             let isDate = [.isExactly, .isBefore, .isAfter].contains(op)
             if isDate, MailStore.datePeriod(row.value) == nil {
-                row.value = Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
+                row.value = Self.dayText(Date())
             } else if !isDate, op.takesValue, Double(row.value) == nil {
                 row.value = "7"
             }
@@ -476,6 +480,14 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         rebuildRow(row)  // "is" shows a combo box, "contains" a plain field, "exists" none
         onChange(true)
     }
+
+    /// A day as stored in a date condition: "2024-03-13", in this Mac's time zone.
+    static func dayText(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 1, c.day ?? 1)
+    }
+
+    @objc private func dateChosen(_ sender: NSDatePicker) { onChange(true) }
 
     /// Options toggle and keep the test chosen.
     @objc private func optionToggled(_ sender: NSMenuItem) {

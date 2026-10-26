@@ -75,6 +75,18 @@ import Testing
         #expect(MailStore.datePeriod("2024-02-30") == nil)
     }
 
+    @Test func dateMeansWhenTheMessageArrived() throws {
+        // Written (its Date header) in December, delivered in March: Date is March.
+        var delayed = message("1", from: "a@x.com", at: try Date("2024-03-20T12:00:00Z", strategy: .iso8601).timeIntervalSince1970)
+        delayed.sentAt = try Date("2023-12-20T12:00:00Z", strategy: .iso8601)
+        try store.upsertMessages(accountId: "acc", [delayed])
+        let id = try store.createSmartMailbox(name: "March", parentId: nil)
+        var definition = SmartDefinition(sources: SmartSources(scopes: ["all"]))
+        definition.condition = .compound(.all, [.rule(.date, .isExactly, "2024-03"), .rule(.datePart(.year, local: true), .is, "2024")])
+        try store.updateSmartMailbox(id: id, definition: definition)
+        #expect(try store.messageIDs(scope: .smart(id)).count == 1)
+    }
+
     @Test func quotedTextSplitsPlainAndHTML() {
         let plain = QuotedText.split(plain: "Sounds good.\n\nOn 1 Oct, Ann wrote:\n> invoice attached\n>> older")
         #expect(plain.unquoted == "Sounds good.\n\nOn 1 Oct, Ann wrote:")
