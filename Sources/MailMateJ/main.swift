@@ -446,6 +446,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ edit alert: \((sheet?.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []).joined(separator: " | "))")
                     NSLog("MMJ edit identities: \(((try? AppModel.shared.store.identities()) ?? []).filter { $0.accountId == p[0] }.map { "\($0.name) <\($0.email)>" })")
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_TYPE_EMAIL"] {
+                    // "email" or "email|user": typed into a new account's window (the user name first, if given).
+                    let parts = spec.split(separator: "|").map(String.init)
+                    windowController?.addAccount(nil)
+                    windowController?.accountSettings?.debugTypeEmail(parts[0], user: parts.count > 1 ? parts[1] : nil)
+                    windowController?.accountSettings?.close()
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_ADD_ACCOUNT"] {
                     // Adds an account through the window, checks it, then removes it again.
                     windowController?.addAccount(nil)

@@ -154,6 +154,20 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
             add(nil)
         }
 
+        /// Types an email address as a user would, then logs User Name; with `user`, types that user name
+        /// first (so the address no longer fills it in).
+        func debugTypeEmail(_ email: String, user: String?) {
+            if let user {
+                userField.stringValue = user
+                controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: userField))
+            }
+            for end in email.indices {
+                emailField.stringValue = String(email[...end])
+                controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: emailField))
+            }
+            NSLog("MMJ add account: email \(emailField.stringValue) user \(userField.stringValue) placeholder \(userField.placeholderString ?? "") used \(userName)")
+        }
+
         /// Fills the form as a user would ("server|port|user|password|email"; empty port = none) and adds.
         func debugAdd(_ spec: String) {
             let p = spec.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
@@ -199,6 +213,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
             }
         }
         userField.stringValue = account.authKind == .basic ? account.username : ""
+        updateUserPlaceholder()
         passwordField.placeholderString = "Unchanged"
         addButton.title = "Save"
         updateAddButton()
@@ -212,7 +227,15 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         updateAddButton()
     }
 
-    func controlTextDidChange(_ notification: Notification) { updateAddButton() }
+    func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === emailField { updateUserPlaceholder() }
+        updateAddButton()
+    }
+
+    /// User Name shows the first email address in grey: what's used while it's left empty (see `userName`).
+    private func updateUserPlaceholder() {
+        userField.placeholderString = emailAddresses.first ?? ""
+    }
 
     private var isFastmail: Bool {
         let server = serverField.stringValue.lowercased()
