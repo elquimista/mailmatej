@@ -117,6 +117,28 @@ public indirect enum SmartCondition: Hashable, Sendable {
         }
     }
 
+    /// The thread numbers its #Thread-Id conditions name.
+    var threadNumbers: [Int64] {
+        switch self {
+        case .compound(_, let children, _): children.flatMap(\.threadNumbers)
+        case .rule(.threadId, _, let value, _, _): Int64(value).map { [$0] } ?? []
+        case .rule: []
+        }
+    }
+
+    /// The tree with #Thread-Id values renumbered (`moves`: old thread number to new).
+    func renumberingThreads(_ moves: [Int64: Int64]) -> SmartCondition {
+        switch self {
+        case .compound(let match, let children, let enabled):
+            return .compound(match, children.map { $0.renumberingThreads(moves) }, enabled: enabled)
+        case .rule(.threadId, let op, let value, let enabled, let options):
+            guard let old = Int64(value), let new = moves[old] else { return self }
+            return .rule(.threadId, op, String(new), enabled: enabled, options: options)
+        case .rule:
+            return self
+        }
+    }
+
     /// What the search field finds, as MailMate's Details shows it: Common Headers or Unquoted Text
     /// contains the text (nil for blank text).
     public static func quickSearch(_ text: String) -> SmartCondition? {
@@ -191,6 +213,10 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     /// Fields matched in the search index (words, not exact strings): contains or doesn't.
     public var isFullText: Bool { [.body, .unquoted, .quoted, .headersOrUnquoted, .headersOrText].contains(self) }
     public static let filename = SmartField(rawValue: "filename")
+    /// MailMate's virtual header #Thread-Id: the thread's number (here its first message's id), so
+    /// "is" finds the whole conversation as it is now, new replies included. What a thread result's
+    /// Details shows; not in the field menu.
+    public static let threadId = SmartField(rawValue: "threadId")
     public static let keyword = SmartField(rawValue: "keyword")
     /// "Message is ▸ Unread" (op `is`) or "Message is not ▸ …".
     public static let status = SmartField(rawValue: "status")
@@ -329,8 +355,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     /// The pop-up's title, as MailMate writes nested fields: "From ‣ Domain" ("From" with No Specifier).
     public var title: String {
         if let (header, part) = address {
-            let short = header == .recipient ? "Recipient" : header.title
-            return part == .all ? short : "\(short) \u{2023} \(part.path)"
+            return part == .all ? header.title : "\(header.title) \u{2023} \(part.path)"
         }
         switch self {
         case .subject: return "Subject"
@@ -340,6 +365,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         case .headersOrUnquoted: return "Common Headers or Unquoted Text"
         case .headersOrText: return "Common Headers or Text"
         case .filename: return "Filename"
+        case .threadId: return "\u{00BB} #Thread-Id"
         case .keyword: return "Tags/Keywords"
         case .status: return "Message is"  // with its status: "Message is Read"
         case .date: return "Date"
@@ -357,6 +383,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public var operators: [SmartOperator] {
         switch kind {
         case .text where isFullText: [.contains, .doesNotContain]
+        case .text where self == .threadId: [.is, .isNot]
         // MailMate's operator menu, in its groups (see `operatorGroups`).
         case .text: [.is, .isNot, .contains, .doesNotContain, .lessOrEqual, .moreOrEqual, .isIn, .isNotIn, .exists, .notExists]
         case .status, .mailbox, .account: [.is, .isNot]
@@ -509,6 +536,67 @@ extension MailStore {
             }
         }
         return (clause, args)
+    }
+
+    // MARK: #Thread-Id upkeep
+
+    /// A thread's number is its first message's id, so deleting that message for good would leave the
+    /// #Thread-Id conditions naming it (saved threads) with nothing: before messages go, each number
+    /// they'd take away is moved to the next of its thread's messages.
+    func threadNumberMoves(accountId: String, remoteIds: [String]) throws -> [Int64: Int64] {
+        let used: Set<Int64> = try dbPool.read { db in
+            let decoder = JSONDecoder()
+            func conditions(_ sql: String, _ decode: (Data) -> SmartCondition?) throws -> [SmartCondition] {
+                try String.fetchAll(db, sql: sql).compactMap { decode(Data($0.utf8)) }
+            }
+            let all = try conditions("SELECT definition FROM smart_mailbox WHERE definition LIKE '%threadId%'") {
+                try? decoder.decode(SmartDefinition.self, from: $0).condition
+            } + conditions("SELECT definition FROM rule WHERE definition LIKE '%threadId%'") {
+                try? decoder.decode(RuleDefinition.self, from: $0).condition
+            } + conditions("SELECT condition FROM mailbox_condition WHERE condition LIKE '%threadId%'") {
+                try? decoder.decode(SmartCondition.self, from: $0)
+            }
+            return Set(all.flatMap(\.threadNumbers))
+        }
+        guard !used.isEmpty else { return [:] }
+        var gone: Set<Int64> = []
+        for chunk in remoteIds.chunked(500) {
+            gone.formUnion(try dbPool.read { db in
+                try Int64.fetchAll(db, sql: "SELECT id FROM message WHERE accountId = ? AND remoteId IN (\(Self.placeholders(chunk.count)))",
+                                   arguments: StatementArguments([accountId] + Array(chunk)))
+            })
+        }
+        var moves: [Int64: Int64] = [:]
+        for number in used.intersection(gone) {
+            if let next = try threadMembers(of: number).filter({ !gone.contains($0) }).min() { moves[number] = next }
+        }
+        return moves
+    }
+
+    /// Rewrites the #Thread-Id conditions of smart mailboxes, rules and special mailboxes per `moves`.
+    static func renumberThreads(_ db: Database, _ moves: [Int64: Int64]) throws {
+        let encoder = JSONEncoder(), decoder = JSONDecoder()
+        for row in try Row.fetchAll(db, sql: "SELECT id, definition FROM smart_mailbox WHERE definition LIKE '%threadId%'") {
+            let json: String = row["definition"]
+            guard var definition = try? decoder.decode(SmartDefinition.self, from: Data(json.utf8)) else { continue }
+            definition.condition = definition.condition.renumberingThreads(moves)
+            try db.execute(sql: "UPDATE smart_mailbox SET definition = ? WHERE id = ?",
+                           arguments: [String(decoding: try encoder.encode(definition), as: UTF8.self), row["id"] as Int64])
+        }
+        for row in try Row.fetchAll(db, sql: "SELECT id, definition FROM rule WHERE definition LIKE '%threadId%'") {
+            let json: String = row["definition"]
+            guard var definition = try? decoder.decode(RuleDefinition.self, from: Data(json.utf8)) else { continue }
+            definition.condition = definition.condition.renumberingThreads(moves)
+            try db.execute(sql: "UPDATE rule SET definition = ? WHERE id = ?",
+                           arguments: [String(decoding: try encoder.encode(definition), as: UTF8.self), row["id"] as Int64])
+        }
+        for row in try Row.fetchAll(db, sql: "SELECT key, condition FROM mailbox_condition WHERE condition LIKE '%threadId%'") {
+            let json: String = row["condition"]
+            guard let condition = try? decoder.decode(SmartCondition.self, from: Data(json.utf8)) else { continue }
+            try db.execute(sql: "UPDATE mailbox_condition SET condition = ? WHERE key = ?",
+                           arguments: [String(decoding: try encoder.encode(condition.renumberingThreads(moves)), as: UTF8.self),
+                                       row["key"] as String])
+        }
     }
 
     static func isEmpty(_ condition: SmartCondition) -> Bool {
@@ -677,6 +765,12 @@ extension MailStore {
                                .headersOrUnquoted: "{subject addresses unquoted}"][field]
                 return ("m.id \(not)IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)",
                         [columns.map { "\($0) : (\(query))" } ?? query])
+            case .threadId:
+                // The conversation's messages as threads link them now (found anew each time).
+                guard let id = Int64(value), let members = try? threadMembers(of: id), !members.isEmpty else {
+                    return (op.isNegative ? "1" : "0", [])
+                }
+                return ("m.id \(not)IN (\(Self.placeholders(members.count)))", members)
             case .filename:
                 let (test, args) = Self.textTest("coalesce(p.name, '')", op, value, options)
                 return ("\(not)EXISTS (SELECT 1 FROM message_part p WHERE p.messageId = m.id AND p.name IS NOT NULL AND \(test))", args)

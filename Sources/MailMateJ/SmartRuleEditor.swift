@@ -396,8 +396,9 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             holder.addSubview(label)
             return holder
         case .text where op == .is || op == .isNot || op == .lessOrEqual || op == .moreOrEqual:
-            // MailMate's: at least 173 pt, wider for longer values.
-            let width = max(173, ceil((value as NSString).size(withAttributes: [.font: Self.font]).width) + 35)
+            // MailMate's: at least 173 pt, wider for longer values (in the bar 180, and the text + 31).
+            let text = (value as NSString).size(withAttributes: [.font: Self.font]).width
+            let width = inBar ? max(180, (text + 31).rounded()) : max(173, ceil(text) + 35)
             let combo = NSComboBox(frame: NSRect(x: 0, y: 0, width: width, height: 20))
             combo.controlSize = .small
             combo.font = Self.font
@@ -528,7 +529,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         fieldMenu.install(in: popup, current: current, title: FieldMenu.title(field: row.field, op: row.op, value: row.value))
         popup.sizeToFit()
         let natural = ceil((popup.titleOfSelectedItem as NSString? ?? "").size(withAttributes: [.font: Self.font]).width) + 24
-        popup.frame.size.width = max(120, natural) + (inBar ? 1 : 0)  // the bar's is 1 pt wider (measured)
+        popup.frame.size.width = max(120, natural + (inBar ? 1 : 0))  // the bar's fits 1 pt wider (measured)
         return popup
     }
 
@@ -593,8 +594,10 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         if inBar {  // the bar's line above, between and below the rows
             ResultBar.rowFill.setFill()
             bounds.fill()
-            ResultBar.line.setFill()
-            for index in 0...count { NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: 1).fill() }
+            for index in 0...count {
+                (index == 0 || index == count ? ResultBar.line : ResultBar.rowLine).setFill()
+                NSRect(x: 0, y: CGFloat(index) * Self.rowHeight, width: bounds.width, height: 1).fill()
+            }
         } else {
             Self.rowFill.setFill()
             bounds.fill()

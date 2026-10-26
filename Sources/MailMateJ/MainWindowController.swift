@@ -300,17 +300,20 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let scope = shownScope
         let search = searchCondition
         let (threaded, savedExpanded, savedOpened) = (showsThreads, expandedThreads, openedMessages)
-        let result = self.result.map { ($0.kind, $0.anchor, $0.email, $0.opening) }
+        let result = self.result.map { ($0.kind, $0.anchor, $0.condition, $0.opening) }
         let started = Date()
         Task {
             let (rows, messages, newest, stages, scope, expanded, opened) = await Task.detached(priority: .userInitiated) {
                 let began = Date()
                 var (scope, expanded, opened) = (scope, savedExpanded, savedOpened)
-                if let (kind, anchor, email, opening) = result {
-                    // Found again on each load, so new mail in the conversation shows up.
-                    let ids = kind == .thread
+                if let (kind, anchor, condition, opening) = result {
+                    // Found again on each load, so new mail in the conversation shows up: the thread, or
+                    // All Messages narrowed by the result's condition (what its Details shows), with the
+                    // message it was opened for wherever that is.
+                    var ids = kind == .thread
                         ? (try? store.threadMemberIDs(of: anchor)) ?? [anchor]
-                        : (try? store.correspondenceIDs(email: email ?? "", keeping: anchor, fromOnly: kind == .from)) ?? [anchor]
+                        : (try? store.messageIDs(scope: .allMessages, search: condition)) ?? []
+                    if !ids.contains(anchor) { ids.append(anchor) }
                     scope = .messages(ids)
                     // The message's own conversation shown whole (the thread result is just that one), so
                     // the message itself is in view to select, as MailMate opens it.
@@ -628,7 +631,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case "fromorto": showResult(.fromOrTo)
             case "collapse", "expand":  // the first row's thread, as its chevron does
                 if let id = list.ids.first, let row = list.threadRows[id] { toggle(row, collapse: kind == "collapse") }
-            default: endResult()
+            case "details": list.debugClickResultBar("Details")
+            case "save": list.debugClickResultBar("Save")
+            case "name": MailboxNameSheet.debugFinish(name: "Saved result", edit: false)
+            default: if result == nil, isSearching { clearSearch() } else { endResult() }
             }
         }
 
@@ -998,7 +1004,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// The search's bar: Details (until it has opened the conditions), Save, Cancel.
     private func showSearchBar() {
         let cancel: ResultBar.Button = ("Cancel", { [weak self] in self?.clearSearch() })
-        let save: ResultBar.Button = ("Save", { [weak self] in self?.saveSearch() })
+        let save: ResultBar.Button = ("Save", { [weak self] in
+            guard let self, let condition = searchEditor?.tree() ?? searchCondition else { return }
+            saveSearch(condition)
+        })
         if let searchEditor {
             list.showResultBar("Custom Search", symbol: "magnifyingglass", buttons: [("Details", nil), save, cancel], editor: searchEditor)
         } else {
@@ -1009,8 +1018,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// MailMate's Details: the search as the condition it is (Common Headers or Unquoted Text contains
     /// the text), in the bar, to change or add to; the list follows each change.
-    private func showSearchDetails() {
-        guard let condition = searchCondition else { return }
+    private func showSearchDetails(_ condition: SmartCondition? = nil) {
+        guard let condition = condition ?? searchCondition else { return }
         let editor = SmartRuleEditor(kind: .conditions, context: SmartRuleContext(model: model, editing: -1, mailboxKey: scope.key))
         editor.inBar = true
         editor.load(condition)
@@ -1039,15 +1048,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// MailMate's Save: asks for the mailbox's name, then keeps the search as a smart mailbox of the
     /// mailbox searched, and shows it (Save and Edit… opens its editor too).
-    private func saveSearch() {
-        guard let window, let condition = searchEditor?.tree() ?? searchCondition else { return }
-        let sources = SmartSources(scopes: [scope.key])
+    private func saveSearch(_ condition: SmartCondition) {
+        guard let window else { return }
+        // A result searches All Messages, a search the mailbox chosen.
+        let sources = SmartSources(scopes: [result == nil ? scope.key : MessageScope.allMessages.key])
         MailboxNameSheet.ask(over: window, name: "Custom Search") { [weak self] name, edit in
             guard let self, let id = model.createSmartMailbox(name: name, parentId: nil) else { return }
             let root: SmartCondition = if case .compound = condition { condition } else { .compound(.all, [condition]) }
             model.updateSmartMailbox(id: id, definition: SmartDefinition(sources: sources, condition: root))
             searchBack = nil
-            clearSearch()
+            if result != nil { endResult() } else { clearSearch() }
             sidebar.reload()
             let key = "smart.\(id)"
             guard sidebar.select(key: key) else { return }
@@ -1220,6 +1230,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         var kind: ResultKind
         var anchor: Int64
         var email: String?
+        /// What it finds, as MailMate's Details shows it (see `resultCondition`); for a thread, worked
+        /// out only when asked (it reads the whole account's threads).
+        var condition: SmartCondition?
         var back: (scope: MessageScope, title: String, colorKey: String?, hasMailbox: Bool)
         /// Until it has loaded once: its message's conversation opens whole; after that it folds and
         /// unfolds as usual.
@@ -1254,13 +1267,72 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         let back = result?.back ?? (scope, scopeTitle, list.colorKey, hasMailbox)
         if result == nil { saveView() }
-        result = Result(kind: kind, anchor: anchor, email: email, back: back)
+        let condition = kind == .thread ? nil : resultCondition(kind, anchor: anchor, email: email ?? "")
+        result = Result(kind: kind, anchor: anchor, email: email, condition: condition, back: back)
         hasMailbox = true
         scopeTitle = "All Messages"
         list.colorKey = nil
         selectAfterMove = nil
         pendingHistorySelection = anchor  // selected once the result has loaded
-        list.showResultBar(kind.title(email), symbol: kind.symbol) { [weak self] in self?.endResult() }
+        list.showResultBar(kind.title(email), symbol: kind.symbol, buttons: [
+            ("Details", { [weak self] in self?.showResultDetails() }),
+            ("Save", { [weak self] in
+                guard let self, let result else { return }
+                saveSearch(result.condition ?? resultCondition(result.kind, anchor: result.anchor, email: ""))
+            }),
+            ("Cancel", { [weak self] in self?.endResult() }),
+        ])
+        reloadList(.scopeChanged)
+    }
+
+    /// A result as MailMate's Details shows it: the thread's #Thread-Id; mail between the correspondent
+    /// and the address of mine the message used, either way (when none of mine shows, as MailMate, the
+    /// message's other side: the address it was sent to, or its sender); mail from them; or from or
+    /// to them.
+    private func resultCondition(_ kind: ResultKind, anchor: Int64, email: String) -> SmartCondition {
+        let from = SmartField.fromAddress, recipient = SmartField.address(.recipient, .address)
+        switch kind {
+        case .thread:
+            return .rule(.threadId, .is, String((try? model.store.threadNumber(of: anchor)) ?? anchor))
+        case .correspondents:
+            guard let mine = (try? model.store.myAddress(in: anchor, myAddresses: model.myAddresses))
+                ?? (try? model.store.otherSide(of: email, in: anchor))
+            else {
+                return .compound(.any, [.rule(from, .is, email), .rule(recipient, .is, email)])
+            }
+            return .compound(.any, [
+                .compound(.all, [.rule(from, .is, email), .rule(recipient, .is, mine)]),
+                .compound(.all, [.rule(from, .is, mine), .rule(recipient, .is, email)]),
+            ])
+        case .from:
+            return .rule(from, .is, email)
+        case .fromOrTo:
+            return .compound(.any, [.rule(from, .is, email), .rule(recipient, .is, email)])
+        }
+    }
+
+    /// Details on a result: it becomes a custom search of All Messages with its condition, as in
+    /// MailMate; Cancel then goes back to the mailbox the result was opened from.
+    private func showResultDetails() {
+        guard let result else { return }
+        let backKey = sidebar.selectedKey
+        let selected = list.selectedIDs.first ?? result.anchor
+        self.result = nil
+        search = ""
+        searchField?.stringValue = ""
+        showSearchDetails(result.condition ?? resultCondition(result.kind, anchor: result.anchor, email: ""))
+        if sidebar.selectedKey != "unified.all" {
+            searchBack = backKey
+            movingForSearch = true
+            defer { movingForSearch = false }
+            if sidebar.select(key: "unified.all") {  // reloads as it's chosen
+                pendingHistorySelection = selected  // the message stays selected
+                return
+            }
+        }
+        scope = .allMessages
+        scopeTitle = "All Messages"
+        pendingHistorySelection = selected
         reloadList(.scopeChanged)
     }
 

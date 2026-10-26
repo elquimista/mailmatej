@@ -27,6 +27,45 @@ import Testing
             addresses: [.init(role: .from, name: nil, email: from), .init(role: .to, name: nil, email: to)])
     }
 
+    @Test func otherSideIsTheRecipientOfTheirMailAndTheSenderOfMine() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "support@vendor.com", to: "alias@gmail.com", at: 100),
+            message("2", from: "alias@gmail.com", to: "support@vendor.com", at: 200),
+        ])
+        let ids = try store.messageIDs(scope: .allMessages)  // newest first
+        #expect(try store.otherSide(of: "support@vendor.com", in: ids[1]) == "alias@gmail.com")
+        #expect(try store.otherSide(of: "Support@Vendor.com", in: ids[0]) == "alias@gmail.com")
+    }
+
+    @Test func threadIdConditionFindsTheThreadAsItIsNow() throws {
+        func reply(_ id: String, _ header: String, to parent: String?, at: Double) -> IncomingMessage {
+            var m = message(id, from: "a@x.com", at: at, subject: "Re: plan")
+            m.messageIdHeader = header
+            m.inReplyTo = parent
+            return m
+        }
+        try store.upsertMessages(accountId: "acc", [
+            reply("1", "a@x", to: nil, at: 100), reply("2", "b@x", to: "a@x", at: 200), reply("9", "z@x", to: nil, at: 150),
+        ])
+        let ids = try store.messageIDs(scope: .allMessages)  // newest first: the reply, the other, the first
+        let number = try store.threadNumber(of: ids[0])
+        #expect(number == (try store.threadNumber(of: ids[2])))
+        let condition = SmartCondition.rule(.threadId, .is, String(number))
+        #expect(Set(try store.messageIDs(scope: .allMessages, search: condition)) == [ids[0], ids[2]])
+        // A new reply joins the saved condition's thread.
+        try store.upsertMessages(accountId: "acc", [reply("3", "c@x", to: "b@x", at: 300)])
+        #expect(try store.messageIDs(scope: .allMessages, search: condition).count == 3)
+        #expect(try store.messageIDs(scope: .allMessages, search: .rule(.threadId, .isNot, String(number))).count == 1)
+
+        // Saved, the thread outlives its first message: the number moves to the next one.
+        let saved = try store.createSmartMailbox(name: "Plan", parentId: nil)
+        try store.updateSmartMailbox(id: saved, definition: SmartDefinition(condition: .compound(.all, [condition])))
+        try store.deleteMessages(accountId: "acc", remoteIds: ["1"])
+        #expect(try store.messageIDs(scope: .smart(saved)).count == 2)
+        #expect(try store.smartMailboxes().first { $0.id == saved }?.definition.condition.threadNumbers
+            == [try store.threadNumber(of: ids[0])])
+    }
+
     @Test func duplicatingASmartMailboxCopiesItRightAfterIt() throws {
         let first = try store.createSmartMailbox(name: "Credit", parentId: nil)
         let second = try store.createSmartMailbox(name: "Other", parentId: nil)

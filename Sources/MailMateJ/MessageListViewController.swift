@@ -1036,6 +1036,11 @@ final class ResultBar: NSView {
         $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             ? NSColor(srgbRed: 62 / 255, green: 65 / 255, blue: 66 / 255, alpha: 1) : NSColor(white: 0.82, alpha: 1)
     }
+    /// The lines between the conditions' rows: MailMate's a little darker than the bar's.
+    static let rowLine = NSColor(name: nil) {
+        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 56 / 255, green: 60 / 255, blue: 63 / 255, alpha: 1) : NSColor(white: 0.86, alpha: 1)
+    }
     /// The conditions' rows: MailMate's show 11 darker than the bar.
     static let rowFill = NSColor(name: nil) {
         $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua

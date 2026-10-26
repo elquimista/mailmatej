@@ -356,6 +356,7 @@ public final class MailStore: Sendable {
 
     public func deleteMessages(accountId: String, remoteIds: [String]) throws {
         guard !remoteIds.isEmpty else { return }
+        let moves = try threadNumberMoves(accountId: accountId, remoteIds: remoteIds)
         try dbPool.write { db in
             for chunk in remoteIds.chunked(500) {
                 let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
@@ -363,7 +364,9 @@ public final class MailStore: Sendable {
                     sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))",
                     arguments: StatementArguments([accountId] + chunk))
             }
+            if !moves.isEmpty { try Self.renumberThreads(db, moves) }
         }
+        if !moves.isEmpty { try refreshSmartCatalog() }
     }
 
     // MARK: Full download
@@ -724,7 +727,7 @@ public final class MailStore: Sendable {
         }
     }
 
-    private static func placeholders(_ count: Int) -> String {
+    static func placeholders(_ count: Int) -> String {
         Array(repeating: "?", count: count).joined(separator: ", ")
     }
 
@@ -1237,15 +1240,27 @@ public final class MailStore: Sendable {
 
     /// A message's whole conversation, as threads link messages (see `threadKeys`): every message of its
     /// account outside Trash and Junk in the same thread, and the message itself.
-    public func threadMemberIDs(of messageId: Int64) throws -> [Int64] {
-        guard let accountId = try refs(ids: [messageId]).first?.accountId else { return [] }
-        let (filter, args) = self.filter(scope: .allInAccount(accountId), search: nil)
-        let rows = try dbPool.read { db in
-            try Row.fetchAll(
+    public func threadMemberIDs(of messageId: Int64) throws -> [Int64] { try threadMembers(of: messageId) }
+
+    /// MailMate's #Thread-Id of a message's thread: here the id of its first message (the lowest), the
+    /// same whichever of its messages it's asked for.
+    public func threadNumber(of messageId: Int64) throws -> Int64 {
+        try threadMembers(of: messageId).min() ?? messageId
+    }
+
+    /// `threadMemberIDs`, readable while building another query's SQL inside a database access (a
+    /// #Thread-Id condition), hence the reentrant read.
+    func threadMembers(of messageId: Int64) throws -> [Int64] {
+        let rows = try dbPool.unsafeReentrantRead { db -> [ThreadInput] in
+            guard let accountId = try String.fetchOne(db, sql: "SELECT accountId FROM message WHERE id = ?", arguments: [messageId])
+            else { return [] }
+            let (filter, args) = self.filter(scope: .allInAccount(accountId), search: nil)
+            return try Row.fetchAll(
                 db, sql: "SELECT \(Self.threadColumns) FROM message m WHERE (\(filter)) OR m.id = ? ORDER BY m.receivedAt",
                 arguments: args + [messageId]
             ).map(ThreadInput.init)
         }
+        guard !rows.isEmpty else { return [] }
         let keys = Self.threadKeys(rows)
         guard let key = keys[messageId] else { return [messageId] }
         return rows.filter { keys[$0.id] == key }.map(\.id)
@@ -1272,6 +1287,21 @@ public final class MailStore: Sendable {
             try String.fetchAll(
                 db, sql: "SELECT email FROM address WHERE messageId = ? ORDER BY role, position", arguments: [messageId]
             ).first(where: myAddresses.contains)
+        }
+    }
+
+    /// The other side of a message from `email`'s point of view, as MailMate takes it when none of my
+    /// addresses show: its first recipient if `email` sent it, else its sender.
+    public func otherSide(of email: String, in messageId: Int64) throws -> String? {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(
+                db, sql: "SELECT role, email FROM address WHERE messageId = ? AND email <> '' ORDER BY role, position",
+                arguments: [messageId])
+            let pairs = rows.map { (role: $0["role"] as Int, email: ($0["email"] as String).lowercased()) }
+            let from = pairs.first { $0.role == AddressRole.from.rawValue }?.email
+            guard from == email.lowercased() else { return from }
+            let recipientRoles = [AddressRole.to.rawValue, AddressRole.cc.rawValue, AddressRole.bcc.rawValue]
+            return pairs.first { recipientRoles.contains($0.role) && $0.email != email.lowercased() }?.email
         }
     }
 
