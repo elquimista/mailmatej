@@ -159,6 +159,9 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
             return shared?.content.subviews.first.flatMap(find)
         }
 
+        /// Moves sidebar rows in the editor's sidebar, as dragging there does ("key>target@index;...").
+        static func debugMoveSidebar(_ spec: String) { shared?.sidebar.debugMove(spec) }
+
         static func debugPressAddRule() { (shared?.content.debugPane as? RulesPane)?.debugPressAdd() }
 
         static func debugClickAddRule() { (shared?.content.debugPane as? RulesPane)?.debugClickAdd() }

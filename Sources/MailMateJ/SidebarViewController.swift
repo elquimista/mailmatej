@@ -335,6 +335,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         func debugSelect(key: String) { select(key: key) }
 
+        /// The Mailboxes section's rows, top level, in order.
+        var debugOrder: String { roots.first?.children.map(\.title).joined(separator: ", ") ?? "" }
+
         /// Logs a mailbox's message items (title, enabled); `choose` ("erase", "read") does one as its
         /// menu item does (Erase confirmed).
         func debugEmpty(key: String, choose: String?) {
@@ -660,9 +663,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private static let dragType = NSPasteboard.PasteboardType("com.mailmatej.sidebar-node")
 
-    /// What can be dragged: the special and smart mailboxes (in Mailboxes) and the accounts (in Sources).
+    /// What can be dragged, here and in the mailbox editor's sidebar (as in MailMate): the special and
+    /// smart mailboxes, in Mailboxes. Either sidebar's move refreshes both.
     private func isDraggable(_ node: SidebarNode) -> Bool {
-        guard !isInEditor else { return false }
         // Special mailboxes at the top or placed in a smart mailbox (not All / Junk / Deleted, part of All Messages).
         // Accounts aren't: they're always by description, A to Z.
         return (node.kind == .unified && node.key != "unified.everything") || node.kind == .smart

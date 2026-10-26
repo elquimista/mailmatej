@@ -400,6 +400,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             scroll.reflectScrolledClipView(scroll.contentView)
                         }
                     }
+                    if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_MOVE"] {
+                        MailboxEditorWindowController.debugMoveSidebar(spec)  // dragging in the editor's sidebar
+                        try? await Task.sleep(for: .seconds(1))
+                        NSLog("MMJ main sidebar after editor move: \(windowController?.debugSidebarOrder ?? "-")")
+                    }
                     if let width = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_SIDEBAR"] {
                         MailboxEditorWindowController.debugSidebarWidth(set: Double(width).map { CGFloat($0) })
                         try? await Task.sleep(for: .milliseconds(500))

@@ -594,6 +594,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
+        var debugSidebarOrder: String { sidebar.debugOrder }
         func debugEmpty(key: String, choose: String?) { sidebar.debugEmpty(key: key, choose: choose) }
 
         /// Shows the selected message's thread ("thread") or correspondence ("people"), or ends it ("cancel").
