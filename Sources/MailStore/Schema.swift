@@ -295,6 +295,27 @@ enum Schema {
                 )
                 """)
         }
+        m.registerMigration("v18-quoted-text") { db in
+            // The search index gets each message's text split as MailMate's Unquoted Text and Quoted Text
+            // see it (an FTS5 table can't add columns: it's made anew, then the stored bodies are indexed).
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE message_fts_new USING fts5(
+                    subject, addresses, body, unquoted, quoted,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+                INSERT INTO message_fts_new (rowid, subject, addresses, body, unquoted, quoted)
+                    SELECT rowid, subject, addresses, body, body, '' FROM message_fts;
+                DROP TRIGGER message_fts_delete;
+                DROP TABLE message_fts;
+                ALTER TABLE message_fts_new RENAME TO message_fts;
+                CREATE TRIGGER message_fts_delete AFTER DELETE ON message BEGIN
+                    DELETE FROM message_fts WHERE rowid = old.id;
+                END;
+                """)
+            for row in try Row.fetchAll(db, sql: "SELECT messageId, html, text FROM message_body") {
+                try MailStore.indexText(db, messageId: row["messageId"], text: row["text"], html: row["html"])
+            }
+        }
 
         return m
     }

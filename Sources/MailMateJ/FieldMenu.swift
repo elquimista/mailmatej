@@ -83,8 +83,10 @@ final class FieldMenu: NSObject {
         menu.addItem(.separator())
         menu.addItem(choice("Tags/Keywords", "field|\(SmartField.keyword.rawValue)"))
         menu.addItem(.separator())
-        menu.addItem(choice("Message Text", "field|\(SmartField.body.rawValue)"))
-        menu.addItem(choice("Common Headers or Text", "field|\(SmartField.headersOrText.rawValue)"))
+        // MailMate's text fields (Message Text, from before, still shows on the conditions that use it).
+        for field in [SmartField.unquoted, .quoted, .headersOrUnquoted, .headersOrText] {
+            menu.addItem(choice(field.title, "field|\(field.rawValue)"))
+        }
         menu.addItem(.separator())
         // » Source: No Specifier is the account (clicking Source chooses it), then the mailbox.
         menu.addItem(parent("\u{00BB} Source", [choice("No Specifier", "field|\(SmartField.account.rawValue)"), .separator(),

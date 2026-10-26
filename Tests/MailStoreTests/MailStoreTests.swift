@@ -40,6 +40,39 @@ import Testing
         #expect(all[1].definition == definition)
     }
 
+    @Test func quotedTextSplitsPlainAndHTML() {
+        let plain = QuotedText.split(plain: "Sounds good.\n\nOn 1 Oct, Ann wrote:\n> invoice attached\n>> older")
+        #expect(plain.unquoted == "Sounds good.\n\nOn 1 Oct, Ann wrote:")
+        #expect(plain.quoted == "invoice attached\nolder")
+        let html = QuotedText.split(
+            html: "<p>Sounds good.</p><blockquote><p>invoice attached</p><blockquote>older</blockquote> tail</blockquote><p>Bye</p>")
+        #expect(html.unquoted == "Sounds good.\nBye")
+        #expect(html.quoted.contains("invoice attached") && html.quoted.contains("older") && html.quoted.contains("tail"))
+        #expect(!html.unquoted.contains("invoice"))
+    }
+
+    @Test func unquotedAndQuotedTextConditionsSearchTheirParts() throws {
+        try store.upsertMessages(accountId: "acc", [
+            message("1", from: "a@x.com", at: 100, subject: "Re: plan"), message("2", from: "b@x.com", at: 200, subject: "Invoice"),
+        ])
+        let ids = try store.messageIDs(scope: .allMessages, sort: MessageSort(key: .receivedAt, ascending: true))
+        try store.saveBody(messageId: ids[0], MessageBody(html: nil, text: "Sounds good.\n> the invoice is attached"))
+        try store.saveBody(messageId: ids[1], MessageBody(html: "<p>Here is the invoice.</p>", text: nil))
+        // Indexed text survives the message being updated again (a flag change).
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100, subject: "Re: plan", keywords: ["$seen"])])
+        func matching(_ field: SmartField) throws -> [Int64] {
+            let id = try store.createSmartMailbox(name: field.rawValue, parentId: nil)
+            var definition = SmartDefinition(sources: SmartSources(scopes: ["all"]))
+            definition.condition = .compound(.all, [.rule(field, .contains, "invoice")])
+            try store.updateSmartMailbox(id: id, definition: definition)
+            return try store.messageIDs(scope: .smart(id), sort: MessageSort(key: .receivedAt, ascending: true))
+        }
+        #expect(try matching(.unquoted) == [ids[1]])  // only the second wrote it (HTML-only, indexed too)
+        #expect(try matching(.quoted) == [ids[0]])  // the first only quotes it
+        #expect(try matching(.body) == ids)  // Message Text: both, as before
+        #expect(try matching(.headersOrUnquoted) == [ids[1]])
+    }
+
     @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
         try store.upsertMessages(accountId: "acc", [
             message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),

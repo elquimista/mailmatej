@@ -170,10 +170,20 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
     public static let fromName = address(.from, .name), fromAddress = address(.from, .address), fromDomain = address(.from, .domain)
     public static let toName = address(.to, .name), toAddress = address(.to, .address), toDomain = address(.to, .domain)
     public static let subject = SmartField(rawValue: "subject")
-    /// The message's text (MailMate's text fields; ours searches all of it).
+    /// The message's whole text, quotes included ("Message Text", from before Unquoted Text; no longer
+    /// offered, kept for the conditions that use it).
     public static let body = SmartField(rawValue: "body")
+    /// MailMate's "Unquoted Text": what the sender wrote, without what the message quotes.
+    public static let unquoted = SmartField(rawValue: "unquoted")
+    /// MailMate's "Quoted Text": only what the message quotes.
+    public static let quoted = SmartField(rawValue: "quoted")
+    /// MailMate's "Common Headers or Unquoted Text": subject, addresses or unquoted text.
+    public static let headersOrUnquoted = SmartField(rawValue: "headersOrUnquoted")
     /// MailMate's "Common Headers or Text": subject, addresses or text.
     public static let headersOrText = SmartField(rawValue: "headersOrText")
+
+    /// Fields matched in the search index (words, not exact strings): contains or doesn't.
+    public var isFullText: Bool { [.body, .unquoted, .quoted, .headersOrUnquoted, .headersOrText].contains(self) }
     public static let filename = SmartField(rawValue: "filename")
     public static let keyword = SmartField(rawValue: "keyword")
     /// "Message is ▸ Unread" (op `is`) or "Message is not ▸ …".
@@ -291,6 +301,9 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         switch self {
         case .subject: return "Subject"
         case .body: return "Message Text"
+        case .unquoted: return "Unquoted Text"
+        case .quoted: return "Quoted Text"
+        case .headersOrUnquoted: return "Common Headers or Unquoted Text"
         case .headersOrText: return "Common Headers or Text"
         case .filename: return "Filename"
         case .keyword: return "Tags/Keywords"
@@ -305,7 +318,7 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
 
     public var operators: [SmartOperator] {
         switch kind {
-        case .text where self == .body || self == .headersOrText: [.contains, .doesNotContain]
+        case .text where isFullText: [.contains, .doesNotContain]
         // MailMate's operator menu, in its groups (see `operatorGroups`).
         case .text: [.is, .isNot, .contains, .doesNotContain, .lessOrEqual, .moreOrEqual, .isIn, .isNotIn, .exists, .notExists]
         case .status, .mailbox, .account: [.is, .isNot]
@@ -572,9 +585,13 @@ extension MailStore {
                 return ("\(not)EXISTS (SELECT 1 FROM address a WHERE a.messageId = m.id AND a.role IN (\(roles)) AND a.email <> '' AND \(match))", args)
             }
             switch field {
-            case .body, .headersOrText:
+            case .body, .unquoted, .quoted, .headersOrUnquoted, .headersOrText:
                 guard let query = Self.ftsQuery(value) else { return ("1", []) }
-                return ("m.id \(not)IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)", [field == .body ? "body : (\(query))" : query])
+                // The index's columns each field searches (all of them for Common Headers or Text).
+                let columns = [SmartField.body: "body", .unquoted: "unquoted", .quoted: "quoted",
+                               .headersOrUnquoted: "{subject addresses unquoted}"][field]
+                return ("m.id \(not)IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)",
+                        [columns.map { "\($0) : (\(query))" } ?? query])
             case .filename:
                 let (test, args) = Self.textTest("coalesce(p.name, '')", op, value, options)
                 return ("\(not)EXISTS (SELECT 1 FROM message_part p WHERE p.messageId = m.id AND p.name IS NOT NULL AND \(test))", args)

@@ -310,7 +310,8 @@ public final class MailStore: Sendable {
             let addAddress = try db.cachedStatement(
                 sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, ?)")
             let addFTS = try db.cachedStatement(
-                sql: "INSERT INTO message_fts (rowid, subject, addresses, body) VALUES (?, ?, ?, ?)")
+                sql: "INSERT INTO message_fts (rowid, subject, addresses, body, unquoted) VALUES (?, ?, ?, ?, ?)")
+            let storedBody = try db.cachedStatement(sql: "SELECT html, text FROM message_body WHERE messageId = ?")
 
             for m in messages {
                 let keywords = Set(m.keywords.map { $0.lowercased() })
@@ -342,7 +343,12 @@ public final class MailStore: Sendable {
                 }
                 let addressText = m.addresses.map { [$0.name, $0.email].compactMap { $0 }.joined(separator: " ") }
                     .joined(separator: " ")
-                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview])
+                // Until its body is here, the preview stands for its text (it's the start: the sender's own).
+                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview, m.preview])
+                // Updated again (a flag changed): its downloaded text stays searchable.
+                if let body = try Row.fetchOne(storedBody, arguments: [id]) {
+                    try Self.indexText(db, messageId: id, text: body["text"], html: body["html"])
+                }
             }
         }
     }
@@ -451,11 +457,19 @@ public final class MailStore: Sendable {
                         """,
                     arguments: [messageId, p.blobId, p.cid.map(MessagePart.normalizeCID), p.type, p.name, p.size, position])
             }
-            if let text = body.text {
-                try db.execute(
-                    sql: "UPDATE message_fts SET body = ? WHERE rowid = ?", arguments: [String(text.prefix(100_000)), messageId])
-            }
+            try Self.indexText(db, messageId: messageId, text: body.text, html: body.html)
         }
+    }
+
+    /// Puts a message's text in the search index: all of it, and split into what the sender wrote and
+    /// what it quotes (see `QuotedText`), each at most 100,000 characters.
+    static func indexText(_ db: Database, messageId: Int64, text: String?, html: String?) throws {
+        let split = QuotedText.split(text: text, html: html)
+        guard !split.all.isEmpty else { return }
+        try db.execute(
+            sql: "UPDATE message_fts SET body = ?, unquoted = ?, quoted = ? WHERE rowid = ?",
+            arguments: [String(split.all.prefix(100_000)), String(split.unquoted.prefix(100_000)),
+                        String(split.quoted.prefix(100_000)), messageId])
     }
 
     // MARK: Local edits (applied right away; the server copy follows)

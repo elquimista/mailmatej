@@ -67,7 +67,7 @@ struct SmartRuleContext {
     /// Values for an "is" combo box, as MailMate's: the field's values among the messages the smart
     /// mailbox's Mailboxes tab selects (read now, so changes there show), A to Z.
     func suggestions(_ field: SmartField) -> [String] {
-        guard field.kind == .text, field != .body, field != .headersOrText else { return [] }
+        guard field.kind == .text, !field.isFullText else { return [] }
         let sources = mailboxKey.map { SmartSources(scopes: [$0]) }
             ?? (try? model.store.smartMailboxes())?.first { $0.id == smartID }?.definition.sources ?? SmartSources(scopes: [])
         return (try? model.store.fieldValues(field, sources: sources)) ?? []
