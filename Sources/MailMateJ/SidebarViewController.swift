@@ -1316,18 +1316,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// selected, with its editor open at once on Conditions.
     /// On a special mailbox (MailMate's New Smart Mailbox on All Messages) it goes inside that one,
     /// starting from its messages.
+    /// On a source it starts from that source's messages, under Any, with the editor on Mailboxes.
     func newSmartMailbox(inside node: SidebarNode?) {
         var parentId: Int64?, parentKey: String?
         if case .smart(let id)? = node?.scope { parentId = id }
         if node?.kind == .unified { parentKey = node?.scope?.key }
-        guard let id = model.createSmartMailbox(name: "Untitled", parentId: parentId, parentKey: parentKey) else { return }
+        // From a source: a top-level smart mailbox taking that source's messages.
+        let sources = node?.kind == .account ? node?.scope.map { [$0.key] } : nil
+        guard let id = model.createSmartMailbox(name: "Untitled", parentId: parentId, parentKey: parentKey, sources: sources) else { return }
         reload()
         if let parent = node, parent.kind == .smart || parent.kind == .unified, let fresh = find(parent.key, in: roots) {
             outline.expandItem(fresh)
         }
         let key = "smart.\(id)"
         guard select(key: key) else { return }
-        MailboxEditorWindowController.show(key: key, model: model, over: view.window, tab: .conditions)
+        // From a source, on Mailboxes, where that source is.
+        MailboxEditorWindowController.show(key: key, model: model, over: view.window, tab: sources == nil ? .conditions : .mailboxes)
     }
 
     #if DEBUG

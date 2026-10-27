@@ -969,10 +969,11 @@ extension MailStore {
     /// messages, a top-level one with no mailboxes added (all messages), as MailMate's.
     /// Inside a special mailbox (`parentKey`, as MailMate's New Smart Mailbox on All Messages), it
     /// starts from that mailbox's messages.
-    public func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil) throws -> Int64 {
+    public func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil, sources: [String]? = nil) throws -> Int64 {
         var definition = SmartDefinition(sources: SmartSources(scopes: []))
         if let parentId { definition.sources = SmartSources(scopes: [MessageScope.smart(parentId).key]) }
         if parentId == nil, let parentKey { definition.sources = SmartSources(scopes: [parentKey]) }
+        if let sources { definition.sources = SmartSources(scopes: sources) }  // under Any
         let key = parentId == nil ? parentKey : nil
         let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
         let id = try dbPool.write { db -> Int64 in
