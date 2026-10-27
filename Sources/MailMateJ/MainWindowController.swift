@@ -853,7 +853,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Synchronize's title for the selected mailbox.
     var synchronizeTitle: String { sidebar.synchronizeTitle(for: sidebar.selectedNode) }
 
-    /// Mailbox › New Smart Mailbox (⌥⌘N): inside the selected smart mailbox, else at the top level.
+    /// Mailbox › New Smart Mailbox (⌥⌘N): inside the selected smart mailbox, else at the top level; not on
+    /// a generated submailbox.
     @objc func newSmartMailbox(_ sender: Any?) {
         sidebar.newSmartMailbox(inside: sidebar.selectedNode)
     }
@@ -958,6 +959,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return messageView.hasAttachments
         case #selector(goToMailbox(_:)):
             return !editing
+        case #selector(newSmartMailbox(_:)):
+            return sidebar.selectedNode?.isGenerated != true
         default:
             return true
         }

@@ -19,6 +19,9 @@ final class SidebarNode: NSObject {
     var warning: String?
     var info: String?
     var isBusy = false
+    /// Made by a Submailboxes tab (one per value, account or source of the mailbox above), so it comes
+    /// and goes with the mail: nothing can be made inside it.
+    var isGenerated = false
     var children: [SidebarNode] = []
 
     init(key: String, kind: Kind, title: String, symbol: String = "", scope: MessageScope? = nil, accountId: String? = nil) {
@@ -554,6 +557,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 let node = SidebarNode(
                     key: "smart.\(record.id)\(account.map { ".account.\($0)" } ?? "").value.\(value.lowercased())", kind: .mailbox,
                     title: value.isEmpty ? "Other" : value, scope: scope, accountId: account)
+                node.isGenerated = true
                 node.badge = unread
                 return node
             }
@@ -565,6 +569,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let node = SidebarNode(
                 key: "smart.\(record.id).account.\(account.id)", kind: .mailbox, title: account.name,
                 scope: .smartAccount(record.id, account.id), accountId: account.id)
+            node.isGenerated = true
             node.badge = unread
             node.children = valueNodes(account: account.id)
             return node
@@ -629,6 +634,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func child(_ key: String, _ title: String, _ scope: MessageScope, accountId: String, badge: Int, role: String?) -> SidebarNode {
             let child = SidebarNode(
                 key: "\(node.key).\(key)", kind: .mailbox, title: title, scope: scope, accountId: accountId)
+            child.isGenerated = true
             child.role = role
             child.badge = badge
             return child
@@ -643,6 +649,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 let child = SidebarNode(
                     key: "\(parent.key).value.\(value.lowercased())", kind: .mailbox, title: value.isEmpty ? "Other" : value,
                     scope: .value(scope, field, value), accountId: parent.accountId)
+                child.isGenerated = true
                 child.badge = unread
                 return child
             }
@@ -981,7 +988,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return item
         }
         var groups = menuGroups(for: node)
-        if node.kind != .header || node.key == "header.mailboxes" {
+        if (node.kind != .header || node.key == "header.mailboxes") && !node.isGenerated {
             groups.insert([item("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))], at: 0)
         }
         if node.kind != .header {
@@ -1344,7 +1351,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// starting from its messages.
     /// On a source it starts from that source's messages, under Any.
     /// The editor opens on Mailboxes when the new one starts from a mailbox's messages, else on Conditions.
+    /// None goes inside a generated submailbox, which comes and goes with the mail.
     func newSmartMailbox(inside node: SidebarNode?) {
+        if node?.isGenerated == true { return }
         var parentId: Int64?, parentKey: String?
         if case .smart(let id)? = node?.scope { parentId = id }
         if node?.kind == .unified { parentKey = node?.scope?.key }

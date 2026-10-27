@@ -146,6 +146,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let menu = NSApp.mainMenu?.item(withTitle: "Mailbox")?.submenu
                 {
                     menu.delegate?.menuNeedsUpdate?(menu)  // as opening it does
+                    // Validated by the main window, as when it's key (a snapshot run's window isn't).
+                    for item in menu.items {
+                        if let action = item.action, let controller = windowController, controller.responds(to: action) {
+                            item.isEnabled = controller.validateMenuItem(item)
+                        }
+                    }
                     NSLog("MMJ Mailbox menu: \(menu.items.map { $0.isSeparatorItem ? "—" : $0.title + ($0.isEnabled && ($0.action != nil || $0.submenu != nil) ? "" : " (off)") })")
                 }
                 if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_MENU_ICONS"] {
