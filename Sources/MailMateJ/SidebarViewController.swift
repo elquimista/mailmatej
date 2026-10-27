@@ -37,6 +37,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onSelect: ((SidebarNode) -> Void)?
     /// The selected mailbox went away (deleted): nothing is selected, as in MailMate.
     var onSelectNone: (() -> Void)?
+    /// A mailbox or account was renamed in its row.
+    var onRename: ((SidebarNode) -> Void)?
     /// Edit an account's settings (a double-click on it, or Edit Account… in its menu).
     var onEditAccount: ((String) -> Void)?
     /// Unread counts, activity spinners, sync warnings and status tooltips on the rows; MailMate's
@@ -978,7 +980,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         var groups: [[NSMenuItem]] = []
         if node.kind == .account, let accountId = node.accountId {
-            groups.append([item("Edit Account…", #selector(editAccountClicked(_:)), accountId), item("Remove Account…", #selector(removeClicked(_:)))])
+            // MailMate's "Edit IMAP Account…", naming the account's type.
+            let kind = (try? model.store.account(id: accountId))?.isGmail == true ? "Gmail" : "JMAP"
+            groups.append([item("Edit \(kind) Account…", #selector(editAccountClicked(_:)), accountId)])
         }
         if node.kind != .header {
             let count = NSMenuItem(title: "Displayed Count", action: nil, keyEquivalent: "")
@@ -999,6 +1003,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             ])
         } else if node.kind == .unified {
             groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
+        } else if node.kind == .account {
+            groups.append([item("Rename Source…", #selector(renameClicked(_:))), item("Remove Source", #selector(removeClicked(_:)))])
         }
         if node.kind != .header {
             groups.append(messageItems(node))
@@ -1401,14 +1407,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private var renaming: (key: String, thenEdit: Bool)?
 
-    /// Smart mailboxes and an account's folders can be renamed (not unified mailboxes, accounts, or Inbox).
+    /// Smart mailboxes, accounts and an account's folders can be renamed (not unified mailboxes or Inbox).
     private func canRename(_ node: SidebarNode) -> Bool {
-        if node.kind == .smart { return true }
+        if node.kind == .smart || node.kind == .account { return true }
         guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
         return node.role != "inbox"
     }
 
-    /// Edits a smart mailbox's or folder's name in its row.
+    /// Edits a smart mailbox's, account's or folder's name in its row.
     private func beginRename(key: String, thenEdit: Bool) {
         guard let node = find(key, in: roots) else { return }
         let row = outline.row(forItem: node)
@@ -1442,8 +1448,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             switch node.scope {
             case .smart(let id)?: model.updateSmartMailbox(id: id, name: name)
             case .mailbox(let id)?: model.renameMailbox(id: id, to: name)
+            case .account(let id)?: model.renameAccount(id: id, to: name)
             default: break
             }
+            onRename?(node)
         } else {
             field.stringValue = node.title
         }

@@ -249,6 +249,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             self.reloadList(.scopeChanged)
             updateProgress()
         }
+        sidebar.onRename = { [weak self] node in
+            guard let self, list.colorKey == node.key else { return }  // the mailbox on show
+            scopeTitle = node.title
+            updateTitle()
+        }
         list.onSelectionChange = { [weak self] id in
             guard let self else { return }
             selectAfterMove = nil  // The user moved on.

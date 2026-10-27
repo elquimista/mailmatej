@@ -274,6 +274,14 @@ final class AppModel {
         }
     }
 
+    /// Rename Source…: the account's name in the sidebar, kept here (the server isn't told).
+    func renameAccount(id: String, to name: String) {
+        guard var record = try? store.account(id: id) else { return }
+        record.name = name
+        try? store.save(record)
+        refreshNow()
+    }
+
     enum AccountEditError: LocalizedError {
         case differentAccount
         var errorDescription: String? {
