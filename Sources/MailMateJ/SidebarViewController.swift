@@ -571,7 +571,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for account in accounts {
             let node = SidebarNode(
                 key: "account.\(account.id)", kind: .account, title: account.name,
-                symbol: account.isGmail ? MailboxSymbols.gmail : "at",
+                symbol: MailboxSymbols.symbol(for: account),
                 scope: .account(account.id), accountId: account.id)
             node.badge = counts.unreadByAccount[account.id] ?? 0
             node.warning = model.syncWarning(accountId: account.id)

@@ -20,7 +20,7 @@ final class SymbolPanel: NSPanel, NSComboBoxDataSource, NSComboBoxDelegate {
         shared = panel
         panel.key = key
         let symbol = MailboxSymbols.symbol(for: key) ?? defaultSymbol
-        panel.combo.stringValue = symbol == MailboxSymbols.gmail ? "" : symbol  // drawn here: no SF name to show
+        panel.combo.stringValue = MailboxSymbols.drawn.contains(symbol) ? "" : symbol  // drawn here: no SF name to show
         panel.showSymbol(symbol)
         if !panel.isVisible { panel.center() }
         panel.makeKeyAndOrderFront(nil)
@@ -70,7 +70,7 @@ final class SymbolPanel: NSPanel, NSComboBoxDataSource, NSComboBoxDelegate {
     }
 
     private func showSymbol(_ name: String) {
-        preview.image = MailboxSymbols.image(name, size: 140)?
+        preview.image = MailboxSymbols.image(name, scale: 11, sidebar: false)?
             .withSymbolConfiguration(.init(pointSize: 150, weight: .regular))
     }
 

@@ -405,7 +405,7 @@ private final class PickerCell: NSTableCellView {
         color = MailboxColors.color(for: choice.node.key)
         var configuration = NSImage.SymbolConfiguration(pointSize: 20, weight: .regular)
         if color == .multicolor { configuration = configuration.applying(MailboxColors.multicolor) }
-        icon.image = MailboxSymbols.image(choice.node.symbol.isEmpty ? "folder" : choice.node.symbol, size: 18)?
+        icon.image = MailboxSymbols.image(choice.node.symbol.isEmpty ? "folder" : choice.node.symbol, scale: 1.5, sidebar: false)?
             .withSymbolConfiguration(configuration)
         updateColors()
     }

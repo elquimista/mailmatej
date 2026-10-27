@@ -254,34 +254,94 @@ enum MailboxSymbols {
         ("List", "list.bullet.rectangle"), ("Star", "star"), ("Tag", "tag"),
     ]
 
-    /// Gmail sources' symbol, a G drawn here (`image`): MailMate shows a G for them, and no SF Symbol is one.
+    /// Sources' symbols, drawn here (`image`), as MailMate picks one by provider: Gmail's G, Fastmail's
+    /// mark, and SF's network globe for the rest.
     static let gmail = "mailmatej.gmail"
+    static let fastmail = "mailmatej.fastmail"
+    static let network = "mailmatej.network"
+    static let drawn: Set<String> = [gmail, fastmail, network]
 
-    /// A symbol by name: an SF Symbol, or the one drawn here (`gmail`, `size` points square).
-    static func image(_ name: String, size: CGFloat = 12) -> NSImage? {
-        name == gmail ? gmailImage(size: size) : NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    /// A source's symbol: Gmail's G, Fastmail's mark for an account on its servers (fastmail.com or
+    /// messagingengine.com, as MailMate tells them), else the network globe.
+    static func symbol(for account: AccountRecord) -> String {
+        if account.isGmail { return gmail }
+        let host = URL(string: account.sessionURL)?.host?.lowercased() ?? ""
+        let onFastmail = ["fastmail.com", "messagingengine.com"].contains { host == $0 || host.hasSuffix("." + $0) }
+        return onFastmail ? fastmail : network
     }
 
-    /// A G as MailMate sizes its own (measured at 1x): 12 pt beside the 13 pt name, a point beyond its
-    /// ascenders above and below, its ring a fifth as thick, heavier than the SF Symbols around it. A
-    /// ring open at the upper right, and a bar from its middle to the right edge, 2 pt at 12 pt so it
-    /// sits on the pixel grid. A template, so it takes the row's tint. The image is a sixth wider than
-    /// the G, blank on the right: centred where the sidebar centres icons, the G ends 9 pt before the
-    /// name, as MailMate's does.
-    private static func gmailImage(size: CGFloat) -> NSImage {
-        let image = NSImage(size: NSSize(width: size * 7 / 6, height: size), flipped: false) { _ in
-            let ring = size / 5
-            let center = NSPoint(x: size / 2, y: size / 2)
-            let arc = NSBezierPath()
-            arc.appendArc(withCenter: center, radius: (size - ring) / 2, startAngle: 45, endAngle: 0)
-            arc.lineWidth = ring
-            NSColor.black.set()
-            arc.stroke()
-            NSRect(x: center.x, y: center.y - size / 12, width: size / 2, height: size / 6).fill()
+    /// A symbol by name: an SF Symbol, or one drawn here at `scale` times its sidebar size (`sidebar`:
+    /// placed as the sidebar wants it, see `sourceImage`; else alone in its square).
+    static func image(_ name: String, scale: CGFloat = 1, sidebar: Bool = true) -> NSImage? {
+        switch name {
+        case gmail: sourceImage(12, scale, sidebar, drawG)
+        case fastmail: sourceImage(13, scale, sidebar, drawFastmail)
+        case network: sourceImage(13, scale, sidebar, drawNetwork)
+        default: NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        }
+    }
+
+    /// A source's symbol, `size` points square in the sidebar. MailMate's G is 12 pt beside the 13 pt
+    /// name, a point beyond its ascenders above and below (measured at 1x); the network globe, and
+    /// Fastmail's mark with it, are a point bigger, as MailMate draws SF Symbols bigger than ours (its
+    /// folder 15 by 12 pt, ours 14 by 11). A template, so it takes the row's tint. For the sidebar the
+    /// image is 16 pt wide, the symbol ending 3 pt from its right: centred in the sidebar's 18 pt icon
+    /// box, the symbol ends 9 pt before the name, as MailMate's do.
+    private static func sourceImage(
+        _ size: CGFloat, _ scale: CGFloat, _ sidebar: Bool, _ draw: @escaping @Sendable (CGFloat) -> Void
+    ) -> NSImage {
+        let width = sidebar ? 16 : size, left = sidebar ? 13 - size : 0
+        let image = NSImage(size: NSSize(width: width * scale, height: size * scale), flipped: false) { _ in
+            NSGraphicsContext.current?.cgContext.translateBy(x: left * scale, y: 0)
+            draw(size * scale)
             return true
         }
         image.isTemplate = true
         return image
+    }
+
+    /// A G: a ring a fifth as thick, heavier than the SF Symbols around it (as MailMate's), open at the
+    /// upper right, and a bar from its middle to the right edge, 2 pt at 12 pt so it sits on the pixel grid.
+    private static func drawG(_ size: CGFloat) {
+        let ring = size / 5
+        let center = NSPoint(x: size / 2, y: size / 2)
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: center, radius: (size - ring) / 2, startAngle: 45, endAngle: 0)
+        arc.lineWidth = ring
+        NSColor.black.set()
+        arc.stroke()
+        NSRect(x: center.x, y: center.y - size / 12, width: size / 2, height: size / 6).fill()
+    }
+
+    /// Fastmail's mark in one color, simplified to read at this size: a thin ring around an envelope
+    /// notched at the top to its middle. The envelope's edges are on whole points.
+    private static func drawFastmail(_ size: CGFloat) {
+        let ring = size * 1.25 / 12
+        let center = NSPoint(x: size / 2, y: size / 2)
+        let circle = NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: size, height: size).insetBy(dx: ring / 2, dy: ring / 2))
+        circle.lineWidth = ring
+        NSColor.black.set()
+        circle.stroke()
+        let left = (size / 4).rounded(), right = size - left
+        let bottom = (size * 0.3).rounded(), top = size - bottom
+        let envelope = NSBezierPath()
+        envelope.move(to: NSPoint(x: left, y: top))
+        envelope.line(to: NSPoint(x: center.x, y: (top + bottom) / 2))
+        envelope.line(to: NSPoint(x: right, y: top))
+        envelope.line(to: NSPoint(x: right, y: bottom))
+        envelope.line(to: NSPoint(x: left, y: bottom))
+        envelope.close()
+        envelope.fill()
+    }
+
+    /// SF's network globe: at a point size equal to the size, its outline is that wide, centred in the
+    /// symbol's image.
+    private static func drawNetwork(_ size: CGFloat) {
+        guard let symbol = NSImage(systemSymbolName: "network", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .regular))
+        else { return }
+        let origin = NSPoint(x: (size - symbol.size.width) / 2, y: (size - symbol.size.height) / 2)
+        symbol.draw(in: NSRect(origin: origin, size: symbol.size))
     }
 
     /// The symbol chosen for a mailbox, or nil for its default.
