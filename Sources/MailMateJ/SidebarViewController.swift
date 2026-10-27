@@ -1468,7 +1468,10 @@ final class SidebarCell: NSTableCellView {
         super.init(frame: .zero)
         self.identifier = identifier
         let image = NSImageView()
-        let field = NSTextField(labelWithString: "")
+        // Solid text, as MailMate's (254 on the dark sidebar, not 240): the sidebar's frosted material
+        // blends vibrant label colours with what's behind the window, which made the names look washed out.
+        let field = SolidLabel(labelWithString: "")
+        field.textColor = .textColor
         field.lineBreakMode = .byTruncatingTail
         for v in [image, field, badge, spinner] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -1495,6 +1498,11 @@ final class SidebarCell: NSTableCellView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The title in the selection's text colour on a highlighted row (white on the accent in light mode).
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { textField?.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .textColor }
+    }
 
     /// `plain`: icon and name only (the mailbox editor's sidebar).
     func configure(_ node: SidebarNode, plain: Bool = false) {
@@ -1605,11 +1613,11 @@ final class SidebarOutlineView: NSOutlineView {
 /// A section header as MailMate draws it (measured at 1x): 12 pt semibold grey title, and "Hide" (or
 /// "Show" once hidden) at the right while the pointer is over the header.
 final class SidebarHeaderCell: NSTableCellView {
-    /// Shows as (181, 181, 181) on the dark sidebar, as MailMate's headers do (explicit sRGB greys draw
-    /// lighter on this display: 166 comes out as 181).
+    /// Shows as about (200, 200, 200) on the dark sidebar, as MailMate's headers do side by side with
+    /// these (explicit sRGB greys draw about 15 lighter on this display).
     static let color = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 166 / 255, green: 166 / 255, blue: 166 / 255, alpha: 1) : .secondaryLabelColor
+            ? NSColor(srgbRed: 185 / 255, green: 185 / 255, blue: 185 / 255, alpha: 1) : .secondaryLabelColor
     }
     static let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
     /// The first header (measured at 1x): 15 px from the toolbar to its capitals, 28 px from them to the
@@ -1684,4 +1692,9 @@ final class SidebarHeaderCell: NSTableCellView {
         super.prepareForReuse()
         hovering = false
     }
+}
+
+/// A label drawn as it is, not blended with a vibrant (frosted) background behind it.
+final class SolidLabel: NSTextField {
+    override var allowsVibrancy: Bool { false }
 }
