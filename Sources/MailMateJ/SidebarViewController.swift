@@ -1417,7 +1417,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// starting from its messages.
     /// On a source it starts from that source's messages, under Any.
     /// The editor opens on Mailboxes when the new one starts from a mailbox's messages, else on Conditions.
-    /// None goes inside a generated submailbox, which comes and goes with the mail.
+    /// One made inside a mailbox takes its color. None goes inside a generated submailbox, which comes and
+    /// goes with the mail.
     func newSmartMailbox(inside node: SidebarNode?) {
         if node?.isGenerated == true { return }
         var parentId: Int64?, parentKey: String?
@@ -1431,6 +1432,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.expandItem(fresh)
         }
         let key = "smart.\(id)"
+        // Made inside a mailbox, it takes that one's color.
+        if parentId != nil || parentKey != nil, let parent = node, let color = MailboxColors.color(for: parent.key) {
+            MailboxColors.set(color, for: key)
+        }
         guard select(key: key) else { return }
         let startsFromMailbox = parentId != nil || parentKey != nil || sources != nil
         MailboxEditorWindowController.show(key: key, model: model, over: view.window, tab: startsFromMailbox ? .mailboxes : .conditions)
