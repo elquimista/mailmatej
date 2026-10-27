@@ -1223,6 +1223,37 @@ final class AppModel {
         return GoogleTokenSource(client: client, refreshToken: try Keychain.get(account: account.id))
     }
 
+    #if DEBUG
+        /// Signs in to a Gmail account over IMAP (read-only) and logs its special mailboxes, how many
+        /// messages All Mail has, and a few fetched whole, timing it.
+        func debugGmailIMAP(accountId: String) async {
+            guard let account = try? store.account(id: accountId), let tokens = try? Self.googleTokens(for: account) else {
+                return NSLog("MMJ imap: no account")
+            }
+            let imap = GmailIMAP(email: account.username, tokens: tokens)
+            do {
+                let started = Date()
+                try await imap.connect()
+                let folders = try await imap.folders()
+                NSLog("MMJ imap: signed in in \(Int(Date().timeIntervalSince(started) * 1000)) ms; all \(folders.all ?? "-") spam \(folders.spam ?? "-") trash \(folders.trash ?? "-")")
+                guard let all = folders.all else { return await imap.close() }
+                try await imap.examine(all)
+                let indexStarted = Date()
+                let index = try await imap.index()
+                NSLog("MMJ imap: \(index.count) messages indexed in \(Int(Date().timeIntervalSince(indexStarted) * 1000)) ms")
+                let fetchStarted = Date()
+                let newest = Array(index.sorted { $0.uid > $1.uid }.prefix(50))
+                let messages = try await imap.fetch(newest.map(\.uid), bodies: true)
+                let bytes = messages.compactMap(\.raw).map(\.count).reduce(0, +)
+                NSLog("MMJ imap: fetched \(messages.count) whole (\(bytes / 1024) KB) in \(Int(Date().timeIntervalSince(fetchStarted) * 1000)) ms; first \(messages.first.map { "\($0.gmailId) thread \($0.threadId ?? "-") labels \($0.labels) flags \($0.flags.sorted())" } ?? "-")")
+                await imap.close()
+            } catch {
+                NSLog("MMJ imap: failed: \(error)")
+                await imap.close()
+            }
+        }
+    #endif
+
     nonisolated private static func credentials(for account: AccountRecord) throws -> Credentials {
         #if DEBUG
             if account.id.hasPrefix("dev-") {

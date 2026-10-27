@@ -25,9 +25,20 @@ public actor GmailAccountSync {
 
     public init(account: AccountRecord, tokens: GoogleTokenSource, store: MailStore, urlSession: URLSession = .shared) {
         self.account = account
+        self.tokens = tokens
         self.client = GmailClient(tokens: tokens, session: urlSession)
         self.store = store
     }
+
+    private let tokens: GoogleTokenSource
+    /// The IMAP connections downloads use while they run, and where each message is in them.
+    private var imapPool: [GmailIMAP] = []
+    /// How many IMAP connections fetch at once: one alone is held to about 1 MB/s, and Gmail allows
+    /// 15 an account (other apps' included).
+    static let imapConnections = 4
+    private var imapIndex: [String: (folder: String, uid: UInt32)]?
+    /// IMAP failed (turned off for the account, say): downloads use the API until the next sync.
+    private var imapUnavailable = false
 
     /// The headers stored for every message.
     static let headerNames = ["From", "Sender", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
@@ -60,6 +71,7 @@ public actor GmailAccountSync {
         -> JMAPAccountSync.Result
     {
         var result = JMAPAccountSync.Result()
+        imapUnavailable = false  // try IMAP again
         result.mailboxes = try await syncLabels()
         // An account synced when mailboxes meant something else (or before that was recorded) has every
         // message fetched again. A first sync still under way records nothing yet: it just carries on.
@@ -148,6 +160,37 @@ public actor GmailAccountSync {
             start = current
             try store.setSyncState(start, accountId: account.id, type: Self.fullSyncState)
         }
+        // Over IMAP when it can (whole messages at the network's speed, not 95 a minute); what it got
+        // stays if it stops, and the API carries on from there.
+        let listed: Set<String>
+        do {
+            listed = try await imapList(refetchKnown: refetchKnown, into: &result, progress: progress)
+        } catch {
+            syncLog.notice("Gmail IMAP unavailable for \(self.account.name, privacy: .public), using the API: \(ErrorText.technical(error), privacy: .public)")
+            listed = try await apiList(refetchKnown: refetchKnown, total: total, into: &result, progress: progress)
+        }
+        let gone = try store.remoteIDs(accountId: account.id).subtracting(listed)
+        if !gone.isEmpty {
+            try store.deleteMessages(accountId: account.id, remoteIds: Array(gone))
+            result.destroyed += gone.count
+        }
+        // Done: from now on, Gmail's history (and the mailboxes as they're mapped now).
+        try store.setSyncState(start, accountId: account.id, type: Self.historyState)
+        try store.setSyncState(Self.mappingVersion, accountId: account.id, type: Self.mappingState)
+        for state in [Self.fullSyncState, Self.refetchState, Self.refetchDoneState] {
+            try store.setSyncState(nil, accountId: account.id, type: state)
+        }
+        var catchUp = JMAPAccountSync.Result()
+        try await syncHistory(since: start, into: &catchUp)
+        result.updated += catchUp.updated
+        result.destroyed += catchUp.destroyed
+    }
+
+    /// The full sync's listing through the API: every message whole, 95 a minute (Gmail's quota).
+    /// Returns every message's id.
+    private func apiList(
+        refetchKnown: Bool, total: Int, into result: inout JMAPAccountSync.Result, progress: @Sendable (Int, Int) async -> Void
+    ) async throws -> Set<String> {
         let known = refetchKnown ? [] : try store.remoteIDs(accountId: account.id)
         var skip = refetchKnown ? max(0, (Int(try store.syncState(accountId: account.id, type: Self.refetchDoneState) ?? "") ?? 0) - 50) : 0
         var listed = Set<String>()
@@ -178,21 +221,126 @@ public actor GmailAccountSync {
             if todo.isEmpty { await progress(read, max(total, read)) }
             try store.recountMailboxes(accountId: account.id)
         } while token != nil
-        let gone = try store.remoteIDs(accountId: account.id).subtracting(listed)
-        if !gone.isEmpty {
-            try store.deleteMessages(accountId: account.id, remoteIds: Array(gone))
-            result.destroyed += gone.count
+        return listed
+    }
+
+    /// The full sync's listing over IMAP: All Mail, Spam and Trash indexed, then the messages not stored
+    /// yet fetched whole in batches, newest first, with their labels and flags (when fetching all again,
+    /// those stored here get only their labels). Returns every message's id.
+    private func imapList(
+        refetchKnown: Bool, into result: inout JMAPAccountSync.Result, progress: @Sendable (Int, Int) async -> Void
+    ) async throws -> Set<String> {
+        let pool = try await connectIMAP(Self.imapConnections)
+        let imap = pool[0]
+        do {
+            let (folders, entries) = try await index(imap)
+            let known = try store.remoteIDs(accountId: account.id)
+            var done = 0
+            await progress(0, entries.count)
+            for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
+                let here = entries.filter { $0.folder == folder }.sorted { $0.uid > $1.uid }  // newest first
+                guard !here.isEmpty else { continue }
+                try await imap.examine(folder)
+                let stored = { (id: String) in self.store.blobs.contains(accountId: self.account.id, blobId: id) }
+                let relabel = refetchKnown ? here.filter { known.contains($0.id) && stored($0.id) } : []
+                let whole = here.filter { !known.contains($0.id) || (refetchKnown && !stored($0.id)) }
+                done += here.count - relabel.count - whole.count  // already here
+                for chunk in relabel.chunked(500) {
+                    let fetched = try await imap.fetch(chunk.map(\.uid), bodies: false)
+                    var incoming: [IncomingMessage] = []
+                    for message in fetched {
+                        guard let data = store.blobs.read(accountId: account.id, blobId: message.gmailId),
+                            let updated = Self.incoming(
+                                gmailMessage(message, folder: folder, folders: folders), raw: MIMEPart.parse(data),
+                                mailboxLabels: mailboxLabels, archiveLabel: archiveLabel)
+                        else { continue }
+                        incoming.append(updated)
+                    }
+                    try store.upsertMessages(accountId: account.id, incoming)
+                    result.updated += incoming.count
+                    done += chunk.count
+                    await progress(done, entries.count)
+                }
+                // Whole messages, up to 50 or about 4 MB a batch, several batches at once.
+                var created = 0
+                let batches = Self.batches(whole, size: \.size, maxCount: 50, maxBytes: 4_000_000)
+                try await fetchWhole(batches.map { $0.map(\.uid) }, in: folder, over: pool) { batch, fetched in
+                    created += try self.storeWhole(fetched.compactMap { message in
+                        message.raw.map { (self.gmailMessage(message, folder: folder, folders: folders), $0) }
+                    })
+                    done += batch.count
+                    await progress(done, entries.count)
+                    try self.store.recountMailboxes(accountId: self.account.id)
+                }
+                result.created += created
+            }
+            await progress(entries.count, entries.count)
+            for connection in pool { await connection.close() }
+            return Set(entries.map(\.id))
+        } catch {
+            for connection in pool { await connection.close() }
+            throw error
         }
-        // Done: from now on, Gmail's history (and the mailboxes as they're mapped now).
-        try store.setSyncState(start, accountId: account.id, type: Self.historyState)
-        try store.setSyncState(Self.mappingVersion, accountId: account.id, type: Self.mappingState)
-        for state in [Self.fullSyncState, Self.refetchState, Self.refetchDoneState] {
-            try store.setSyncState(nil, accountId: account.id, type: state)
+    }
+
+    /// All Mail, Spam and Trash indexed: each message's folder, UID, Gmail id and size (also kept for
+    /// the downloads).
+    private func index(_ imap: GmailIMAP) async throws -> (GmailIMAP.Folders, [(folder: String, uid: UInt32, id: String, size: Int)]) {
+        let folders = try await imap.folders()
+        guard let all = folders.all else { throw GmailIMAP.IMAPError.malformed("no All Mail") }
+        var entries: [(folder: String, uid: UInt32, id: String, size: Int)] = []
+        for folder in [all, folders.spam, folders.trash].compactMap({ $0 }) {
+            try await imap.examine(folder)
+            entries += try await imap.index().map { (folder, $0.uid, $0.gmailId, $0.size) }
         }
-        var catchUp = JMAPAccountSync.Result()
-        try await syncHistory(since: start, into: &catchUp)
-        result.updated += catchUp.updated
-        result.destroyed += catchUp.destroyed
+        imapIndex = Dictionary(entries.map { ($0.id, ($0.folder, $0.uid)) }, uniquingKeysWith: { a, _ in a })
+        return (folders, entries)
+    }
+
+    /// An IMAP message as the API would give it: its labels by the API's ids (IMAP names the system
+    /// ones "\\Inbox" and so on, and the user's by name), Spam and Trash by its folder, Unread and
+    /// Starred by its flags.
+    private func gmailMessage(_ message: GmailIMAP.Message, folder: String, folders: GmailIMAP.Folders) -> GmailClient.Message {
+        let byName = Dictionary(labelNames.map { ($0.value.lowercased(), $0.key) }, uniquingKeysWith: { a, _ in a })
+        var labels = Set(message.labels.compactMap { label -> String? in
+            switch label.lowercased() {
+            case "\\inbox": "INBOX"
+            case "\\sent": "SENT"
+            case "\\draft": "DRAFT"
+            case "\\starred": "STARRED"
+            case "\\important": "IMPORTANT"
+            case "\\spam": "SPAM"
+            case "\\trash": "TRASH"
+            default: byName[label.lowercased()]
+            }
+        })
+        if folder == folders.spam { labels.insert("SPAM") }
+        if folder == folders.trash { labels.insert("TRASH") }
+        if !message.flags.contains(where: { $0.caseInsensitiveCompare("\\Seen") == .orderedSame }) { labels.insert("UNREAD") }
+        if message.flags.contains(where: { $0.caseInsensitiveCompare("\\Flagged") == .orderedSame }) { labels.insert("STARRED") }
+        return GmailClient.Message(
+            id: message.gmailId, threadId: message.threadId, labelIds: Array(labels), receivedAt: message.internalDate,
+            sizeEstimate: message.size ?? message.raw?.count)
+    }
+
+    /// Splits messages into batches of at most `maxCount`, and about `maxBytes` (at least one each).
+    typealias IndexEntry = (folder: String, uid: UInt32, id: String, size: Int)
+
+    static func batches<Item>(_ items: [Item], size: (Item) -> Int, maxCount: Int, maxBytes: Int) -> [[Item]] {
+        var batches: [[Item]] = []
+        var current: [Item] = []
+        var bytes = 0
+        for item in items {
+            if !current.isEmpty, current.count >= maxCount || bytes + size(item) > maxBytes {
+                batches.append(current)
+                current = []
+                bytes = 0
+            }
+            current.append(item)
+            bytes += size(item)
+        }
+        if !current.isEmpty { batches.append(current) }
+        return batches
     }
 
     /// Applies Gmail's history since `since`: new and changed messages are fetched again, deleted ones
@@ -268,25 +416,38 @@ public actor GmailAccountSync {
     /// Stores whole messages (format raw): each from its own headers and Gmail's labels, with its raw
     /// copy, body and parts, so it's downloaded as it's listed. Returns how many were stored.
     private func storeWhole(_ messages: [GmailClient.Message]) throws -> Int {
+        try storeWhole(messages.compactMap { message in message.raw.flatMap(Data.init(base64URL:)).map { (message, $0) } })
+    }
+
+    /// Stores messages with their raw copies (from the API or IMAP): each from its own headers and its
+    /// labels, with its body and parts, so it's downloaded as it's listed. A message without Gmail's
+    /// snippet (IMAP has none) gets one from its text. Returns how many were stored.
+    private func storeWhole(_ messages: [(message: GmailClient.Message, raw: Data)]) throws -> Int {
         var incoming: [IncomingMessage] = []
-        var copies: [(id: String, data: Data, mime: MIMEPart)] = []
-        for message in messages {
-            guard let data = message.raw.flatMap(Data.init(base64URL:)) else { continue }
+        var copies: [(id: String, data: Data, body: MessageBody, parts: [MessagePart])] = []
+        for (original, data) in messages {
             let mime = MIMEPart.parse(data)
+            let (body, parts) = BodyStructure.render(mime, blobId: original.id)
+            var message = original
+            if message.snippet == nil { message.snippet = Self.preview(body.text ?? "") }
             guard let stored = Self.incoming(message, raw: mime, mailboxLabels: mailboxLabels, archiveLabel: archiveLabel) else { continue }
             incoming.append(stored)
-            copies.append((message.id, data, mime))
+            copies.append((message.id, data, body, parts))
         }
         try store.upsertMessages(accountId: account.id, incoming)
         let ids = try store.messageIDsByRemoteID(accountId: account.id, remoteIds: copies.map(\.id))
         for copy in copies {
             guard let id = ids[copy.id] else { continue }
             try store.blobs.write(copy.data, accountId: account.id, blobId: copy.id)  // a Gmail message's blob id is its id
-            let (body, parts) = BodyStructure.render(copy.mime, blobId: copy.id)
-            try store.saveBody(messageId: id, body, parts: parts)
+            try store.saveBody(messageId: id, copy.body, parts: copy.parts)
         }
         try store.setDownloadState(1, messageIds: Array(ids.values))
         return incoming.count
+    }
+
+    /// A list's preview line from a message's text, as Gmail's snippet is: its start, on one line.
+    static func preview(_ text: String) -> String {
+        String(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(200))
     }
 
     /// Messages stored here with a raw copy, updated with their labels as Gmail has them now (the
@@ -498,10 +659,28 @@ public actor GmailAccountSync {
     }
 
     /// Downloads the next messages not stored locally yet, newest first: the raw message, and the body
-    /// and parts taken from it. Gmail's quota allows about 100 a minute per account (see `GmailClient`).
+    /// and parts taken from it. Over IMAP when it can (at the network's speed); through the API, whose
+    /// quota allows about 95 a minute per account, for what IMAP can't (or when it's unavailable).
     public func downloadNextBatch(limit: Int = 50) async throws -> JMAPAccountSync.DownloadBatchResult {
-        let pending = try store.pendingDownloads(accountId: account.id, limit: limit)
-        guard !pending.isEmpty else { return .init(processed: 0, failed: 0) }
+        var pending = try store.pendingDownloads(accountId: account.id, limit: imapUnavailable ? limit : 1000)
+        guard !pending.isEmpty else {
+            await closeIMAP()  // done: no connection left open
+            return .init(processed: 0, failed: 0)
+        }
+        var done: [Int64] = []
+        if !imapUnavailable {
+            do {
+                done = try await imapDownload(pending)
+            } catch {
+                syncLog.notice("Gmail IMAP downloads unavailable for \(self.account.name, privacy: .public), using the API: \(ErrorText.technical(error), privacy: .public)")
+                imapUnavailable = true
+                await closeIMAP()
+            }
+            try store.setDownloadState(1, messageIds: done)
+            // What IMAP didn't have goes through the API (a few at a time, it's slow).
+            pending = Array(pending.filter { !done.contains($0.id) }.prefix(limit))
+            if pending.isEmpty { return .init(processed: done.count, failed: 0) }
+        }
         let accountId = account.id
         let store = self.store
         let client = self.client
@@ -523,7 +702,129 @@ public actor GmailAccountSync {
         let failed = zip(pending, outcomes).filter { !$0.1 }.map(\.0.id)
         try store.setDownloadState(1, messageIds: zip(pending, outcomes).filter(\.1).map(\.0.id))
         try store.setDownloadState(2, messageIds: failed)
-        return .init(processed: pending.count, failed: failed.count)
+        return .init(processed: done.count + pending.count, failed: failed.count)
+    }
+
+    /// Downloads messages over IMAP (the connection stays open while downloads go on): finds each in the
+    /// index, fetches them whole by folder in batches, and stores their copies, bodies and parts.
+    /// Returns those downloaded (the others aren't in the index: new since, or gone).
+    private func imapDownload(_ pending: [MailStore.PendingDownload]) async throws -> [Int64] {
+        let pool = try await openIMAP()
+        let imap = pool[0]
+        if imapIndex == nil { _ = try await index(imap) }
+        var located: [String: [(item: MailStore.PendingDownload, uid: UInt32)]] = [:]
+        func locate() {
+            located = [:]
+            for item in pending {
+                if let place = imapIndex?[item.remoteId] { located[place.folder, default: []].append((item, place.uid)) }
+            }
+        }
+        locate()
+        if located.isEmpty {  // all newer than the index: index again, once
+            _ = try await index(imap)
+            locate()
+        }
+        var done: [Int64] = []
+        #if DEBUG
+            let started = Date()
+            var bytes = 0
+            defer {
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil {
+                    let seconds = Date().timeIntervalSince(started)
+                    NSLog("MMJ imap downloads: \(done.count) messages, \(bytes / 1024) KB in \(String(format: "%.2f", seconds)) s over \(pool.count) connections (\(String(format: "%.1f", Double(bytes) / 1_048_576 / max(seconds, 0.001))) MB/s)")
+                }
+            }
+        #endif
+        for (folder, items) in located {
+            let byUID = Dictionary(items.map { ($0.uid, $0.item) }, uniquingKeysWith: { a, _ in a })
+            let batches = Self.batches(items, size: \.item.size, maxCount: 50, maxBytes: 4_000_000).map { $0.map(\.uid) }
+            try await fetchWhole(batches, in: folder, over: pool) { _, fetched in
+                var stored: [Int64] = []
+                for message in fetched {
+                    guard let item = byUID[message.uid], let data = message.raw else { continue }
+                    try self.store.blobs.write(data, accountId: self.account.id, blobId: item.blobId)
+                    #if DEBUG
+                        bytes += data.count
+                    #endif
+                    if !item.hasBody {
+                        let (body, parts) = BodyStructure.render(raw: data, blobId: item.blobId)
+                        try self.store.saveBody(messageId: item.id, body, parts: parts)
+                    }
+                    stored.append(item.id)
+                }
+                // Marked as each batch arrives, so the progress moves along with it.
+                try self.store.setDownloadState(1, messageIds: stored)
+                done += stored
+            }
+        }
+        return done
+    }
+
+    /// Fetches batches of a folder's messages whole over several connections at once, each connection
+    /// taking the next batch when it's done, and hands each batch (its UIDs and messages) to `handle`
+    /// as it arrives.
+    private func fetchWhole(
+        _ batches: [[UInt32]], in folder: String, over connections: [GmailIMAP],
+        handle: ([UInt32], [GmailIMAP.Message]) async throws -> Void
+    ) async throws {
+        guard !batches.isEmpty else { return }
+        for imap in connections { try await imap.examine(folder) }
+        try await withThrowingTaskGroup(of: (Int, [UInt32], [GmailIMAP.Message]).self) { group in
+            var free = Array(connections.indices)
+            var next = 0
+            func start(on connection: Int) {
+                let imap = connections[connection], uids = batches[next]
+                next += 1
+                group.addTask { (connection, uids, try await imap.fetch(uids, bodies: true)) }
+            }
+            while next < batches.count, let connection = free.popLast() { start(on: connection) }
+            while let (connection, uids, messages) = try await group.next() {
+                try await handle(uids, messages)
+                if next < batches.count { start(on: connection) }
+            }
+        }
+    }
+
+    /// Signs in `count` IMAP connections at once (those that manage it; at least one, or it throws).
+    private func connectIMAP(_ count: Int) async throws -> [GmailIMAP] {
+        let email = account.username, tokens = self.tokens
+        let results = await withTaskGroup(of: Result<GmailIMAP, Error>.self) { group in
+            for _ in 0..<count {
+                group.addTask {
+                    let imap = GmailIMAP(email: email, tokens: tokens)
+                    do {
+                        try await imap.connect()
+                        return .success(imap)
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            return await group.reduce(into: [Result<GmailIMAP, Error>]()) { $0.append($1) }
+        }
+        let connected = results.compactMap { try? $0.get() }
+        guard !connected.isEmpty else {
+            if case .failure(let error)? = results.first { throw error }
+            throw GmailIMAP.IMAPError.closed
+        }
+        return connected
+    }
+
+    /// The download connections, signed in when first needed (kept while downloads go on).
+    private func openIMAP() async throws -> [GmailIMAP] {
+        if imapPool.isEmpty {
+            var count = Self.imapConnections
+            #if DEBUG
+                count = Int(ProcessInfo.processInfo.environment["MMJ_IMAP_CONNECTIONS"] ?? "") ?? count
+            #endif
+            imapPool = try await connectIMAP(count)
+        }
+        return imapPool
+    }
+
+    private func closeIMAP() async {
+        for connection in imapPool { await connection.close() }
+        imapPool = []
     }
 
     /// One part's data (an embedded picture or an attachment), by the id its part is stored with,

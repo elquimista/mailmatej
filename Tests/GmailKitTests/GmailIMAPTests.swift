@@ -1,0 +1,41 @@
+import Foundation
+import Testing
+@testable import GmailKit
+
+struct GmailIMAPTests {
+    private func text(_ s: String) -> IMAPResponseParser.Segment { .text(Array(s.utf8)) }
+
+    @Test func parsesAFetchWithALiteral() throws {
+        let body = Data("Subject: Hi\r\n\r\nHello".utf8)
+        let response = IMAPResponseParser.parse([
+            text(#"* 12 FETCH (X-GM-THRID 1612345678901234567 X-GM-MSGID 1612345678901234568 X-GM-LABELS ("\\Inbox" "\\Important" Work "My &AOk-t&AOk-") UID 99 FLAGS (\Seen \Flagged) INTERNALDATE "17-Jul-1996 02:44:25 -0700" RFC822.SIZE 22 BODY[] {22}"#),
+            .literal(body),
+            text(")"),
+        ])
+        #expect(response.first?.atom == "*")
+        let fields = try #require(GmailIMAP.fetchFields(Array(response.dropFirst())))
+        #expect(fields["UID"]?.atom == "99")
+        #expect(fields["BODY[]"]?.data == body)
+        guard case .list(let labels)? = fields["X-GM-LABELS"] else { Issue.record("no labels"); return }
+        #expect(labels.compactMap(\.text).map(GmailIMAP.decodeModifiedUTF7) == ["\\Inbox", "\\Important", "Work", "My été"])
+        guard case .list(let flags)? = fields["FLAGS"] else { Issue.record("no flags"); return }
+        #expect(flags.compactMap(\.atom) == ["\\Seen", "\\Flagged"])
+        #expect(GmailIMAP.internalDate(fields["INTERNALDATE"]!.text!) == Date(timeIntervalSince1970: 837_596_665))
+        // The API's id is X-GM-MSGID in hex.
+        let hex = String(UInt64(fields["X-GM-MSGID"]!.atom!)!, radix: 16)
+        #expect(UInt64(hex, radix: 16) == 1_612_345_678_901_234_568)
+    }
+
+    @Test func parsesListAndStatusLines() {
+        let list = IMAPResponseParser.parse([text(#"* LIST (\HasNoChildren \All) "/" "[Gmail]/All Mail""#)])
+        #expect(list.count == 5 && list[4].text == "[Gmail]/All Mail")
+        let ok = IMAPResponseParser.parse([text("m3 OK [READ-ONLY] EXAMINE completed")])
+        #expect(ok.first?.atom == "m3" && ok[1].atom == "OK" && ok[2].atom == "[READ-ONLY]")
+    }
+
+    @Test func writesUIDSetsAsRanges() {
+        #expect(GmailIMAP.uidSet([5, 1, 2, 3, 9, 12, 13, 14, 20]) == "1:3,5,9,12:14,20")
+        #expect(GmailIMAP.uidSet([7]) == "7")
+        #expect(GmailIMAP.quoted(#"a "b" \c"#) == #""a \"b\" \\c""#)
+    }
+}

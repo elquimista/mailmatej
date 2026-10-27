@@ -261,6 +261,16 @@ extension GmailClient {
         public var raw: String?
 
         public var receivedAt: Date? { internalDate.flatMap(Double.init).map { Date(timeIntervalSince1970: $0 / 1000) } }
+
+        /// A message known some other way (over IMAP): its ids, labels, arrival and size.
+        public init(id: String, threadId: String?, labelIds: [String], snippet: String? = nil, receivedAt: Date?, sizeEstimate: Int?) {
+            self.id = id
+            self.threadId = threadId
+            self.labelIds = labelIds
+            self.snippet = snippet
+            self.internalDate = receivedAt.map { String(Int64($0.timeIntervalSince1970 * 1000)) }
+            self.sizeEstimate = sizeEstimate
+        }
     }
 
     public struct Header: Decodable, Sendable {
