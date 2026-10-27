@@ -570,7 +570,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let byAccount = Dictionary(grouping: mailboxes, by: \.accountId)
         for account in accounts {
             let node = SidebarNode(
-                key: "account.\(account.id)", kind: .account, title: account.name, symbol: "at",
+                key: "account.\(account.id)", kind: .account, title: account.name,
+                symbol: account.isGmail ? MailboxSymbols.gmail : "at",
                 scope: .account(account.id), accountId: account.id)
             node.badge = counts.unreadByAccount[account.id] ?? 0
             node.warning = model.syncWarning(accountId: account.id)
@@ -1400,7 +1401,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func add(_ title: String, _ symbol: String, _ choice: String?, on: Bool) {
             let item = menu.addItem(withTitle: title, action: #selector(symbolChosen(_:)), keyEquivalent: "")
             item.target = self
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.image = MailboxSymbols.image(symbol)
             item.representedObject = SymbolChoice(node: node, symbol: choice)
             item.state = on ? .on : .off
         }

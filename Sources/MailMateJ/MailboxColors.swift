@@ -153,8 +153,7 @@ enum MailboxColors {
     /// Puts a mailbox's icon in its color: `image` gets the multicolor configuration where needed,
     /// `fallback` is the tint when no color was chosen.
     static func style(_ imageView: NSImageView, key: String, symbol: String, fallback: NSColor) {
-        let image = NSImage(systemSymbolName: MailboxSymbols.symbol(for: key) ?? symbol, accessibilityDescription: nil)
-            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let image = MailboxSymbols.symbol(for: key).flatMap { MailboxSymbols.image($0) } ?? MailboxSymbols.image(symbol)
         switch color(for: key) {
         case .multicolor?:
             imageView.image = image?.withSymbolConfiguration(multicolor)
@@ -175,8 +174,7 @@ enum MailboxColors {
     /// A mailbox's icon for menus: its chosen symbol in black and white (a template, so it turns white
     /// on a highlighted row), as MailMate's menus show it; only the sidebar shows colors.
     static func menuImage(key: String, symbol: String) -> NSImage? {
-        NSImage(systemSymbolName: MailboxSymbols.symbol(for: key) ?? symbol, accessibilityDescription: nil)
-            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        MailboxSymbols.symbol(for: key).flatMap { MailboxSymbols.image($0) } ?? MailboxSymbols.image(symbol)
     }
 
     /// A symbol filled with a color, as a plain (non-template) image the selection doesn't recolor.
@@ -258,6 +256,36 @@ enum MailboxSymbols {
         ("Folder", "folder"), ("Folder for Person", "folder.badge.person.crop"),
         ("List", "list.bullet.rectangle"), ("Star", "star"), ("Tag", "tag"),
     ]
+
+    /// Gmail sources' symbol, a G drawn here (`image`): MailMate shows a G for them, and no SF Symbol is one.
+    static let gmail = "mailmatej.gmail"
+
+    /// A symbol by name: an SF Symbol, or the one drawn here (`gmail`, `size` points square).
+    static func image(_ name: String, size: CGFloat = 12) -> NSImage? {
+        name == gmail ? gmailImage(size: size) : NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    }
+
+    /// A G as MailMate sizes its own (measured at 1x): 12 pt beside the 13 pt name, a point beyond its
+    /// ascenders above and below, its ring a fifth as thick, heavier than the SF Symbols around it. A
+    /// ring open at the upper right, and a bar from its middle to the right edge, 2 pt at 12 pt so it
+    /// sits on the pixel grid. A template, so it takes the row's tint. The image is a sixth wider than
+    /// the G, blank on the right: centred where the sidebar centres icons, the G ends 9 pt before the
+    /// name, as MailMate's does.
+    private static func gmailImage(size: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: size * 7 / 6, height: size), flipped: false) { _ in
+            let ring = size / 5
+            let center = NSPoint(x: size / 2, y: size / 2)
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: center, radius: (size - ring) / 2, startAngle: 45, endAngle: 0)
+            arc.lineWidth = ring
+            NSColor.black.set()
+            arc.stroke()
+            NSRect(x: center.x, y: center.y - size / 12, width: size / 2, height: size / 6).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
 
     /// The symbol chosen for a mailbox, or nil for its default.
     static func symbol(for key: String) -> String? {
