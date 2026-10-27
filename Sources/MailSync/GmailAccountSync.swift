@@ -1174,6 +1174,22 @@ extension GmailAccountSync {
         return draft
     }
 
+    /// Redirects a message as it is (a rule's Redirect) to `recipients`: over Gmail's SMTP, since the API
+    /// only sends to the addresses in a message. Resent- headers on top say who sent it on, to whom and
+    /// when (RFC 5322 §3.6.6); the rest is untouched. Gmail puts the account's address in a From it
+    /// can't send as (keeping the name), as it does for MailMate's redirects through it.
+    public func redirect(remoteId: String, to recipients: [String], mailFrom: String) async throws {
+        let raw = try await rawMessage(remoteId, blobId: remoteId)  // a Gmail message's blob id is its id
+        let domain = mailFrom.split(separator: "@").last.map(String.init) ?? "mailmatej.local"
+        let resent = [
+            "Resent-From: " + mailFrom,
+            "Resent-Date: " + OutgoingMIME.dateText(Date()),
+            "Resent-Message-ID: <\(UUID().uuidString)@\(domain)>",
+            OutgoingMIME.addressHeader("Resent-To", recipients.map { EmailAddress(name: nil, email: $0) }),
+        ].joined(separator: "\r\n") + "\r\n"
+        try await GmailSMTP(email: account.username, tokens: tokens).send(Data(resent.utf8) + raw, from: mailFrom, to: recipients)
+    }
+
     /// In-Reply-To and References for a reply to this message (see `Compose.references`), from its
     /// raw message.
     public func replyHeaders(remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {

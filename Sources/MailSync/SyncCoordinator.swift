@@ -496,6 +496,7 @@ public actor SyncCoordinator {
     }
 
     public func redirect(accountId: String, remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
+        if let gmail = gmailEngines[accountId] { return try await gmail.redirect(remoteId: remoteId, to: recipients, mailFrom: mailFrom) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.redirect(remoteId: remoteId, to: recipients, identityId: identityId, mailFrom: mailFrom)
     }
@@ -770,13 +771,8 @@ public actor SyncCoordinator {
         }
     }
 
-    /// Why an account can't do something: Gmail accounts can't redirect yet (it takes Gmail's SMTP).
     private func notLoaded(_ accountId: String) -> Error {
-        gmailEngines[accountId] != nil ? GmailNotYet() : JMAPError.invalidResponse("account not loaded")
-    }
-
-    public struct GmailNotYet: LocalizedError {
-        public var errorDescription: String? { "Gmail accounts can’t redirect messages yet." }
+        JMAPError.invalidResponse("account not loaded")
     }
 
     private func update(_ accountId: String, failure error: Error) {

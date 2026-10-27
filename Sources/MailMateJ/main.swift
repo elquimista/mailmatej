@@ -67,6 +67,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_REDIRECT"] {
+                    // "<account id>|<subject>|<address>": redirects that message there, as a rule's Redirect does.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    let model: AppModel = AppModel.shared
+                    if let messageId = ((try? model.store.messageIDs(scope: .account(parts[0]))) ?? []).first(where: { (try? model.store.detail(id: $0))?.subject == parts[1] }),
+                        let detail = try? model.store.detail(id: messageId),
+                        let identity = (try? model.store.identities())?.first(where: { $0.accountId == parts[0] })
+                    {
+                        do {
+                            try await model.coordinatorForDebug.redirect(
+                                accountId: parts[0], remoteId: detail.remoteId, to: [parts[2]], identityId: identity.remoteId,
+                                mailFrom: identity.envelopeEmail ?? identity.email)
+                            NSLog("MMJ redirect: sent “\(parts[1])” to \(parts[2]) from \(identity.envelopeEmail ?? identity.email)")
+                        } catch {
+                            NSLog("MMJ redirect: \(error)")
+                        }
+                    } else {
+                        NSLog("MMJ redirect: no message “\(parts[1])”")
+                    }
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_FLAGS"] {
                     // "<account id>|<subject>|<step>,…" on the account's message with that subject: answer,
                     // unanswer, forward, unforward (as replying or forwarding marks it), ext+answered,
