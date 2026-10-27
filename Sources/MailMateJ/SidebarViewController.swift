@@ -1323,7 +1323,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// their heading, the chosen one checked.
     private func colorMenu(for node: SidebarNode) -> NSMenu {
         let menu = NSMenu()
-        let current = MailboxColors.color(for: node.key) ?? (node.kind == .account ? nil : .accent)
+        let current = MailboxColors.color(for: node.key) ?? .accent
         func add(_ title: String, _ image: NSImage, _ color: MailboxColor?, indented: Bool = false) {
             let item = menu.addItem(withTitle: title, action: #selector(colorChosen(_:)), keyEquivalent: "")
             item.target = self
@@ -1784,9 +1784,7 @@ final class SidebarCell: NSTableCellView {
             toolTip = warning
         } else {
             if let imageView {
-                MailboxColors.style(
-                    imageView, key: node.key, symbol: node.symbol,
-                    fallback: node.kind == .account ? .secondaryLabelColor : .controlAccentColor)
+                MailboxColors.style(imageView, key: node.key, symbol: node.symbol)
                 // Its icon too, drawn in (a tint turns white on a selected row).
                 if isOffline, let image = imageView.image {
                     imageView.image = MailboxColors.tinted(image, .systemRed)

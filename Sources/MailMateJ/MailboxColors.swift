@@ -80,7 +80,7 @@ enum MailboxColors {
     static let didChange = Notification.Name("MailboxColorsDidChange")
     private static let defaultsKey = "MailboxColors"
 
-    /// The color chosen for a mailbox, or nil for its default (accent; text grey for accounts).
+    /// The color chosen for a mailbox or source, or nil for its default (accent, as in MailMate).
     static func color(for key: String) -> MailboxColor? {
         (UserDefaults.standard.dictionary(forKey: defaultsKey)?[key] as? String).flatMap(MailboxColor.init(stored:))
     }
@@ -150,24 +150,21 @@ enum MailboxColors {
         NotificationCenter.default.post(name: didChange, object: nil)
     }
 
-    /// Puts a mailbox's icon in its color: `image` gets the multicolor configuration where needed,
-    /// `fallback` is the tint when no color was chosen.
-    static func style(_ imageView: NSImageView, key: String, symbol: String, fallback: NSColor) {
+    /// Puts a mailbox's icon in its color (the accent when none was chosen): `image` gets the
+    /// multicolor configuration where needed.
+    static func style(_ imageView: NSImageView, key: String, symbol: String) {
         let image = MailboxSymbols.symbol(for: key).flatMap { MailboxSymbols.image($0) } ?? MailboxSymbols.image(symbol)
         switch color(for: key) {
         case .multicolor?:
             imageView.image = image?.withSymbolConfiguration(multicolor)
             imageView.contentTintColor = nil
-        case .accent?:
+        case .accent?, nil:
             imageView.image = image
             imageView.contentTintColor = .controlAccentColor
         case let chosen?:
             // Drawn into the image (not a tint), so it keeps its color on a selected row, as in MailMate.
             imageView.image = image.map { tinted($0, chosen.tint ?? .labelColor) }
             imageView.contentTintColor = nil
-        case nil:
-            imageView.image = image
-            imageView.contentTintColor = fallback
         }
     }
 
