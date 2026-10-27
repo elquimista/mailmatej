@@ -181,7 +181,7 @@ enum MailboxColors {
 
     /// A symbol filled with a color, as a plain (non-template) image the selection doesn't recolor.
     /// Drawn on demand, so dynamic colors follow the appearance.
-    private static func tinted(_ symbol: NSImage, _ color: NSColor) -> NSImage {
+    static func tinted(_ symbol: NSImage, _ color: NSColor) -> NSImage {
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
             color.set()

@@ -866,8 +866,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebar.selectedNode.map { sidebar.menuGroups(for: $0) } ?? []
     }
 
-    /// Why the selected account's last sync failed, for under Mailbox › Synchronize.
-    var syncWarningItem: NSMenuItem? { sidebar.selectedNode.flatMap(sidebar.syncWarningItem(for:)) }
+    /// Take Online, or why the selected account's last sync failed, for under Mailbox › Synchronize.
+    var syncStatusItems: [NSMenuItem] { sidebar.selectedNode.map(sidebar.syncStatusItems(for:)) ?? [] }
 
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?
@@ -963,6 +963,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return !editing
         case #selector(newSmartMailbox(_:)):
             return sidebar.selectedNode?.isGenerated != true
+        case #selector(synchronize(_:)):
+            return sidebar.canSynchronize(sidebar.selectedNode)
         default:
             return true
         }

@@ -65,6 +65,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_OFFLINE"] {
+                    // "<account id>|<step>,…": offline (Take Offline), select (its row), drop (Google drops its
+                    // sign-in quietly), takeonline (Take Online), fetch (its first message), expire (Google refuses its sign-in),
+                    // online (Take Online, as after Google's page), flag (toggles the flag of its Inbox's
+                    // first message), report (how it stands, its menus), snap (the main window, captured
+                    // as <MMJ_SNAPSHOT>-<n>.png), wait=<seconds>.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    let id = parts[0]
+                    let model: AppModel = AppModel.shared
+                    let inbox = (try? model.store.mailbox(accountId: id, role: "inbox")).flatMap { $0 }.map { "mailbox.\(id).\($0.remoteId)" } ?? ""
+                    var shot = 0
+                    for step in parts[1].split(separator: ",").map(String.init) {
+                        switch step {
+                        case "offline": model.takeOffline(accountId: id)
+                        case "drop": AppModel.debugExpiredSignIn = id  // Google drops its sign-in, nothing told
+                        case "takeonline":  // as Take Online does
+                            do {
+                                try await model.takeOnline(accountId: id)
+                                NSLog("MMJ offline take online: done")
+                            } catch {
+                                NSLog("MMJ offline take online: \(error)")
+                            }
+                        case "fetch": await model.debugFetch(accountId: id)
+                        case "select":  // the account's row, the sidebar focused (the accent selection)
+                            windowController?.debugSelectSidebar(key: "account.\(id)")
+                            windowController?.debugFocusSidebar()
+                        case "expire": await model.debugRestartSignIn(accountId: id, expired: true)
+                        case "online": await model.debugRestartSignIn(accountId: id, expired: false)
+                        case "flag":
+                            windowController?.debugSelectSidebar(key: inbox)
+                            try? await Task.sleep(for: .seconds(2))
+                            windowController?.debugSelectNextMessage()
+                            try? await Task.sleep(for: .seconds(1))
+                            windowController?.debugPerform("flag")
+                        case "report":
+                            let status = model.statuses[id]
+                            NSLog("MMJ offline: offline=\(model.isOffline(accountId: id)) needsSignIn=\(model.needsSignIn(accountId: id)) queued=\(status?.queuedChanges ?? -1) phase=\(status.map { "\($0.phase)" } ?? "-") reason=\(model.offlineReason(accountId: id)?.replacingOccurrences(of: "\n", with: " / ") ?? "-") warning=\(model.syncWarning(accountId: id)?.split(separator: "\n").first ?? "-")")
+                            NSLog("MMJ offline menu: \(windowController?.debugSidebarContextMenu(key: "account.\(id)").suffix(3).joined(separator: " | ") ?? "")")
+                            NSLog("MMJ offline inbox menu: \(windowController?.debugSidebarContextMenu(key: inbox).suffix(3).joined(separator: " | ") ?? "")")
+                        case "snap":
+                            shot += 1
+                            if let number = windowController?.window?.windowNumber {
+                                let capture = Process()
+                                capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                                capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-\(shot).png")]
+                                try? capture.run()
+                                capture.waitUntilExit()
+                            }
+                        case let wait where wait.hasPrefix("wait="):
+                            try? await Task.sleep(for: .seconds(Double(wait.dropFirst(5)) ?? 1))
+                        default: NSLog("MMJ offline: no step \(step)")
+                        }
+                    }
+                }
                 if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIDEBAR_MENU"] {
                     for key in keys.split(separator: ",").map(String.init) {  // logs each mailbox's context menu
                         NSLog("MMJ sidebar menu \(key): \(windowController?.debugSidebarContextMenu(key: key).joined(separator: " | ") ?? "")")
@@ -861,7 +915,7 @@ enum MainMenu {
             menu.addItem(.separator())
             synchronize.title = controller?.synchronizeTitle ?? "Synchronize"
             menu.addItem(synchronize)
-            controller?.syncWarningItem.map(menu.addItem)
+            controller?.syncStatusItems.forEach(menu.addItem)
         }
     }
 

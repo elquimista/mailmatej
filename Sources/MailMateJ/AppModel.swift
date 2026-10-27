@@ -198,27 +198,42 @@ final class AppModel {
     enum GmailError: LocalizedError {
         case noClient
         case alreadyAdded(String)
+        case otherAccount(signedIn: String, expected: String)
         var errorDescription: String? {
             switch self {
             case .noClient:
                 "This build has no Google sign-in set up. Put the OAuth client file from Google Cloud at "
                     + "google-oauth-client.json in the project and build again (see the README)."
             case .alreadyAdded(let email): "\(email) is already added."
+            case .otherAccount(let signedIn, let expected):
+                "You signed in to \(signedIn), not \(expected). Sign in again and choose \(expected)."
             }
         }
+    }
+
+    /// Google's sign-in in the browser (`loginHint` preselects the address): the account's tokens and
+    /// its address.
+    private func signInWithGoogle(loginHint: String?) async throws -> (tokens: GoogleOAuth.Tokens, email: String) {
+        guard let client = Self.googleClient else { throw GmailError.noClient }
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_NO_BROWSER"] != nil {  // tests: no browser, as if cancelled
+                NSLog("MMJ google sign-in: would open Google's sign-in for \(loginHint ?? "-")")
+                throw GoogleOAuthError.cancelled
+            }
+        #endif
+        let tokens = try await GoogleOAuth.authorize(client: client, loginHint: loginHint) { url in
+            Task { @MainActor in NSWorkspace.shared.open(url) }
+        }
+        let source = GoogleTokenSource(
+            client: client, refreshToken: tokens.refreshToken, accessToken: tokens.accessToken, expiry: tokens.expiry)
+        return (tokens, try await GmailClient(tokens: source).profile().emailAddress.lowercased())
     }
 
     /// Adds a Gmail account: Google's sign-in opens in the browser (`loginHint` preselects the address),
     /// then the account is saved with its refresh token in the keychain and starts syncing.
     @discardableResult
     func addGmailAccount(_ draft: AccountDraft, loginHint: String?) async throws -> AccountRecord {
-        guard let client = Self.googleClient else { throw GmailError.noClient }
-        let tokens = try await GoogleOAuth.authorize(client: client, loginHint: loginHint) { url in
-            Task { @MainActor in NSWorkspace.shared.open(url) }
-        }
-        let source = GoogleTokenSource(
-            client: client, refreshToken: tokens.refreshToken, accessToken: tokens.accessToken, expiry: tokens.expiry)
-        let email = try await GmailClient(tokens: source).profile().emailAddress.lowercased()
+        let (tokens, email) = try await signInWithGoogle(loginHint: loginHint)
         if try store.accounts().contains(where: { $0.isGmail && $0.username == email }) { throw GmailError.alreadyAdded(email) }
         let record = AccountRecord(
             name: draft.name.isEmpty ? email : draft.name, kind: AccountRecord.gmailKind,
@@ -230,6 +245,52 @@ final class AppModel {
         refreshNow()
         await coordinator.addAccount(record)
         return record
+    }
+
+    /// Signs in to a Gmail account again (Take Online, for an account Google no longer takes the sign-in
+    /// of; or to renew it): the new refresh token replaces the old one, and the account is back online
+    /// with its mail as it is.
+    func signInToGmailAgain(accountId: String) async throws {
+        guard let account = try store.account(id: accountId), account.isGmail else { return }
+        let (tokens, email) = try await signInWithGoogle(loginHint: account.username)
+        guard email == account.username else { throw GmailError.otherAccount(signedIn: email, expected: account.username) }
+        try Keychain.set(tokens.refreshToken, account: account.id)
+        await coordinator.takeOnline(account)
+    }
+
+    /// Whether an account is offline (MailMate's Take Offline, or a Gmail account Google no longer takes
+    /// the sign-in of), until Take Online.
+    func isOffline(accountId: String) -> Bool { statuses[accountId]?.isOffline == true }
+
+    /// Offline because Google no longer takes a Gmail account's sign-in: Take Online signs in again.
+    func needsSignIn(accountId: String) -> Bool { statuses[accountId]?.needsSignIn == true }
+
+    /// Take Offline: the account isn't synced (changes wait for it) until Take Online.
+    func takeOffline(accountId: String) {
+        Task { await coordinator.takeOffline(accountId) }
+    }
+
+    /// Take Online: the account syncs again. A Gmail account Google refused the sign-in of signs in
+    /// first (Google's page in the browser), as does one whose sign-in Google dropped while it was
+    /// offline: it goes straight there, as in MailMate, rather than online and offline again.
+    func takeOnline(accountId: String) async throws {
+        guard let account = try store.account(id: accountId) else { return }
+        if needsSignIn(accountId: accountId), account.isGmail { return try await signInToGmailAgain(accountId: accountId) }
+        if account.isGmail, await !Self.googleSignInWorks(account) { return try await signInToGmailAgain(accountId: accountId) }
+        await coordinator.takeOnline(account)
+    }
+
+    /// Whether Google still takes a Gmail account's sign-in (gives it an access token); true when that
+    /// can't be told (no connection, say), for its sync to find out.
+    nonisolated private static func googleSignInWorks(_ account: AccountRecord) async -> Bool {
+        do {
+            _ = try await googleTokens(for: account).accessToken()
+            return true
+        } catch GoogleOAuthError.signInExpired {
+            return false
+        } catch {
+            return true
+        }
     }
 
     func updateAccount(_ old: AccountRecord, with draft: AccountDraft) async throws {
@@ -313,17 +374,33 @@ final class AppModel {
     }
 
     /// The sidebar warning for an account that failed to sync, if any, with the changes waiting for it.
+    /// An offline account has none: its row is greyed out instead (see `offlineReason`).
     func syncWarning(accountId: String) -> String? {
-        guard let status = statuses[accountId], case .failed(var message) = status.phase else { return nil }
-        if status.queuedChanges > 0 {
+        isOffline(accountId: accountId) ? nil : statusMessage(accountId)
+    }
+
+    /// For an offline account's row: why it's offline (Google wants it signed in to again), and the
+    /// changes waiting for it; nil while it's online, or offline with nothing to say.
+    func offlineReason(accountId: String) -> String? {
+        isOffline(accountId: accountId) ? statusMessage(accountId) : nil
+    }
+
+    private func statusMessage(_ accountId: String) -> String? {
+        guard let status = statuses[accountId] else { return nil }
+        var parts: [String] = []
+        // Why the last sync failed; while offline, only when that's why (Google wants a sign-in).
+        if case .failed(let text) = status.phase, !status.isOffline || status.needsSignIn { parts.append(text) }
+        if status.queuedChanges > 0, !parts.isEmpty || status.isOffline {
             let changes = status.queuedChanges == 1 ? "1 change" : "\(status.queuedChanges) changes"
-            message += "\n\n\(changes) will be made on the server once it can be reached."
+            parts.append(status.isOffline
+                ? "\(changes) will be made on the server once it’s online."
+                : "\(changes) will be made on the server once it can be reached.")
         }
+        guard !parts.isEmpty else { return nil }
         #if DEBUG
-            return status.errorDetail.map { message + "\n\n" + $0 } ?? message
-        #else
-            return message
+            if let detail = status.errorDetail { parts.append(detail) }
         #endif
+        return parts.joined(separator: "\n\n")
     }
 
     /// A change made while offline that the server refused once reachable; its messages show the
@@ -1258,10 +1335,43 @@ final class AppModel {
     /// A Gmail account's sign-in: the app's Google client and the account's refresh token.
     nonisolated private static func googleTokens(for account: AccountRecord) throws -> GoogleTokenSource {
         guard let client = googleClient else { throw GmailError.noClient }
+        #if DEBUG
+            if debugExpiredSignIn == account.id { return GoogleTokenSource(client: client, refreshToken: "expired") }
+        #endif
         return GoogleTokenSource(client: client, refreshToken: try Keychain.get(account: account.id))
     }
 
     #if DEBUG
+        /// The Gmail account whose sign-in Google no longer takes, as far as the app is told.
+        nonisolated(unsafe) static var debugExpiredSignIn: String?
+
+        /// Fetches an account's first message, body and raw copy, as opening it does; logs how that went.
+        func debugFetch(accountId: String) async {
+            guard let id = (try? store.messageIDs(scope: .account(accountId)))?.first, let detail = try? store.detail(id: id) else {
+                return NSLog("MMJ fetch: no message")
+            }
+            do {
+                _ = try await fetchBody(messageId: id, accountId: accountId)
+                NSLog("MMJ fetch body: fetched")
+            } catch {
+                NSLog("MMJ fetch body: \(error.localizedDescription)")
+            }
+            do {
+                _ = try await coordinator.downloadBlob(accountId: accountId, blobId: detail.blobId, type: "message/rfc822", name: "message.eml")
+                NSLog("MMJ fetch raw: fetched")
+            } catch {
+                NSLog("MMJ fetch raw: \(error.localizedDescription)")
+            }
+        }
+
+        /// Restarts a Gmail account as signing in again does (without Google's page): with a sign-in
+        /// Google refuses (`expired`), or with its own again.
+        func debugRestartSignIn(accountId: String, expired: Bool) async {
+            guard let account = try? store.account(id: accountId) else { return }
+            Self.debugExpiredSignIn = expired ? accountId : nil
+            await coordinator.takeOnline(account)
+        }
+
         /// Signs in to a Gmail account over IMAP (read-only) and logs its special mailboxes, how many
         /// messages All Mail has, and a few fetched whole, timing it.
         func debugGmailIMAP(accountId: String) async {

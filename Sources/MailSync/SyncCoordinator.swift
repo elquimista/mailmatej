@@ -34,6 +34,12 @@ public struct AccountSyncStatus: Sendable {
     public var isDownloadingHeaders = false
     /// The first sync fetches whole messages (Gmail), not headers first: one phase, not two.
     public var headersAreWholeMessages = false
+    /// Offline, as MailMate's Take Offline makes a source: not synced (its changes wait in the queue)
+    /// until Take Online (see `SyncCoordinator.takeOnline`). Kept across launches.
+    public var isOffline = false
+    /// Offline because Google no longer takes this Gmail account's sign-in (MailMate takes such an
+    /// account offline itself): Take Online signs in again first.
+    public var needsSignIn = false
 }
 
 /// Runs sync for all accounts: a bounded number at a time, triggered by push, polling and the user.
@@ -175,13 +181,80 @@ public actor SyncCoordinator {
     }
 
     public func requestSync(_ accountId: String) {
-        guard engines[accountId] != nil || gmailEngines[accountId] != nil else { return }
+        guard engines[accountId] != nil || gmailEngines[accountId] != nil, statuses[accountId]?.isOffline != true else { return }
         if running.contains(accountId) {
             pending.insert(accountId)
             return
         }
         running.insert(accountId)
         Task { await runSync(accountId) }
+    }
+
+    // MARK: Offline
+
+    /// Where an offline account is remembered (see `AccountSyncStatus.isOffline`): "user" when taken
+    /// offline with Take Offline, else Google refused its sign-in.
+    static let offlineState = "Offline"
+
+    /// Take Offline: the account stops syncing (push, checks, downloads) until Take Online.
+    public func takeOffline(_ accountId: String) {
+        guard engines[accountId] != nil || gmailEngines[accountId] != nil else { return }
+        try? store.setSyncState("user", accountId: accountId, type: Self.offlineState)
+        stopSyncing(accountId)
+        update(accountId, .idle, offline: true, needsSignIn: false)
+    }
+
+    /// Takes a Gmail account offline when Google refuses its sign-in, as MailMate does: until Take
+    /// Online signs in again.
+    private func takeOffline(_ accountId: String, because error: Error) {
+        try? store.setSyncState("signIn", accountId: accountId, type: Self.offlineState)
+        stopSyncing(accountId)
+        update(accountId, .failed(ErrorText.friendly(error)), detail: ErrorText.technical(error), offline: true, needsSignIn: true)
+    }
+
+    private func stopSyncing(_ accountId: String) {
+        pushTasks.removeValue(forKey: accountId)?.cancel()
+        fastPollTasks.removeValue(forKey: accountId)?.cancel()
+        gmailWatchTasks.removeValue(forKey: accountId)?.cancel()
+        gmailPollTasks.removeValue(forKey: accountId)?.cancel()
+        downloadTasks.removeValue(forKey: accountId)?.cancel()
+    }
+
+    /// What an offline account can't do: fetch what isn't downloaded yet (a message, an attachment).
+    public struct AccountOffline: LocalizedError {
+        public let accountName: String
+        public var errorDescription: String? {
+            "“\(accountName)” is offline, and this isn’t downloaded yet. Take it online to download it."
+        }
+    }
+
+    /// Offline accounts don't reach their server, even for what's asked for there and then.
+    private func refuseIfOffline(_ accountId: String) throws {
+        guard statuses[accountId]?.isOffline == true else { return }
+        throw AccountOffline(accountName: (try? store.account(id: accountId))?.name ?? accountId)
+    }
+
+    /// An account left offline stays so at launch (see `offlineState`); false when it's online.
+    private func staysOffline(_ accountId: String) -> Bool {
+        guard let state = try? store.syncState(accountId: accountId, type: Self.offlineState) else { return false }
+        if state == "user" {
+            update(accountId, .idle, offline: true, needsSignIn: false)
+        } else {
+            takeOffline(accountId, because: GoogleOAuthError.signInExpired)  // still: only signing in helps
+        }
+        reportQueue(accountId)  // the changes still waiting for it
+        return true
+    }
+
+    /// Take Online: an offline account starts over, showing as syncing at once, and first makes the
+    /// changes queued while it was offline. For a Gmail account Google refused the sign-in of, that's
+    /// once it's signed in again (its new refresh token in the keychain).
+    public func takeOnline(_ account: AccountRecord) {
+        try? store.setSyncState(nil, accountId: account.id, type: Self.offlineState)
+        downloadTasks.removeValue(forKey: account.id)?.cancel()  // started with the old sign-in
+        register(account, push: true)
+        update(account.id, .syncing, offline: false, needsSignIn: false)
+        requestSync(account.id)
     }
 
     /// Runs one sync round right now (bypassing coalescing). Used by the CLI.
@@ -191,12 +264,14 @@ public actor SyncCoordinator {
     }
 
     public func downloadBlob(accountId: String, blobId: String, type: String, name: String) async throws -> Data {
+        try refuseIfOffline(accountId)
         if let gmail = gmailEngines[accountId] { return try await gmail.downloadBlob(blobId: blobId, type: type, name: name) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.downloadBlob(blobId: blobId, type: type, name: name)
     }
 
     public func fetchBody(messageId: Int64, accountId: String) async throws -> MessageBody {
+        try refuseIfOffline(accountId)
         if let gmail = gmailEngines[accountId] { return try await gmail.fetchBody(messageId: messageId) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.fetchBody(messageId: messageId)
@@ -274,17 +349,25 @@ public actor SyncCoordinator {
     /// Makes a change on the server now, unless older changes are still queued (it waits behind them, so
     /// changes reach the server in the order they were made) or the server can't be reached.
     private func makeOrQueue(_ change: QueuedChange, accountId: String) async throws {
-        if try store.queuedChangeCount(accountId: accountId) > 0 { return try enqueue(change, accountId: accountId) }
+        if try statuses[accountId]?.isOffline == true || store.queuedChangeCount(accountId: accountId) > 0 {
+            return try enqueue(change, accountId: accountId)
+        }
         do {
             if let rest = try await make(change, accountId: accountId) { try enqueue(rest, accountId: accountId) }
-        } catch where ErrorText.isUnreachable(error) {
+        } catch where Self.canWait(error) {
             try enqueue(change, accountId: accountId)
         }
     }
 
+    /// Whether a change that failed can wait in the queue: the server can't be reached, or Google wants
+    /// the (Gmail) account signed in to again, after which it goes through.
+    private static func canWait(_ error: Error) -> Bool {
+        ErrorText.isUnreachable(error) || error as? GoogleOAuthError == .signInExpired
+    }
+
     private func enqueue(_ change: QueuedChange, accountId: String) throws {
         try store.enqueueChange(accountId: accountId, try JSONEncoder().encode(change))
-        syncLog.notice("Queued a change for \(accountId, privacy: .public): the server can't be reached")
+        syncLog.notice("Queued a change for \(accountId, privacy: .public): it can't be made now")
         reportQueue(accountId)
     }
 
@@ -310,7 +393,7 @@ public actor SyncCoordinator {
             requestSync(targetAccountId)
             do {
                 try await destroy([remoteId])
-            } catch where ErrorText.isUnreachable(error) {
+            } catch where Self.canWait(error) {
                 return .destroy(remoteIds: [remoteId])
             }
         }
@@ -335,7 +418,7 @@ public actor SyncCoordinator {
                     throw URLError(.networkConnectionLost)
                 }
                 try store.removeQueuedChange(id: item.id)
-            } catch where ErrorText.isUnreachable(error) {
+            } catch where Self.canWait(error) {
                 throw error
             } catch {
                 syncLog.error("A queued change was refused: \(ErrorText.technical(error), privacy: .public)")
@@ -407,7 +490,7 @@ public actor SyncCoordinator {
             let engine = try JMAPAccountSync(
                 account: account, credentials: try credentials(account), store: store, urlSession: urlSession)
             engines[account.id] = engine
-            if push { startPush(account.id, engine: engine) }
+            if !staysOffline(account.id), push { startPush(account.id, engine: engine) }
         } catch {
             update(account.id, failure: error)
         }
@@ -424,7 +507,7 @@ public actor SyncCoordinator {
         } catch {
             return update(account.id, failure: error)
         }
-        guard poll else { return }
+        guard !staysOffline(account.id), poll else { return }
         gmailWatchTasks[account.id]?.cancel()
         gmailWatchTasks[account.id] = Task { [weak self] in
             await engine.watch { [weak self] in Task { [weak self] in await self?.requestSync(account.id) } }
@@ -463,13 +546,14 @@ public actor SyncCoordinator {
 
     /// A Gmail check that's taking a while shows as syncing (a quick one, every 10 s, doesn't flicker).
     private func showSyncing(_ accountId: String) {
-        guard running.contains(accountId), statuses[accountId]?.phase != .syncing else { return }
+        guard running.contains(accountId), statuses[accountId]?.phase != .syncing, statuses[accountId]?.isOffline != true else { return }
         update(accountId, .syncing)
     }
 
     private func runSync(_ accountId: String) async {
         repeat {
             pending.remove(accountId)
+            if statuses[accountId]?.isOffline == true { break }
             if let gmail = gmailEngines[accountId] {
                 await limiter.acquire()
                 lastGmailCheck[accountId] = .now
@@ -538,7 +622,7 @@ public actor SyncCoordinator {
 
     /// Starts downloading the account's messages that aren't stored locally yet (no-op if running).
     public func startDownloads(_ accountId: String) {
-        guard downloadTasks[accountId] == nil else { return }
+        guard downloadTasks[accountId] == nil, statuses[accountId]?.isOffline != true else { return }
         if let gmail = gmailEngines[accountId] {
             downloadTasks[accountId] = Task {
                 // No pause between batches: Gmail's limit is per request, and the requests pace themselves.
@@ -574,6 +658,8 @@ public actor SyncCoordinator {
             }
         }
         await limiter.release()
+        // A cancelled one was taken off by whoever cancelled it, who may have started another since.
+        guard !Task.isCancelled else { return }
         downloadTasks[accountId] = nil
         reportBusyMailboxes(accountId, [])
         reportDownloadProgress(accountId, active: false)
@@ -672,17 +758,25 @@ public actor SyncCoordinator {
     private func update(_ accountId: String, failure error: Error) {
         let name = engines[accountId]?.account.name ?? gmailEngines[accountId]?.account.name ?? accountId
         syncLog.error("Sync failed for \(name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
+        if error as? GoogleOAuthError == .signInExpired { return takeOffline(accountId, because: error) }
         update(accountId, .failed(ErrorText.friendly(error)), detail: ErrorText.technical(error))
     }
 
+    /// `offline` and `needsSignIn` change those (nil keeps them: a sync that ends after Take Offline
+    /// leaves the account offline).
     private func update(
-        _ accountId: String, _ phase: AccountSyncStatus.Phase, success: Bool = false, detail: String? = nil
+        _ accountId: String, _ phase: AccountSyncStatus.Phase, success: Bool = false, detail: String? = nil,
+        offline: Bool? = nil, needsSignIn: Bool? = nil
     ) {
         var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .idle, lastSuccess: nil)
+        let offline = offline ?? status.isOffline, needsSignIn = needsSignIn ?? status.needsSignIn
         // Nothing to tell when nothing shown changes (a quiet Gmail check, every 10 s while in use).
-        let changed = status.phase != phase || status.errorDetail != detail
+        let changed = status.phase != phase || status.errorDetail != detail || status.isOffline != offline
+            || status.needsSignIn != needsSignIn
         status.phase = phase
         status.errorDetail = detail
+        status.isOffline = offline
+        status.needsSignIn = needsSignIn
         if success { status.lastSuccess = Date() }
         statuses[accountId] = status
         if changed { onStatus(status) }

@@ -1,4 +1,5 @@
 import AppKit
+import GmailKit
 import MailStore
 import MailSync
 
@@ -17,6 +18,10 @@ final class SidebarNode: NSObject {
     var role: String?
     var badge = 0
     var warning: String?
+    /// The account is offline: its row in red, " (offline)" after its name, as in MailMate.
+    var isOffline = false
+    /// Why, or what's waiting for it (the row's tooltip).
+    var offlineReason: String?
     var info: String?
     var isBusy = false
     /// Made by a Submailboxes tab (one per value, account or source of the mailbox above), so it comes
@@ -39,6 +44,8 @@ final class SidebarNode: NSObject {
         node.role = role
         node.badge = badge
         node.warning = warning
+        node.isOffline = isOffline
+        node.offlineReason = offlineReason
         node.info = info
         node.isBusy = isBusy
         node.isGenerated = isGenerated
@@ -208,6 +215,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let inside = node.children.map(update).contains(true)
             if node.kind == .account, let id = node.accountId {
                 node.warning = model.syncWarning(accountId: id)
+                node.isOffline = model.isOffline(accountId: id)
+                node.offlineReason = model.offlineReason(accountId: id)
                 node.info = model.downloadInfo(accountId: id)
             }
             node.isBusy = own || (inside && !outline.isItemExpanded(node))
@@ -316,6 +325,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     if let node = old[n.key] {
                         node.badge = n.badge
                         node.warning = n.warning
+                        node.isOffline = n.isOffline
+                        node.offlineReason = n.offlineReason
                         node.info = n.info
                         node.role = n.role
                         node.title = n.title
@@ -563,6 +574,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 scope: .account(account.id), accountId: account.id)
             node.badge = counts.unreadByAccount[account.id] ?? 0
             node.warning = model.syncWarning(accountId: account.id)
+            node.isOffline = model.isOffline(accountId: account.id)
+            node.offlineReason = model.offlineReason(accountId: account.id)
             node.info = model.downloadInfo(accountId: account.id)
             node.children = Self.mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
             sources.children.append(node)
@@ -1058,7 +1071,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             groups.insert([item("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))], at: 0)
         }
         if node.kind != .header {
-            groups.append([item(synchronizeTitle(for: node), #selector(synchronizeClicked(_:)))] + (syncWarningItem(for: node).map { [$0] } ?? []))
+            let sync = item(synchronizeTitle(for: node), #selector(synchronizeClicked(_:)))
+            if !canSynchronize(node) { sync.action = nil }
+            groups.append([sync] + syncStatusItems(for: node))
         }
         for (index, group) in groups.enumerated() {
             if index > 0 { menu.addItem(.separator()) }
@@ -1129,18 +1144,61 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         synchronize(sender.representedObject as? SidebarNode)
     }
 
+    /// Not for an offline account or its mailboxes: only Take Online brings them back.
+    func canSynchronize(_ node: SidebarNode?) -> Bool {
+        guard let id = node?.accountId else { return true }
+        return !model.isOffline(accountId: id)
+    }
+
     /// Edit Rules…: the mailbox editor's Rules tab for the mailbox.
     @objc private func editRulesClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }
         MailboxEditorWindowController.show(key: node.key, model: model, over: view.window, tab: .rules)
     }
 
-    /// Why an account's last sync failed, as a greyed-out line to go under its sync item.
-    func syncWarningItem(for node: SidebarNode) -> NSMenuItem? {
-        guard node.kind == .account, let warning = node.warning else { return nil }
+    /// What goes under Synchronize, as in MailMate: Take “account” Offline for an account (then why its
+    /// last sync failed, as a greyed-out line), or Take “account” Online for an offline account or one
+    /// of its mailboxes.
+    func syncStatusItems(for node: SidebarNode) -> [NSMenuItem] {
+        guard let accountId = node.accountId else { return [] }
+        let offline = model.isOffline(accountId: accountId)
+        guard offline || node.kind == .account else { return [] }
+        let name = (try? model.store.account(id: accountId))?.name ?? node.title
+        let take = NSMenuItem(
+            title: "Take “\(name)” \(offline ? "Online" : "Offline")",
+            action: offline ? #selector(takeOnlineClicked(_:)) : #selector(takeOfflineClicked(_:)), keyEquivalent: "")
+        take.target = self
+        take.representedObject = accountId
+        guard !offline, let warning = node.warning else { return [take] }
         let line = NSMenuItem(title: warning.split(separator: "\n").first.map(String.init) ?? warning, action: nil, keyEquivalent: "")
         line.isEnabled = false
-        return line
+        return [take, line]
+    }
+
+    @objc private func takeOfflineClicked(_ sender: NSMenuItem) {
+        guard let accountId = sender.representedObject as? String else { return }
+        model.takeOffline(accountId: accountId)
+    }
+
+    /// Take Online; for a Gmail account Google refused (or dropped) the sign-in of, Google's sign-in in
+    /// the browser, where only a failure has more to say (cancelling leaves it offline).
+    @objc private func takeOnlineClicked(_ sender: NSMenuItem) {
+        guard let accountId = sender.representedObject as? String else { return }
+        Task {
+            do {
+                try await model.takeOnline(accountId: accountId)
+                NSApp.activate()  // back from the browser, if it went there
+            } catch GoogleOAuthError.cancelled {
+                NSApp.activate()
+            } catch {
+                NSApp.activate()
+                guard let window = view.window else { return }
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t sign in again."
+                alert.informativeText = AppModel.describe(error)
+                alert.beginSheetModal(for: window, completionHandler: nil)
+            }
+        }
     }
 
     // MARK: Mark All Read, Empty
@@ -1533,6 +1591,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             let field = cell.textField
         else { return }
         renaming = (key, thenEdit)
+        field.stringValue = node.title  // without " (offline)"
+        field.textColor = .textColor
         field.isEditable = true
         field.delegate = self
         view.window?.makeFirstResponder(field)
@@ -1563,9 +1623,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             default: break
             }
             onRename?(node)
-        } else {
-            field.stringValue = node.title
         }
+        (field.superview as? SidebarCell)?.configure(node, plain: !showsStatus)  // the name as shown, " (offline)" and all
         // Return (or Escape) hands the keyboard back to the sidebar; Return after New Smart Mailbox goes on
         // to its editor. Ending the edit by clicking elsewhere stays where the click was.
         if movement == .return || movement == .cancel {
@@ -1698,14 +1757,26 @@ final class SidebarCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The title in the selection's text colour on a highlighted row (white on the accent in light mode).
+    /// The title in the selection's text colour on a highlighted row (white on the accent in light mode);
+    /// red for an offline account, as in MailMate, selected or not.
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { textField?.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .textColor }
+        didSet { styleTitle() }
+    }
+
+    private var isOffline = false
+
+    private func styleTitle() {
+        textField?.textColor = isOffline ? .systemRed
+            : backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .textColor
     }
 
     /// `plain`: icon and name only (the mailbox editor's sidebar).
     func configure(_ node: SidebarNode, plain: Bool = false) {
-        textField?.stringValue = node.title
+        isOffline = node.isOffline && !plain
+        textField?.stringValue = isOffline ? node.title + " (offline)" : node.title
+        // A long name gives way in the middle, so " (offline)" still shows.
+        textField?.lineBreakMode = isOffline ? .byTruncatingMiddle : .byTruncatingTail
+        styleTitle()
         if let warning = node.warning, !plain {
             imageView?.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Sync error")
             imageView?.contentTintColor = .systemOrange
@@ -1715,8 +1786,13 @@ final class SidebarCell: NSTableCellView {
                 MailboxColors.style(
                     imageView, key: node.key, symbol: node.symbol,
                     fallback: node.kind == .account ? .secondaryLabelColor : .controlAccentColor)
+                // Its icon too, drawn in (a tint turns white on a selected row).
+                if isOffline, let image = imageView.image {
+                    imageView.image = MailboxColors.tinted(image, .systemRed)
+                    imageView.contentTintColor = nil
+                }
             }
-            toolTip = plain ? nil : node.info
+            toolTip = plain ? nil : node.offlineReason ?? node.info
         }
         let hasIcon = imageView?.image != nil
         if titleAfterIcon.isActive != hasIcon {

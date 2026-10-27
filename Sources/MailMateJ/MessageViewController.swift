@@ -224,6 +224,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
                 let body = try await model.fetchBody(messageId: messageID, accountId: detail.accountId)
                 guard currentID == messageID else { return }
                 render(body)
+            } catch let offline as SyncCoordinator.AccountOffline {
+                guard currentID == messageID else { return }
+                showStatus(offline.localizedDescription)  // nothing went wrong
             } catch {
                 guard currentID == messageID else { return }
                 showStatus("Couldn’t load this message. " + AppModel.describe(error))

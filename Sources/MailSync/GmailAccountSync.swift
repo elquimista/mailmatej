@@ -476,11 +476,13 @@ public actor GmailAccountSync {
     /// there (new mail, archiving, read or unread), so changes made elsewhere (Gmail on the web, a
     /// phone) show within seconds, until cancelled. The IDLE is renewed every 4 minutes, and a renewal
     /// that isn't answered counts as a dead connection: it reconnects, waiting longer after each failure
-    /// (5 s to 5 minutes). It's only a signal: the minute's check still covers everything else.
+    /// (5 s to 5 minutes), unless Google no longer takes the sign-in. It's only a signal: the minute's
+    /// check still covers everything else.
     public nonisolated func watch(onChange: @escaping @Sendable () -> Void) async {
         var backoff = 5.0
         while !Task.isCancelled {
             let imap = GmailIMAP(email: account.username, tokens: tokens)
+            var signInExpired = false
             do {
                 try await imap.connect()
                 try await imap.examine("INBOX")
@@ -498,12 +500,14 @@ public actor GmailAccountSync {
                 while !Task.isCancelled { try await imap.idle(for: .seconds(240), onChange: signal) }
             } catch {
                 syncLog.notice("Gmail watch for \(self.account.name, privacy: .public) stopped: \(ErrorText.technical(error), privacy: .public)")
+                signInExpired = error as? GoogleOAuthError == .signInExpired
                 #if DEBUG
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil { NSLog("MMJ gmail idle: stopped: \(error)") }
                 #endif
             }
             await imap.close()
-            guard !Task.isCancelled else { return }
+            // Only signing in again helps, and that starts a new watch (see `SyncCoordinator.takeOnline`).
+            guard !Task.isCancelled, !signInExpired else { return }
             try? await Task.sleep(for: .seconds(backoff))
             backoff = min(backoff * 2, 300)
         }
