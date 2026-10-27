@@ -289,9 +289,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectCorrespondence(row: row)
                     try? await Task.sleep(for: .milliseconds(600))
                 }
-                if let subject = ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT_SUBJECT"] {
-                    windowController?.debugSelect(subject: subject)
+                // MMJ_DEBUG_SELECT_SUBJECT="<subject>|<subject>…": selects each in turn, logging its attachment rows.
+                for subject in ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT_SUBJECT"]?.split(separator: "|") ?? [] {
+                    windowController?.debugSelect(subject: String(subject))
                     try? await Task.sleep(for: .seconds(2))
+                    NSLog("MMJ attachment rows: \(windowController?.debugAttachmentRows ?? [])")
                 }
                 if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_SWATCHES"] {
                     // The Color menu's swatches at 1x on the dark menu background, side by side.

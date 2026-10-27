@@ -674,6 +674,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     #if DEBUG
         func debugLoadRemote() { perform(.load) }
 
+        var debugAttachmentRows: [String] { header.debugAttachmentRows }
+
         /// Logs the attachments, Quick Looks the second with MMJ_DEBUG_QUICKLOOK, and fetches the first to a
         /// file (without opening it), logging its path and quarantine flag.
         func debugCheckAttachments() async {

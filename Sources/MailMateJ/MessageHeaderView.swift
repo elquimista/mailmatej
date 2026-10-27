@@ -101,10 +101,9 @@ final class MessageHeaderView: NSView {
             row.header = self
             return row
         }
-        if !rows.isEmpty {
-            addSubview(attachmentsBox)
-            rows.forEach(attachmentsBox.addSubview)
-        }
+        // The box is kept from message to message, so the previous message's rows go with this.
+        attachmentsBox.subviews = rows
+        if !rows.isEmpty { addSubview(attachmentsBox) }
         self.bar = bar.map { RemoteBar(bar: $0) }
         if let barView = self.bar {
             barView.onAction = { [weak self] action, view in self?.onBarAction(action, view) }
@@ -197,6 +196,11 @@ final class MessageHeaderView: NSView {
     fileprivate func save(_ index: Int, option: Bool) { onSave(index, option) }
     fileprivate func menu(_ index: Int) -> NSMenu? { menuForAttachment(index) }
     fileprivate func drag(_ index: Int) -> NSDraggingItem? { dragItem(index) }
+
+    #if DEBUG
+        /// Every row in the attachments block, current or left over, as name, size and top.
+        var debugAttachmentRows: [String] { attachmentsBox.subviews.compactMap { ($0 as? AttachmentRow)?.debugText } }
+    #endif
 }
 
 /// The line under the fields: transparent at both ends, the line color in the middle.
@@ -260,6 +264,10 @@ private final class AttachmentRow: NSView, NSDraggingSource {
     required init?(coder: NSCoder) { fatalError() }
 
     func showOptionVariant(_ on: Bool) { save.showsOption = on }
+
+    #if DEBUG
+        var debugText: String { "\(name.stringValue) \(size.stringValue) y=\(frame.minY)" }
+    #endif
 
     override func layout() {
         super.layout()
