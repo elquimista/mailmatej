@@ -1170,7 +1170,7 @@ final class AppModel {
         case noIdentities
 
         var errorDescription: String? {
-            "No account can send mail yet. Sending addresses appear once an account has synced with a server that supports JMAP submission."
+            "No account can send mail yet. Sending addresses appear once an account has synced: a Gmail account, or one on a JMAP server that supports submission."
         }
     }
 
@@ -1342,6 +1342,8 @@ final class AppModel {
     }
 
     #if DEBUG
+        var coordinatorForDebug: SyncCoordinator { coordinator }
+
         /// The Gmail account whose sign-in Google no longer takes, as far as the app is told.
         nonisolated(unsafe) static var debugExpiredSignIn: String?
 

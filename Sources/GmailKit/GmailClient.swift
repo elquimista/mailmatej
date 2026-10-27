@@ -129,16 +129,91 @@ public struct GmailClient: Sendable {
     /// Adds a whole raw message to the account with these labels, as if it had arrived (dated by its
     /// Date header).
     public func importMessage(_ raw: Data, labels: [String]) async throws {
+        _ = try await upload("messages/import", metadata: ["labelIds": labels], raw: raw, query: [
+            URLQueryItem(name: "internalDateSource", value: "dateHeader"),
+        ], cost: 25)
+    }
+
+    // MARK: Sending
+
+    /// Sends a whole raw message: Gmail takes the recipients from its To, Cc and Bcc (leaving Bcc out
+    /// of what it delivers) and files it in Sent. `threadId`: the conversation a reply belongs to.
+    public func sendMessage(_ raw: Data, threadId: String?) async throws -> MessageRef {
+        try decode(MessageRef.self, try await upload(
+            "messages/send", metadata: threadId.map { ["threadId": $0] } ?? [:], raw: raw, cost: 100))
+    }
+
+    public struct Draft: Decodable, Sendable {
+        public var id: String
+        public var message: MessageRef
+    }
+
+    /// Saves a whole raw message as a draft.
+    public func createDraft(_ raw: Data, threadId: String?) async throws -> Draft {
+        try decode(Draft.self, try await upload(
+            "drafts", metadata: ["message": threadId.map { ["threadId": $0] } ?? [:]], raw: raw, cost: 10))
+    }
+
+    /// The account's drafts (their ids, and their messages').
+    public func drafts() async throws -> [Draft] {
+        struct List: Decodable {
+            var drafts: [Draft]?
+            var nextPageToken: String?
+        }
+        var all: [Draft] = [], token: String?
+        repeat {
+            var query = [URLQueryItem(name: "maxResults", value: "500")]
+            if let token { query.append(URLQueryItem(name: "pageToken", value: token)) }
+            let list = try decode(List.self, try await get("drafts", query: query, cost: 5))
+            all += list.drafts ?? []
+            token = list.nextPageToken
+        } while token != nil
+        return all
+    }
+
+    /// Deletes a draft for good.
+    public func deleteDraft(_ id: String) async throws {
+        _ = try await send("DELETE", url: Self.base.appendingPathComponent("drafts/\(id)"), cost: 10)
+    }
+
+    /// An address the account sends as (Gmail settings › Accounts › Send mail as): its own, and the
+    /// aliases added there.
+    public struct SendAs: Decodable, Sendable {
+        public var sendAsEmail: String
+        public var displayName: String?
+        public var isPrimary: Bool?
+        /// "accepted" once verified (the primary address has none).
+        public var verificationStatus: String?
+    }
+
+    public func sendAs() async throws -> [SendAs] {
+        struct List: Decodable { var sendAs: [SendAs]? }
+        return try decode(List.self, try await get("settings/sendAs", cost: 1)).sendAs ?? []
+    }
+
+    /// The account's message with this Message-ID (without angle brackets), if there's one.
+    public func message(rfc822MessageId id: String) async throws -> MessageRef? {
+        struct List: Decodable { var messages: [MessageRef]? }
+        return try decode(List.self, try await get("messages", query: [
+            URLQueryItem(name: "q", value: "rfc822msgid:\(id)"), URLQueryItem(name: "maxResults", value: "1"),
+            URLQueryItem(name: "includeSpamTrash", value: "true"),
+        ], cost: 5)).messages?.first
+    }
+
+    /// Uploads a raw message with its JSON metadata (Gmail's multipart upload, up to 35 MB).
+    private func upload(
+        _ path: String, metadata: [String: Any], raw: Data, query: [URLQueryItem] = [], cost: Double
+    ) async throws -> Data {
         let boundary = "mmj-" + UUID().uuidString
         var body = Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8)
-        body += try JSONSerialization.data(withJSONObject: ["labelIds": labels])
+        body += try JSONSerialization.data(withJSONObject: metadata)
         body += Data("\r\n--\(boundary)\r\nContent-Type: message/rfc822\r\n\r\n".utf8)
         body += raw
         body += Data("\r\n--\(boundary)--\r\n".utf8)
-        let url = URL(string: "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/import")!
-        _ = try await send("POST", url: url, query: [
-            URLQueryItem(name: "uploadType", value: "multipart"), URLQueryItem(name: "internalDateSource", value: "dateHeader"),
-        ], body: body, contentType: "multipart/related; boundary=\(boundary)", cost: 25)
+        let url = URL(string: "https://gmail.googleapis.com/upload/gmail/v1/users/me/" + path)!
+        return try await send(
+            "POST", url: url, query: [URLQueryItem(name: "uploadType", value: "multipart")] + query, body: body,
+            contentType: "multipart/related; boundary=\(boundary)", cost: cost)
     }
 
     // MARK: History

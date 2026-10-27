@@ -1,4 +1,6 @@
 import AppKit
+import JMAPKit
+import MailSync
 
 /// "MailMateJ" for release builds, "MailMateJ Dev" for debug builds (set by scripts/bundle.sh).
 let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "MailMateJ"
@@ -64,6 +66,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         windowController?.debugEmpty(key: key, choose: parts.count > 1 ? parts[1] : nil)
                     }
                     try? await Task.sleep(for: .seconds(4))
+                }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_COMPOSE"] {
+                    // "<account id>|<step>,…", as the compose window does: identities (logs them), draft (saves a
+                    // test draft to the account's own address, replacing the last), load (reopens it), discard,
+                    // reply (reply headers for the Inbox's newest message), send (sends the test message to the
+                    // account's own address), wait=<seconds>.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    let id = parts[0]
+                    let model: AppModel = AppModel.shared
+                    var last: AppModel.DraftRef?
+                    func test(_ round: Int) -> (OutgoingMessage, String)? {
+                        guard let identity = (try? model.store.identities())?.first(where: { $0.accountId == id }) else { return nil }
+                        var message = OutgoingMessage(
+                            identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
+                            to: [EmailAddress(name: "Tëst Sëlf", email: identity.email)], cc: [], bcc: [],
+                            subject: "MailMateJ test \(round) — café ✓", text: "Hello **there**, round \(round).\n\n![](cid:dot1)\n")
+                        message.html = "<p>Hello <strong>there</strong>, round \(round).</p><p><img src=\"cid:dot1\"></p>"
+                        message.draftFormat = "markdown"
+                        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")!
+                        message.files = [
+                            OutgoingFile(name: "dot.png", type: "image/png", data: png, cid: "dot1"),
+                            OutgoingFile(name: "Résumé ✓.txt", type: "text/plain", data: Data("attached text\n".utf8)),
+                        ]
+                        return (message, identity.email)
+                    }
+                    var round = 0
+                    for step in parts[1].split(separator: ",").map(String.init) {
+                        do {
+                            switch step {
+                            case "drafts":  // as Gmail lists them
+                                NSLog("MMJ compose drafts in Gmail: \(try await model.coordinatorForDebug.debugGmailDrafts(accountId: id))")
+                            case "identities":
+                                NSLog("MMJ compose identities: \(((try? model.store.identities()) ?? []).filter { $0.accountId == id }.map { "\($0.name) <\($0.email)> \($0.remoteId)" })")
+                            case "draft":
+                                round += 1
+                                guard let (message, _) = test(round) else { NSLog("MMJ compose: no identity"); continue }
+                                let ref = try await model.saveDraft(message, accountId: id, replacing: last.map { [$0] } ?? [])
+                                NSLog("MMJ compose draft \(round): saved \(ref.remoteId), replacing \(last?.remoteId ?? "-")")
+                                last = ref
+                            case "load":
+                                guard let last else { continue }
+                                let draft = try await model.coordinatorForDebug.loadDraft(accountId: id, remoteId: last.remoteId)
+                                NSLog("MMJ compose load: from=\(draft.from ?? "-") to=\(draft.to.map { "\($0.name ?? "") <\($0.email ?? "")>" }) subject=\(draft.subject) markdown=\(draft.isMarkdown) text=\(draft.text.debugDescription) attachments=\(draft.attachments.map { "\($0.name ?? "-") \($0.type) cid=\($0.cid ?? "-")" })")
+                            case let discard where discard.hasPrefix("discard="):  // a draft by its message id
+                                model.discardDrafts([AppModel.DraftRef(accountId: id, remoteId: String(discard.dropFirst(8)))])
+                                NSLog("MMJ compose discard: \(discard.dropFirst(8))")
+                            case "discard":
+                                if let last { model.discardDrafts([last]) }
+                                NSLog("MMJ compose discard: \(last?.remoteId ?? "-")")
+                                last = nil
+                            case "reply":
+                                guard let inbox = try model.store.mailbox(accountId: id, role: "inbox"),
+                                    let newest = try model.store.messageIDs(scope: .mailbox(inbox.id)).first,
+                                    let ref = try model.store.refs(ids: [newest]).first
+                                else { continue }
+                                let headers = try await model.coordinatorForDebug.replyHeaders(accountId: id, remoteId: ref.remoteId)
+                                NSLog("MMJ compose reply headers: inReplyTo=\(headers.inReplyTo) references=\(headers.references)")
+                            case "replydraft":  // a draft replying to the Inbox's newest message (Gmail should thread it there)
+                                guard let inbox = try model.store.mailbox(accountId: id, role: "inbox"),
+                                    let newest = try model.store.messageIDs(scope: .mailbox(inbox.id)).first,
+                                    let ref = try model.store.refs(ids: [newest]).first, let detail = try model.store.detail(id: newest),
+                                    var (message, _) = test(0)
+                                else { continue }
+                                (message.inReplyTo, message.references) = try await model.coordinatorForDebug.replyHeaders(accountId: id, remoteId: ref.remoteId)
+                                message.subject = Compose.replySubject(detail.subject)
+                                let saved = try await model.saveDraft(message, accountId: id, replacing: [])
+                                last = saved
+                                NSLog("MMJ compose reply draft: saved \(saved.remoteId) replying to \(ref.remoteId) “\(detail.subject)”")
+                            case "send":
+                                round += 1
+                                guard let (message, _) = test(round) else { continue }
+                                try await model.send(message, accountId: id, original: nil)
+                                NSLog("MMJ compose send: sent")
+                            case let wait where wait.hasPrefix("wait="):
+                                try? await Task.sleep(for: .seconds(Double(wait.dropFirst(5)) ?? 1))
+                            default: NSLog("MMJ compose: no step \(step)")
+                            }
+                        } catch {
+                            NSLog("MMJ compose \(step): \(error)")
+                        }
+                    }
                 }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_OFFLINE"] {
                     // "<account id>|<step>,…": offline (Take Offline), select (its row), drop (Google drops its

@@ -39,6 +39,10 @@ public actor GmailAccountSync {
     private var imapIndex: [String: (folder: String, uid: UInt32)]?
     /// IMAP failed (turned off for the account, say): downloads use the API until the next sync.
     private var imapUnavailable = false
+    /// When the addresses it sends as were last asked for (see `syncIdentities`).
+    private var lastIdentitySync: Date?
+    /// Drafts' own ids (Gmail deletes a draft by it), by their messages' ids.
+    private var draftIds: [String: String] = [:]
 
     /// The headers stored for every message.
     static let headerNames = ["From", "Sender", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
@@ -73,6 +77,13 @@ public actor GmailAccountSync {
         var result = JMAPAccountSync.Result()
         imapUnavailable = false  // try IMAP again
         result.mailboxes = try await syncLabels()
+        if lastIdentitySync.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+            do {
+                _ = try await syncIdentities()
+            } catch {
+                syncLog.error("Gmail send-as addresses for \(self.account.name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
+            }
+        }
         // An account synced when mailboxes meant something else (or before that was recorded) has every
         // message fetched again. A first sync still under way records nothing yet: it just carries on.
         let mapping = try store.syncState(accountId: account.id, type: Self.mappingState)
@@ -895,6 +906,139 @@ public actor GmailAccountSync {
         }
         try store.blobs.write(data, accountId: account.id, blobId: blobId)
         return data
+    }
+}
+
+// MARK: - Sending
+
+extension GmailAccountSync {
+    #if DEBUG
+        /// The messages of the account's drafts, as Gmail lists them.
+        public func debugDraftMessageIds() async throws -> [String] { try await client.drafts().map(\.message.id) }
+    #endif
+
+    /// Stores the addresses the account sends as (Gmail settings › Accounts › Send mail as: its own, and
+    /// the aliases verified there) as its identities, and returns them (lowercased).
+    @discardableResult
+    func syncIdentities() async throws -> Set<String> {
+        let addresses = try await client.sendAs().filter { $0.isPrimary == true || $0.verificationStatus == "accepted" }
+        try store.replaceIdentities(accountId: account.id, addresses.map { address in
+            let email = address.sendAsEmail.lowercased()
+            return (remoteId: email, name: address.displayName ?? "", email: email)
+        })
+        lastIdentitySync = Date()
+        return Set(addresses.map { $0.sendAsEmail.lowercased() })
+    }
+
+    /// See `JMAPAccountSync.ensureIdentities`. Gmail sends only as the account's own address and the
+    /// aliases verified in its settings, so it refuses the others (sent from the account's own address).
+    public func ensureIdentities(_ addresses: [String], name: String) async throws -> [(email: String, reason: String)] {
+        let known = try await syncIdentities()
+        return addresses.map { $0.lowercased() }.filter { !known.contains($0) }.map {
+            ($0, "Gmail sends only as addresses added in its settings, under Accounts › Send mail as.")
+        }
+    }
+
+    /// Sends a message (see `JMAPAccountSync.send`): written out whole and handed to Gmail, which takes
+    /// the recipients from its headers (Bcc included, left out of what it delivers), files it in Sent and
+    /// puts it in the conversation it replies to. The drafts it was written in go once it's sent.
+    public func send(_ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
+        let raw = OutgoingMIME.message(message, attachments: try await outgoingAttachments(message), bcc: true)
+        _ = try await client.sendMessage(raw, threadId: try await threadId(of: message))
+        do {
+            try await destroyDrafts(replacingDrafts)
+        } catch {
+            syncLog.error("Sent, but its drafts stay: \(ErrorText.technical(error), privacy: .public)")
+        }
+    }
+
+    /// Saves a message as a draft (see `JMAPAccountSync.saveDraft`), then removes the drafts it replaces.
+    /// Returns the new draft's message id.
+    public func saveDraft(_ message: OutgoingMessage, replacing old: [String]) async throws -> String {
+        let raw = OutgoingMIME.message(message, attachments: try await outgoingAttachments(message), bcc: true, asDraft: true)
+        let draft = try await client.createDraft(raw, threadId: try await threadId(of: message))
+        draftIds[draft.message.id] = draft.id
+        do {
+            try await destroyDrafts(old)
+        } catch {
+            syncLog.error("Saved, but the drafts it replaces stay: \(ErrorText.technical(error), privacy: .public)")
+        }
+        return draft.message.id
+    }
+
+    /// Deletes drafts for good, by their messages' ids (a draft's own id, which Gmail deletes it by, is
+    /// looked up when it wasn't saved here). A message that's no longer a draft (sent since) stays.
+    public func destroyDrafts(_ remoteIds: [String]) async throws {
+        guard !remoteIds.isEmpty else { return }
+        if remoteIds.contains(where: { draftIds[$0] == nil }) {
+            for draft in try await client.drafts() { draftIds[draft.message.id] = draft.id }
+        }
+        var gone: [String] = []
+        for id in remoteIds {
+            guard let draftId = draftIds[id] else { continue }
+            do {
+                try await client.deleteDraft(draftId)
+            } catch let error as GmailClient.APIError where error.status == 404 {
+                // deleted already
+            }
+            draftIds[id] = nil
+            gone.append(id)
+        }
+        try store.deleteMessages(accountId: account.id, remoteIds: gone)
+    }
+
+    /// A draft as written (see `JMAPAccountSync.loadDraft`), taken from its raw message.
+    public func loadDraft(remoteId: String) async throws -> SavedDraft {
+        let data = try await rawMessage(remoteId, blobId: remoteId)  // a Gmail message's blob id is its id
+        let raw = MIMEPart.parse(data)
+        func addresses(_ name: String) -> [EmailAddress] {
+            raw.headers(name).flatMap { MailHeaders.addresses($0).addresses }.map { EmailAddress(name: $0.name, email: $0.email) }
+        }
+        let (body, parts) = BodyStructure.render(raw, blobId: remoteId)
+        var draft = SavedDraft()
+        draft.from = addresses("From").first?.email?.lowercased()
+        draft.to = addresses("To")
+        draft.cc = addresses("Cc")
+        draft.bcc = addresses("Bcc")
+        draft.replyTo = addresses("Reply-To")
+        draft.subject = MailHeaders.decodeWords(raw.header("Subject") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.text = (body.text ?? body.html.map(JMAPAccountSync.plainText(fromHTML:)) ?? "")
+            .replacingOccurrences(of: "\r\n", with: "\n")  // as written, not as sent
+        draft.isMarkdown = raw.header(JMAPAccountSync.draftFormatHeader)?.trimmingCharacters(in: .whitespaces).lowercased() == "markdown"
+        draft.inReplyTo = MailHeaders.messageIds(raw.header("In-Reply-To"))
+        draft.references = MailHeaders.messageIds(raw.header("References"))
+        draft.attachments = parts
+        return draft
+    }
+
+    /// In-Reply-To and References for a reply to this message (see `Compose.references`), from its
+    /// raw message.
+    public func replyHeaders(remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
+        let raw = MIMEPart.parse(try await rawMessage(remoteId, blobId: remoteId))
+        let messageId = MailHeaders.messageIds(raw.header("Message-ID"))
+        guard !messageId.isEmpty else { return ([], []) }
+        return (messageId, Compose.references(
+            messageId: messageId, references: raw.header("References").map(MailHeaders.messageIds),
+            inReplyTo: raw.header("In-Reply-To").map(MailHeaders.messageIds)))
+    }
+
+    /// The Gmail conversation a reply belongs to: that of the message it replies to (stored here, else
+    /// found in Gmail by its Message-ID). Gmail only threads a sent reply given it.
+    private func threadId(of message: OutgoingMessage) async throws -> String? {
+        guard let parent = message.inReplyTo.first ?? message.references.last else { return nil }
+        if let stored = try store.threadId(accountId: account.id, messageIdHeader: parent) { return stored }
+        return try await client.message(rfc822MessageId: parent)?.threadId
+    }
+
+    /// What's attached, with its bytes: parts of the account's messages (Forward, or a reopened draft's),
+    /// and files.
+    private func outgoingAttachments(_ message: OutgoingMessage) async throws -> [OutgoingMIME.Attachment] {
+        var attachments: [OutgoingMIME.Attachment] = []
+        for part in message.attachments {
+            let data = try await downloadBlob(blobId: part.blobId, type: part.type, name: part.name ?? "")
+            attachments.append(OutgoingMIME.Attachment(name: part.name, type: part.type, data: data, cid: part.cid))
+        }
+        return attachments + message.files.map { OutgoingMIME.Attachment(name: $0.name, type: $0.type, data: $0.data, cid: $0.cid) }
     }
 }
 

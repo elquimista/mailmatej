@@ -355,6 +355,15 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// The thread of an account's message with this Message-ID (without angle brackets), if it's stored.
+    public func threadId(accountId: String, messageIdHeader: String) throws -> String? {
+        try dbPool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT threadId FROM message WHERE accountId = ? AND messageIdHeader = ? LIMIT 1",
+                arguments: [accountId, messageIdHeader])
+        }
+    }
+
     public func deleteMessages(accountId: String, remoteIds: [String]) throws {
         guard !remoteIds.isEmpty else { return }
         let moves = try threadNumberMoves(accountId: accountId, remoteIds: remoteIds)

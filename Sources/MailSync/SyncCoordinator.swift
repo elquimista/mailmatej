@@ -257,6 +257,12 @@ public actor SyncCoordinator {
         requestSync(account.id)
     }
 
+    #if DEBUG
+        public func debugGmailDrafts(accountId: String) async throws -> [String] {
+            try await gmailEngines[accountId]?.debugDraftMessageIds() ?? []
+        }
+    #endif
+
     /// Runs one sync round right now (bypassing coalescing). Used by the CLI.
     public func syncNow(_ accountId: String) async throws -> JMAPAccountSync.Result {
         guard let engine = engines[accountId] else { throw JMAPError.invalidResponse("unknown account") }
@@ -289,6 +295,7 @@ public actor SyncCoordinator {
     public func ensureIdentities(accountId: String, addresses: [String], name: String) async throws
         -> [(email: String, reason: String)]
     {
+        if let gmail = gmailEngines[accountId] { return try await gmail.ensureIdentities(addresses, name: name) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.ensureIdentities(addresses, name: name)
     }
@@ -444,24 +451,28 @@ public actor SyncCoordinator {
 
     /// Sends a message from the account (see `JMAPAccountSync.send`), then syncs so it shows in Sent.
     public func send(accountId: String, _ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
-        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         defer { requestSync(accountId) }
+        if let gmail = gmailEngines[accountId] { return try await gmail.send(message, replacingDrafts: replacingDrafts) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.send(message, replacingDrafts: replacingDrafts)
     }
 
     /// Saves a draft (see `JMAPAccountSync.saveDraft`), then syncs so it shows in Drafts.
     public func saveDraft(accountId: String, _ message: OutgoingMessage, replacing old: [String]) async throws -> String {
-        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         defer { requestSync(accountId) }
+        if let gmail = gmailEngines[accountId] { return try await gmail.saveDraft(message, replacing: old) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.saveDraft(message, replacing: old)
     }
 
     public func destroyDrafts(accountId: String, _ remoteIds: [String]) async throws {
+        if let gmail = gmailEngines[accountId] { return try await gmail.destroyDrafts(remoteIds) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         try await engine.destroyDrafts(remoteIds)
     }
 
     public func loadDraft(accountId: String, remoteId: String) async throws -> SavedDraft {
+        if let gmail = gmailEngines[accountId] { return try await gmail.loadDraft(remoteId: remoteId) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.loadDraft(remoteId: remoteId)
     }
@@ -478,6 +489,7 @@ public actor SyncCoordinator {
     }
 
     public func replyHeaders(accountId: String, remoteId: String) async throws -> (inReplyTo: [String], references: [String]) {
+        if let gmail = gmailEngines[accountId] { return try await gmail.replyHeaders(remoteId: remoteId) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
         return try await engine.replyHeaders(remoteId: remoteId)
     }
@@ -746,13 +758,13 @@ public actor SyncCoordinator {
         }
     }
 
-    /// Why an account can't do something: Gmail accounts sync, but changes and sending come later.
+    /// Why an account can't do something: Gmail accounts can't redirect yet (it takes Gmail's SMTP).
     private func notLoaded(_ accountId: String) -> Error {
         gmailEngines[accountId] != nil ? GmailNotYet() : JMAPError.invalidResponse("account not loaded")
     }
 
     public struct GmailNotYet: LocalizedError {
-        public var errorDescription: String? { "Gmail accounts can’t do this yet: sending and drafts come next." }
+        public var errorDescription: String? { "Gmail accounts can’t redirect messages yet." }
     }
 
     private func update(_ accountId: String, failure error: Error) {

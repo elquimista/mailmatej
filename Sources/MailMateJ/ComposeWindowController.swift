@@ -6,7 +6,8 @@ import QuickLookThumbnailing
 import Quartz
 import UniformTypeIdentifiers
 
-/// A compose window: From, To, Cc, Bcc, Subject and a plain-text body. Sends through JMAP.
+/// A compose window: From, To, Cc, Bcc, Subject and a plain-text body. Sends through the account's server
+/// (JMAP submission, or Gmail).
 @MainActor
 final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSTokenFieldDelegate,
     NSMenuDelegate, NSTextStorageDelegate, NSTextViewDelegate
