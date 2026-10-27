@@ -110,6 +110,17 @@ import Testing
         #expect(parts.map(\.size) == [8, 8, 15])
     }
 
+    @Test func mapsWholeMessagesFromTheirOwnHeaders() throws {
+        let m = try message(#"{"id": "w1", "threadId": "t1", "labelIds": ["INBOX", "UNREAD"], "snippet": "Café", "internalDate": "1700000000000", "sizeEstimate": 900}"#)
+        let mime = MIMEPart.parse(Data(Self.raw.utf8))
+        let incoming = try #require(GmailAccountSync.incoming(m, raw: mime, mailboxLabels: ["INBOX"]))
+        #expect(incoming.subject == "Invite" && incoming.addresses.first?.email == "ann@x.com" && incoming.addresses.first?.name == "Ann")
+        #expect(incoming.mailboxRemoteIds == ["INBOX"] && incoming.keywords.isEmpty)
+        #expect(incoming.hasAttachment)  // the PDF and the invite (the HTML's picture alone wouldn't count)
+        let plain = MIMEPart.parse(Data("Subject: Hi\r\nFrom: b@y.com\r\n\r\nJust text".utf8))
+        #expect(GmailAccountSync.incoming(m, raw: plain, mailboxLabels: ["INBOX"])?.hasAttachment == false)
+    }
+
     @Test func parsesAwkwardMIME() throws {
         // LF line ends, a header folded over two lines, no closing delimiter.
         let lf = "Content-Type: multipart/mixed;\n boundary=b\n\n--b\nContent-Type: text/plain\n\nfirst\n--b\nContent-Type: message/rfc822\n\nSubject: inner\n\nhello\n"

@@ -116,9 +116,14 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         separator(y: 111)
 
         // Account Type: what the address says (see `detectType`), or the user's choice.
-        label("Account Type:", row: 125, inset: 2)
+        let typeLabel = label("Account Type:", row: 125, inset: 2)
         typePopup.addItems(withTitles: ["JMAP", "Gmail"])
-        typePopup.frame = NSRect(x: 140, y: 122, width: 120, height: 25)
+        typePopup.sizeToFit()
+        // Its bezel's left edge on the text fields', its title's capitals on the label's (measured at 1x:
+        // centred on the row it sat 2 pt high; the pop-up's reported baseline is 1 pt below its title's).
+        let baseline = typeLabel.frame.minY + typeLabel.firstBaselineOffsetFromTop
+        typePopup.frame = NSRect(
+            x: 141, y: (baseline - typePopup.firstBaselineOffsetFromTop).rounded() - 1, width: 120, height: typePopup.frame.height)
         typePopup.target = self
         typePopup.action = #selector(typeChosen(_:))
         content.addSubview(typePopup)

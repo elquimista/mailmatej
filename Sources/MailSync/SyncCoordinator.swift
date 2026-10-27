@@ -32,6 +32,8 @@ public struct AccountSyncStatus: Sendable {
     public var headersDownloaded = 0
     public var headersTotal = 0
     public var isDownloadingHeaders = false
+    /// The first sync fetches whole messages (Gmail), not headers first: one phase, not two.
+    public var headersAreWholeMessages = false
 }
 
 /// Runs sync for all accounts: a bounded number at a time, triggered by push, polling and the user.
@@ -427,7 +429,7 @@ public actor SyncCoordinator {
                 do {
                     try await flushQueue(accountId)
                     let result = try await gmail.sync { [weak self] downloaded, total in
-                        await self?.reportHeaders(accountId, downloaded: downloaded, total: total)
+                        await self?.reportHeaders(accountId, downloaded: downloaded, total: total, whole: true)
                     }
                     endHeaders(accountId)
                     if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
@@ -463,9 +465,10 @@ public actor SyncCoordinator {
 
     /// A full sync's progress, as the engine downloads message headers (called in order, from within
     /// its sync, so it never comes after `endHeaders`).
-    private func reportHeaders(_ accountId: String, downloaded: Int, total: Int) {
+    private func reportHeaders(_ accountId: String, downloaded: Int, total: Int, whole: Bool = false) {
         var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .syncing, lastSuccess: nil)
         status.isDownloadingHeaders = true
+        status.headersAreWholeMessages = whole
         status.headersDownloaded = downloaded
         status.headersTotal = max(total, downloaded)
         statuses[accountId] = status

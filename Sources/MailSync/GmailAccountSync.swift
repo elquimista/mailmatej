@@ -163,11 +163,14 @@ public actor GmailAccountSync {
             skip -= done
             let todo = ids.dropFirst(done).filter { !known.contains($0) }
             read += ids.count - todo.count  // already done before quitting
-            // In chunks, so the list fills in as it goes (and quitting loses at most one's work).
-            for chunk in todo.chunked(50) {
-                let (found, _) = try await metadata(Array(chunk))
-                try store.upsertMessages(accountId: account.id, found.compactMap(incoming))
-                result.created += found.count
+            // In chunks, so the list fills in as it goes (and quitting loses at most one's work). Each
+            // message comes whole, so it's listed, searchable and downloaded at once; when fetching
+            // everything again, those stored here need only their labels.
+            for chunk in todo.chunked(25) {
+                let (refreshed, _) = try await refresh(chunk.filter { refetchKnown && store.blobs.contains(accountId: account.id, blobId: $0) })
+                let rest = chunk.filter { !refreshed.contains($0) }
+                let (whole, _) = try await fetch(rest, format: .raw)
+                result.created += refreshed.count + (try storeWhole(whole))
                 read += chunk.count
                 if refetchKnown { try store.setSyncState(String(read), accountId: account.id, type: Self.refetchDoneState) }
                 await progress(read, max(total, read))
@@ -222,13 +225,21 @@ public actor GmailAccountSync {
 
         let known = try store.remoteIDs(accountId: account.id)
         if !changed.isEmpty {
-            let (found, missing) = try await metadata(Array(changed))
-            let messages = found.compactMap(incoming)
+            // New mail comes whole; for mail stored here (a label changed), its labels, with its headers
+            // from the copy here, or else from Gmail (its body follows with the downloads).
+            let changed = Array(changed)
+            let new = changed.filter { !known.contains($0) }
+            let (refreshed, gone) = try await refresh(changed.filter { known.contains($0) && store.blobs.contains(accountId: account.id, blobId: $0) })
+            let headersOnly = changed.filter { known.contains($0) && !refreshed.contains($0) && !gone.contains($0) }
+            let (metadata, missingMetadata) = try await fetch(headersOnly, format: .metadata)
+            let messages = metadata.compactMap(incoming)
             try store.upsertMessages(accountId: account.id, messages)
-            deleted.formUnion(missing)
-            result.updated += messages.count
-            let stored = Set(messages.map(\.remoteId))
-            result.arrived = added.filter { stored.contains($0) && !known.contains($0) }
+            let (whole, missingWhole) = try await fetch(new, format: .raw)
+            let stored = try storeWhole(whole)
+            deleted.formUnion(gone + missingMetadata + missingWhole)
+            result.updated += refreshed.count + messages.count + stored
+            let arrived = Set(whole.map(\.id))
+            result.arrived = added.filter { arrived.contains($0) && !known.contains($0) }
         }
         let gone = deleted.intersection(known)
         if !gone.isEmpty {
@@ -238,12 +249,13 @@ public actor GmailAccountSync {
         if let latest, latest != since { try store.setSyncState(latest, accountId: account.id, type: Self.historyState) }
     }
 
-    /// Messages' labels and headers, a few requests at a time (Gmail allows about 50 a second per
-    /// account); `missing` are the ones that no longer exist.
-    private func metadata(_ ids: [String]) async throws -> (found: [GmailClient.Message], missing: [String]) {
+    /// Messages in a format, a few requests at a time (they're paced under Gmail's quota, see
+    /// `GmailClient`; whole ones fewer at once, they're bigger); `missing` are the ones that no longer exist.
+    private func fetch(_ ids: [String], format: GmailClient.Format) async throws -> (found: [GmailClient.Message], missing: [String]) {
+        guard !ids.isEmpty else { return ([], []) }
         let client = self.client
-        let results = try await concurrently(ids, limit: 8) { id in
-            try await client.message(id, format: .metadata, headers: Self.headerNames)
+        let results = try await concurrently(ids, limit: format == .raw ? 4 : 8) { id in
+            try await client.message(id, format: format, headers: format == .metadata ? Self.headerNames : [])
         }
         var found: [GmailClient.Message] = []
         var missing: [String] = []
@@ -251,6 +263,45 @@ public actor GmailAccountSync {
             if let message { found.append(message) } else { missing.append(id) }
         }
         return (found, missing)
+    }
+
+    /// Stores whole messages (format raw): each from its own headers and Gmail's labels, with its raw
+    /// copy, body and parts, so it's downloaded as it's listed. Returns how many were stored.
+    private func storeWhole(_ messages: [GmailClient.Message]) throws -> Int {
+        var incoming: [IncomingMessage] = []
+        var copies: [(id: String, data: Data, mime: MIMEPart)] = []
+        for message in messages {
+            guard let data = message.raw.flatMap(Data.init(base64URL:)) else { continue }
+            let mime = MIMEPart.parse(data)
+            guard let stored = Self.incoming(message, raw: mime, mailboxLabels: mailboxLabels, archiveLabel: archiveLabel) else { continue }
+            incoming.append(stored)
+            copies.append((message.id, data, mime))
+        }
+        try store.upsertMessages(accountId: account.id, incoming)
+        let ids = try store.messageIDsByRemoteID(accountId: account.id, remoteIds: copies.map(\.id))
+        for copy in copies {
+            guard let id = ids[copy.id] else { continue }
+            try store.blobs.write(copy.data, accountId: account.id, blobId: copy.id)  // a Gmail message's blob id is its id
+            let (body, parts) = BodyStructure.render(copy.mime, blobId: copy.id)
+            try store.saveBody(messageId: id, body, parts: parts)
+        }
+        try store.setDownloadState(1, messageIds: Array(ids.values))
+        return incoming.count
+    }
+
+    /// Messages stored here with a raw copy, updated with their labels as Gmail has them now (the
+    /// cheapest request) and their headers from the copy. Returns those updated, and those gone.
+    private func refresh(_ ids: [String]) async throws -> (updated: [String], gone: [String]) {
+        let (found, missing) = try await fetch(ids, format: .minimal)
+        var incoming: [IncomingMessage] = []
+        for message in found {
+            guard let data = store.blobs.read(accountId: account.id, blobId: message.id),
+                let stored = Self.incoming(message, raw: MIMEPart.parse(data), mailboxLabels: mailboxLabels, archiveLabel: archiveLabel)
+            else { continue }
+            incoming.append(stored)
+        }
+        try store.upsertMessages(accountId: account.id, incoming)
+        return (incoming.map(\.remoteId), missing)
     }
 
     // MARK: Changes
@@ -320,9 +371,10 @@ public actor GmailAccountSync {
 
     /// Fetches messages again (a change that didn't go through: back to Gmail's state).
     public func restore(remoteIds: [String]) async throws {
-        let (found, missing) = try await metadata(remoteIds)
+        let (refreshed, gone) = try await refresh(remoteIds.filter { store.blobs.contains(accountId: account.id, blobId: $0) })
+        let (found, missing) = try await fetch(remoteIds.filter { !refreshed.contains($0) && !gone.contains($0) }, format: .metadata)
         try store.upsertMessages(accountId: account.id, found.compactMap(incoming))
-        if !missing.isEmpty { try store.deleteMessages(accountId: account.id, remoteIds: missing) }
+        if !(missing + gone).isEmpty { try store.deleteMessages(accountId: account.id, remoteIds: missing + gone) }
     }
 
     /// Makes a label (inside `parentRemoteId`'s, "Parent/Name"); Archive's role makes MailMate's archive label.
@@ -363,8 +415,32 @@ public actor GmailAccountSync {
         Self.incoming(message, mailboxLabels: mailboxLabels, archiveLabel: archiveLabel)
     }
 
+    /// A message with only Gmail's metadata (labels and the headers asked for).
     /// `mailboxLabels`: the labels shown as mailboxes; `archiveLabel`: "[Gmail]/Archive"'s id.
     static func incoming(_ message: GmailClient.Message, mailboxLabels: Set<String>, archiveLabel: String? = nil) -> IncomingMessage? {
+        let payload = message.payload
+        let type = MailHeaders.value(of: payload?.header("Content-Type")) ?? payload?.mimeType?.lowercased() ?? ""
+        return incoming(
+            message, headers: { payload?.headers($0) ?? [] },
+            // From the headers alone: mixed content (or a single non-text part) is what carries attachments.
+            hasAttachment: type == "multipart/mixed" || (!type.hasPrefix("text/") && !type.hasPrefix("multipart/") && !type.isEmpty),
+            mailboxLabels: mailboxLabels, archiveLabel: archiveLabel)
+    }
+
+    /// A message from its raw copy (headers and parts) and Gmail's labels.
+    static func incoming(
+        _ message: GmailClient.Message, raw: MIMEPart, mailboxLabels: Set<String>, archiveLabel: String? = nil
+    ) -> IncomingMessage? {
+        incoming(
+            message, headers: raw.headers, hasAttachment: BodyStructure.hasAttachment(raw), mailboxLabels: mailboxLabels,
+            archiveLabel: archiveLabel)
+    }
+
+    /// `headers` gives every value of a header (unfolded, encoded words and all).
+    static func incoming(
+        _ message: GmailClient.Message, headers: (String) -> [String], hasAttachment: Bool, mailboxLabels: Set<String>,
+        archiveLabel: String?
+    ) -> IncomingMessage? {
         let labels = Set(message.labelIds ?? [])
         guard !labels.contains("CHAT") else { return nil }
         var mailboxes = labels.intersection(mailboxLabels).subtracting([Self.archive])
@@ -375,10 +451,10 @@ public actor GmailAccountSync {
         if labels.contains("STARRED") { keywords.append("$flagged") }
         if labels.contains("DRAFT") { keywords.append("$draft") }
 
-        let payload = message.payload
+        func header(_ name: String) -> String? { headers(name).first }
         var addresses: [IncomingMessage.Address] = []
         func add(_ role: AddressRole, _ header: String, groups groupRole: AddressRole? = nil) {
-            for value in payload?.headers(header) ?? [] {
+            for value in headers(header) {
                 let parsed = MailHeaders.addresses(value)
                 for address in parsed.addresses { addresses.append(.init(role: role, name: address.name, email: address.email)) }
                 if let groupRole {
@@ -393,20 +469,17 @@ public actor GmailAccountSync {
         add(.bcc, "Bcc")
         add(.replyTo, "Reply-To")
 
-        let dateHeader = payload?.header("Date")
+        let dateHeader = header("Date")
         let sentAt = MailHeaders.date(dateHeader)
-        let type = MailHeaders.value(of: payload?.header("Content-Type")) ?? payload?.mimeType?.lowercased() ?? ""
         return IncomingMessage(
             remoteId: message.id, threadId: message.threadId ?? message.id, blobId: message.id,
             mailboxRemoteIds: Array(mailboxes), keywords: keywords, size: message.sizeEstimate ?? 0,
             receivedAt: message.receivedAt ?? sentAt ?? Date(), sentAt: sentAt,
-            messageIdHeader: MailHeaders.messageIds(payload?.header("Message-ID")).first,
-            inReplyTo: MailHeaders.messageIds(payload?.header("In-Reply-To")).first,
-            subject: MailHeaders.decodeWords(payload?.header("Subject") ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            preview: MailHeaders.decodeEntities(message.snippet ?? ""),
-            // From the headers alone: mixed content (or a single non-text part) is what carries attachments.
-            hasAttachment: type == "multipart/mixed" || (!type.hasPrefix("text/") && !type.hasPrefix("multipart/") && !type.isEmpty),
-            addresses: addresses, references: MailHeaders.messageIds(payload?.header("References")),
+            messageIdHeader: MailHeaders.messageIds(header("Message-ID")).first,
+            inReplyTo: MailHeaders.messageIds(header("In-Reply-To")).first,
+            subject: MailHeaders.decodeWords(header("Subject") ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            preview: MailHeaders.decodeEntities(message.snippet ?? ""), hasAttachment: hasAttachment,
+            addresses: addresses, references: MailHeaders.messageIds(header("References")),
             sentZone: sentAt == nil ? nil : JMAPAccountSync.zone(ofDateHeader: dateHeader) ?? 0)
     }
 
@@ -555,8 +628,15 @@ struct BodyStructure {
 
     /// The body to show and search, and the parts to keep (as JMAP's: embedded media from the HTML body
     /// and every attachment, named or not), their blob ids "<message blob id>.<part id>".
-    static func render(raw: Data, blobId: String) -> (MessageBody, [MessagePart]) {
-        let structure = BodyStructure(MIMEPart.parse(raw))
+    static func render(raw: Data, blobId: String) -> (MessageBody, [MessagePart]) { render(MIMEPart.parse(raw), blobId: blobId) }
+
+    /// Whether a message has attachments: parts other than pictures its HTML shows.
+    static func hasAttachment(_ root: MIMEPart) -> Bool {
+        BodyStructure(root).attachments.contains { $0.cid == nil || $0.disposition == "attachment" }
+    }
+
+    static func render(_ root: MIMEPart, blobId: String) -> (MessageBody, [MessagePart]) {
+        let structure = BodyStructure(root)
         let text = structure.textBody.filter { $0.type.hasPrefix("text/") }.map { leaf in
             leaf.type == "text/html" ? JMAPAccountSync.plainText(fromHTML: leaf.text) : leaf.text
         }.joined(separator: "\n\n")

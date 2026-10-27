@@ -21,6 +21,11 @@ final class MIMEPart {
         headers.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
 
+    /// Every header named `name`, in order.
+    func headers(_ name: String) -> [String] {
+        headers.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }.map(\.value)
+    }
+
     /// "text/plain" when the part says nothing (RFC 2045's default).
     var type: String { MailHeaders.value(of: header("Content-Type")).flatMap { $0.contains("/") ? $0 : nil } ?? "text/plain" }
 

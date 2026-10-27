@@ -554,7 +554,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             let count = "\(headers.downloaded.formatted()) of \(headers.total.formatted())"
             return sidebar.showProgress(
                 true, fraction: Double(headers.downloaded) / Double(headers.total),
-                texts: ["Downloading headers \(count)", "Headers \(count)", count])
+                texts: headers.whole ? ["Downloading \(count)", count] : ["Downloading headers \(count)", "Headers \(count)", count])
         }
         guard hasMailbox, model.downloadProgress != nil, let counts = try? model.store.downloadCounts(scope: scope),
             counts.total > 0, counts.downloaded < counts.total

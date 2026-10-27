@@ -1174,12 +1174,14 @@ final class AppModel {
 
     /// Message headers downloaded and in all, over the accounts still downloading theirs in a first (or
     /// full) sync: just `accountIds`' when given. Nil when none is.
-    func headerProgress(accountIds: Set<String>?) -> (downloaded: Int, total: Int)? {
+    /// `whole`: they're all fetching whole messages (Gmail), not headers first.
+    func headerProgress(accountIds: Set<String>?) -> (downloaded: Int, total: Int, whole: Bool)? {
         let reading = statuses.values.filter { status in
             status.isDownloadingHeaders && status.headersTotal > 0 && (accountIds?.contains(status.accountId) ?? true)
         }
         guard !reading.isEmpty else { return nil }
-        return (reading.map(\.headersDownloaded).reduce(0, +), reading.map(\.headersTotal).reduce(0, +))
+        return (reading.map(\.headersDownloaded).reduce(0, +), reading.map(\.headersTotal).reduce(0, +),
+                reading.allSatisfy(\.headersAreWholeMessages))
     }
 
     /// "Downloaded X of Y message headers" while an account's first sync lists its mail, then
@@ -1187,7 +1189,8 @@ final class AppModel {
     func downloadInfo(accountId: String) -> String? {
         guard let s = statuses[accountId] else { return nil }
         if s.isDownloadingHeaders, s.headersTotal > 0 {
-            return "Downloaded \(s.headersDownloaded.formatted()) of \(s.headersTotal.formatted()) message headers"
+            let what = s.headersAreWholeMessages ? "messages" : "message headers"
+            return "Downloaded \(s.headersDownloaded.formatted()) of \(s.headersTotal.formatted()) \(what)"
         }
         guard s.total > 0, s.downloaded < s.total else { return nil }
         return "Downloaded \(s.downloaded.formatted()) of \(s.total.formatted()) messages"

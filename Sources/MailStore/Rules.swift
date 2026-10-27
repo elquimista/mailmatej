@@ -181,6 +181,24 @@ extension MailStore {
         return all.filter { !standard.contains($0.lowercased()) }.sorted { $0.lowercased() < $1.lowercased() }
     }
 
+    /// Local ids of an account's messages, by their remote ids.
+    public func messageIDsByRemoteID(accountId: String, remoteIds: [String]) throws -> [String: Int64] {
+        guard !remoteIds.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            var ids: [String: Int64] = [:]
+            for chunk in remoteIds.chunked(500) {
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
+                for row in try Row.fetchAll(
+                    db, sql: "SELECT remoteId, id FROM message WHERE accountId = ? AND remoteId IN (\(marks))",
+                    arguments: StatementArguments([accountId] + chunk))
+                {
+                    ids[row["remoteId"]] = row["id"]
+                }
+            }
+            return ids
+        }
+    }
+
     /// Local ids of an account's messages by remote id.
     public func messageIDs(accountId: String, remoteIds: [String]) throws -> [Int64] {
         guard !remoteIds.isEmpty else { return [] }
