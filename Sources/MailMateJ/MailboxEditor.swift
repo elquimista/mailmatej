@@ -191,6 +191,7 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         }
 
         static func debugHoverTabs() { shared?.tabStrip.debugHover() }
+        static func debugLogToolTips() { NSLog("MMJ editor tab tooltips: \(shared?.tabStrip.debugToolTips() ?? [])") }
 
         static func debugScrollSidebar(by points: CGFloat) {
             guard let scroll = shared?.sidebar.view as? NSScrollView else { return }
@@ -298,7 +299,7 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
 /// MailMate's four editor tabs as they look (measured at 1x): 45 pt buttons at a 46 pt pitch, the
 /// selected one on a 28 pt rounded highlight, 1 × 20 pt dividers between the others.
 @MainActor
-private final class EditorTabStrip: NSView {
+private final class EditorTabStrip: NSView, NSViewToolTipOwner {
     typealias Tab = MailboxEditorWindowController.Tab
 
     private let onSelect: (Tab) -> Void
@@ -324,12 +325,18 @@ private final class EditorTabStrip: NSView {
                 x: (Self.buttonX(index) + (45 - view.frame.width) / 2).rounded(), y: ((28 - view.frame.height) / 2).rounded())
             addSubview(view)
             images[tab] = view
-            addToolTip(NSRect(x: Self.buttonX(index), y: 0, width: 45, height: 28), owner: tab.tip as NSString, userData: nil)
+            // The strip gives the text: AppKit doesn't keep a tooltip's owner, so a string passed as the owner
+            // is freed at once (unless short enough to live in its pointer) and the tooltip shows garbage.
+            addToolTip(NSRect(x: Self.buttonX(index), y: 0, width: 45, height: 28), owner: self, userData: nil)
         }
         update(selected: selected, enabled: Tab.allCases)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        Tab.allCases[min(max(Int(point.x / 46), 0), Tab.allCases.count - 1)].tip
+    }
 
     override var isFlipped: Bool { true }
 
@@ -379,6 +386,20 @@ private final class EditorTabStrip: NSView {
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
     #if DEBUG
+        /// Each tooltip's text as AppKit gets it: from the owner it keeps for the tooltip, at its middle.
+        func debugToolTips() -> [String] {
+            guard let manager = (NSClassFromString("NSToolTipManager") as? NSObject.Type)?.value(forKey: "sharedToolTipManager") as? NSObject,
+                let byView = manager.value(forKey: "toolTipsByView") as? NSMapTable<AnyObject, AnyObject>,
+                let found = byView.object(forKey: self)
+            else { return [] }
+            let tips = (found as? [NSObject]) ?? [found as! NSObject]
+            return tips.map { tip -> (CGFloat, String) in
+                let rect = (tip.value(forKey: "trackingRect") as? NSValue)?.rectValue ?? .zero
+                guard let owner = tip.value(forKey: "owner") as? NSViewToolTipOwner else { return (rect.minX, "?") }
+                return (rect.minX, owner.view(self, stringForToolTip: 0, point: NSPoint(x: rect.midX, y: rect.midY), userData: nil))
+            }.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+
         func debugHover() {
             hovering = true
             hoverTimer?.invalidate()

@@ -483,6 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: .milliseconds(500))
                     }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_HOVER"] != nil { MailboxEditorWindowController.debugHoverTabs() }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_TIPS"] != nil { MailboxEditorWindowController.debugLogToolTips() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] != nil { MailboxEditorWindowController.debugDumpMailboxMenu() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_DUP_UNGROUP"] != nil { MailboxEditorWindowController.debugDuplicateAndUngroup() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_REMOVE_ROW"] != nil { MailboxEditorWindowController.debugRemoveFirstRow() }
