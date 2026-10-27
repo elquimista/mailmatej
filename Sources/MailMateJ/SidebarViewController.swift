@@ -8,6 +8,8 @@ final class SidebarNode: NSObject {
     let key: String
     let kind: Kind
     var title: String
+    /// The SF Symbol shown before the title; none ("") for the submailboxes a Submailboxes tab makes,
+    /// as in MailMate (one chosen with the Symbol menu still shows).
     let symbol: String
     var scope: MessageScope?
     let accountId: String?
@@ -551,7 +553,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     ?? .smartValue(record.id, split.field, value)
                 let node = SidebarNode(
                     key: "smart.\(record.id)\(account.map { ".account.\($0)" } ?? "").value.\(value.lowercased())", kind: .mailbox,
-                    title: value.isEmpty ? "Other" : value, symbol: record.definition.icon ?? smartSymbol, scope: scope, accountId: account)
+                    title: value.isEmpty ? "Other" : value, scope: scope, accountId: account)
                 node.badge = unread
                 return node
             }
@@ -561,7 +563,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             .sorted { AccountRecord.ordered($0.0, $1.0) }
         return sorted.map { account, unread in
             let node = SidebarNode(
-                key: "smart.\(record.id).account.\(account.id)", kind: .mailbox, title: account.name, symbol: "at",
+                key: "smart.\(record.id).account.\(account.id)", kind: .mailbox, title: account.name,
                 scope: .smartAccount(record.id, account.id), accountId: account.id)
             node.badge = unread
             node.children = valueNodes(account: account.id)
@@ -626,8 +628,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let known = mailboxes.filter { accounts[$0.accountId] != nil }
         func child(_ key: String, _ title: String, _ scope: MessageScope, accountId: String, badge: Int, role: String?) -> SidebarNode {
             let child = SidebarNode(
-                key: "\(node.key).\(key)", kind: .mailbox, title: title, symbol: node.symbol,
-                scope: scope, accountId: accountId)
+                key: "\(node.key).\(key)", kind: .mailbox, title: title, scope: scope, accountId: accountId)
             child.role = role
             child.badge = badge
             return child
@@ -641,7 +642,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return values.map { value, unread in
                 let child = SidebarNode(
                     key: "\(parent.key).value.\(value.lowercased())", kind: .mailbox, title: value.isEmpty ? "Other" : value,
-                    symbol: node.symbol, scope: .value(scope, field, value), accountId: parent.accountId)
+                    scope: .value(scope, field, value), accountId: parent.accountId)
                 child.badge = unread
                 return child
             }
@@ -1567,6 +1568,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 /// Icon, title, and an unread-count capsule.
 final class SidebarCell: NSTableCellView {
     private let badge = BadgeView()
+    /// The title after the icon, or in its place on a row without one (a generated submailbox's): MailMate
+    /// puts that title 11 pt right of its parent's icon, where the child's icon would be (measured at 1x).
+    private var titleAfterIcon: NSLayoutConstraint!
+    private var titleInIconsPlace: NSLayoutConstraint!
     /// Shown instead of the badge while the account syncs or downloads, as in MailMate.
     private let spinner: NSProgressIndicator = {
         let p = NSProgressIndicator()
@@ -1593,11 +1598,13 @@ final class SidebarCell: NSTableCellView {
         textField = field
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        titleAfterIcon = field.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 5)
+        titleInIconsPlace = field.leadingAnchor.constraint(equalTo: image.leadingAnchor)
         NSLayoutConstraint.activate([
             image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             image.centerYAnchor.constraint(equalTo: centerYAnchor),
             image.widthAnchor.constraint(equalToConstant: 18),
-            field.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 5),
+            titleAfterIcon,
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: field.trailingAnchor, constant: 6),
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
@@ -1630,6 +1637,11 @@ final class SidebarCell: NSTableCellView {
                     fallback: node.kind == .account ? .secondaryLabelColor : .controlAccentColor)
             }
             toolTip = plain ? nil : node.info
+        }
+        let hasIcon = imageView?.image != nil
+        if titleAfterIcon.isActive != hasIcon {
+            (hasIcon ? titleInIconsPlace : titleAfterIcon).isActive = false
+            (hasIcon ? titleAfterIcon : titleInIconsPlace).isActive = true
         }
         badge.count = plain ? 0 : node.badge
         if node.isBusy, !plain {
