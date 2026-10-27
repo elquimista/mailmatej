@@ -297,6 +297,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: .milliseconds(800))
                     }
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_REMOTE_CHANGE"] {
+                    // "accountId|subject": waits for the watch to connect, then changes it in Gmail directly.
+                    let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+                    try? await Task.sleep(for: .seconds(10))
+                    await AppModel.shared.debugRemoteReadChange(accountId: parts[0], subject: parts[1])
+                }
+                if let accountId = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_ARRIVAL"] {
+                    try? await Task.sleep(for: .seconds(10))  // the watch connects first
+                    await AppModel.shared.debugRemoteArrival(accountId: accountId)
+                }
                 if let accountId = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_IMAP"] {
                     await AppModel.shared.debugGmailIMAP(accountId: accountId)
                 }

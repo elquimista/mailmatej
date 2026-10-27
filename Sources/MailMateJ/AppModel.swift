@@ -101,6 +101,17 @@ final class AppModel {
         ) { _ in
             Task { @MainActor in AppModel.shared?.syncAll() }
         }
+        // While the app is in use, Gmail accounts are checked every 10 s (see SyncCoordinator.setInUse).
+        for (name, active) in [(NSApplication.didBecomeActiveNotification, true), (NSApplication.didResignActiveNotification, false)] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [coordinator] _ in
+                Task { await coordinator.setInUse(active) }
+            }
+        }
+        var active = NSApp.isActive
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_IN_USE"] != nil { active = true }  // tests run in the background
+        #endif
+        Task { [coordinator, active] in await coordinator.setInUse(active) }
     }
 
     func syncAll() {
@@ -1251,6 +1262,63 @@ final class AppModel {
                 NSLog("MMJ imap: failed: \(error)")
                 await imap.close()
             }
+        }
+    #endif
+
+    #if DEBUG
+        /// Changes a message's read state in Gmail directly (as Gmail on the web would, not through this
+        /// app), twice, and logs how long each takes to show here.
+        func debugRemoteReadChange(accountId: String, subject: String) async {
+            guard let account = try? store.account(id: accountId), let tokens = try? Self.googleTokens(for: account),
+                let id = ((try? store.messageIDs(scope: .account(accountId))) ?? []).first(where: { (try? store.detail(id: $0))?.subject == subject }),
+                let detail = try? store.detail(id: id)
+            else { return NSLog("MMJ remote change: no message") }
+            let gmail = GmailClient(tokens: tokens)
+            for _ in 0..<2 {
+                let wasSeen = (try? store.rows(ids: [id]))?.first?.isSeen ?? false
+                do {
+                    try await gmail.modify([detail.remoteId], add: wasSeen ? ["UNREAD"] : [], remove: wasSeen ? [] : ["UNREAD"])
+                } catch {
+                    return NSLog("MMJ remote change: \(error)")
+                }
+                let started = Date()
+                NSLog("MMJ remote change: changing it in Gmail now")
+                while Date().timeIntervalSince(started) < 90, (try? store.rows(ids: [id]))?.first?.isSeen == wasSeen {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                let seen = (try? store.rows(ids: [id]))?.first?.isSeen
+                NSLog("MMJ remote change: made \(wasSeen ? "unread" : "read") in Gmail, shown here after \(String(format: "%.1f", Date().timeIntervalSince(started))) s (seen now \(String(describing: seen)))")
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    #endif
+
+    #if DEBUG
+        /// Adds a test message to a Gmail account's Inbox directly (as mail arriving would, not through
+        /// this app), logs how long it takes to show here, then deletes it for good.
+        func debugRemoteArrival(accountId: String) async {
+            guard let account = try? store.account(id: accountId), let tokens = try? Self.googleTokens(for: account) else {
+                return NSLog("MMJ remote arrival: no account")
+            }
+            let gmail = GmailClient(tokens: tokens)
+            let subject = "MailMateJ arrival test \(Int(Date().timeIntervalSince1970))"
+            let raw = "From: Test <test@example.com>\r\nTo: \(account.username)\r\nSubject: \(subject)\r\nDate: \(Date().formatted(.dateTime))\r\nMessage-ID: <\(UUID().uuidString)@mailmatej.test>\r\n\r\nArrival test.\r\n"
+            do {
+                try await gmail.importMessage(Data(raw.utf8), labels: ["INBOX", "UNREAD"])
+            } catch {
+                return NSLog("MMJ remote arrival: \(error)")
+            }
+            let started = Date()
+            NSLog("MMJ remote arrival: added in Gmail now")
+            var found: (id: Int64, remoteId: String)?
+            while Date().timeIntervalSince(started) < 90, found == nil {
+                try? await Task.sleep(for: .milliseconds(200))
+                found = ((try? store.messageIDs(scope: .account(accountId))) ?? []).lazy.compactMap { id in
+                    (try? self.store.detail(id: id)).flatMap { $0.subject == subject ? (id, $0.remoteId) : nil }
+                }.first
+            }
+            NSLog("MMJ remote arrival: shown here after \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
+            if let found { try? await gmail.delete([found.remoteId]) }  // tidy up
         }
     #endif
 

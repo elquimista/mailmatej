@@ -371,6 +371,11 @@ public actor GmailAccountSync {
             token = page.nextPageToken
         } while token != nil
 
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil {
+                NSLog("MMJ gmail history since \(since): \(changed.count) changed, \(deleted.count) deleted, now \(latest ?? "-")")
+            }
+        #endif
         let known = try store.remoteIDs(accountId: account.id)
         if !changed.isEmpty {
             // New mail comes whole; for mail stored here (a label changed), its labels, with its headers
@@ -463,6 +468,45 @@ public actor GmailAccountSync {
         }
         try store.upsertMessages(accountId: account.id, incoming)
         return (incoming.map(\.remoteId), missing)
+    }
+
+    // MARK: Watching
+
+    /// Watches the Inbox over IMAP IDLE and calls `onChange` whenever the server announces something
+    /// there (new mail, archiving, read or unread), so changes made elsewhere (Gmail on the web, a
+    /// phone) show within seconds, until cancelled. The IDLE is renewed every 4 minutes, and a renewal
+    /// that isn't answered counts as a dead connection: it reconnects, waiting longer after each failure
+    /// (5 s to 5 minutes). It's only a signal: the minute's check still covers everything else.
+    public nonisolated func watch(onChange: @escaping @Sendable () -> Void) async {
+        var backoff = 5.0
+        while !Task.isCancelled {
+            let imap = GmailIMAP(email: account.username, tokens: tokens)
+            do {
+                try await imap.connect()
+                try await imap.examine("INBOX")
+                backoff = 5
+                onChange()  // catch up on what happened while not watching
+                #if DEBUG
+                    let logs = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil
+                    let signal: @Sendable () -> Void = {
+                        if logs { NSLog("MMJ gmail idle: change announced") }
+                        onChange()
+                    }
+                #else
+                    let signal = onChange
+                #endif
+                while !Task.isCancelled { try await imap.idle(for: .seconds(240), onChange: signal) }
+            } catch {
+                syncLog.notice("Gmail watch for \(self.account.name, privacy: .public) stopped: \(ErrorText.technical(error), privacy: .public)")
+                #if DEBUG
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil { NSLog("MMJ gmail idle: stopped: \(error)") }
+                #endif
+            }
+            await imap.close()
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .seconds(backoff))
+            backoff = min(backoff * 2, 300)
+        }
     }
 
     // MARK: Changes

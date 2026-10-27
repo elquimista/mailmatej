@@ -1431,16 +1431,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @objc private func removeClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode, let id = node.accountId else { return }
         // MailMate's: a panel of its own with the app's icon, Remove the default button.
-        if Self.removeAccountAlert(name: node.title).runModal() == .alertFirstButtonReturn {
+        let gmail = (try? model.store.account(id: id))?.isGmail == true
+        if Self.removeAccountAlert(name: node.title, kind: gmail ? "Gmail" : "JMAP").runModal() == .alertFirstButtonReturn {
             model.removeAccount(id: id)
         }
     }
 
-    static func removeAccountAlert(name: String) -> NSAlert {
+    /// `kind` names the account's type as MailMate's alert does ("the IMAP account"): JMAP or Gmail.
+    static func removeAccountAlert(name: String, kind: String = "JMAP") -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Remove Account?"
         alert.informativeText = """
-            You are about to remove the JMAP account “\(name)”. Are you sure you want to do that?
+            You are about to remove the \(kind) account “\(name)”. Are you sure you want to do that?
 
             Messages on the server are not going to be affected.
             """

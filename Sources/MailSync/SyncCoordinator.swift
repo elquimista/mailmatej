@@ -56,10 +56,20 @@ public actor SyncCoordinator {
     private let urlSession: URLSession
 
     private var engines: [String: JMAPAccountSync] = [:]
-    /// Gmail accounts: no push, so each is checked every `gmailPollInterval`.
+    /// Gmail accounts: checked every `gmailPollInterval` (more often while the app is in use), and
+    /// whenever their Inbox's IMAP IDLE announces something.
     private var gmailEngines: [String: GmailAccountSync] = [:]
     private var gmailPollTasks: [String: Task<Void, Never>] = [:]
+    /// Each Gmail account's Inbox watched over IMAP IDLE (what Gmail announces there arrives at once).
+    private var gmailWatchTasks: [String: Task<Void, Never>] = [:]
     private let gmailPollInterval: Duration = .seconds(60)
+    /// While the app is in use (and 2 minutes after), Gmail accounts are checked this often: Gmail's own
+    /// IMAP announces changes made elsewhere late or not at all, while its history (2 quota units a
+    /// look) has them at once.
+    private let gmailActivePollInterval: Duration = .seconds(10)
+    private var inUse = false
+    private var leftAt: ContinuousClock.Instant?
+    private var lastGmailCheck: [String: ContinuousClock.Instant] = [:]
     private var statuses: [String: AccountSyncStatus] = [:]
     private var running: Set<String> = []
     private var pending: Set<String> = []
@@ -137,6 +147,7 @@ public actor SyncCoordinator {
         downloadTasks.removeAll()
         for task in fastPollTasks.values { task.cancel() }
         for task in gmailPollTasks.values { task.cancel() }
+        for task in gmailWatchTasks.values { task.cancel() }
         fastPollTasks.removeAll()
         for task in pushTasks.values { task.cancel() }
         pushTasks.removeAll()
@@ -154,6 +165,7 @@ public actor SyncCoordinator {
         engines.removeValue(forKey: id)
         gmailEngines.removeValue(forKey: id)
         gmailPollTasks.removeValue(forKey: id)?.cancel()
+        gmailWatchTasks.removeValue(forKey: id)?.cancel()
         statuses.removeValue(forKey: id)
         pending.remove(id)
     }
@@ -401,23 +413,58 @@ public actor SyncCoordinator {
         }
     }
 
-    /// A Gmail account: checked now and then every `gmailPollInterval` (each check is a few short
-    /// requests to Gmail's history, so there's no connection to go stale).
+    /// A Gmail account: its Inbox watched over IMAP IDLE (changes made elsewhere arrive within
+    /// seconds), and checked every `gmailPollInterval` in any case (a few short requests to Gmail's
+    /// history), so a watch that stops working costs at most a minute's delay.
     private func registerGmail(_ account: AccountRecord, poll: Bool) {
+        let engine: GmailAccountSync
         do {
-            gmailEngines[account.id] = GmailAccountSync(
-                account: account, tokens: try googleTokens(account), store: store, urlSession: urlSession)
+            engine = GmailAccountSync(account: account, tokens: try googleTokens(account), store: store, urlSession: urlSession)
+            gmailEngines[account.id] = engine
         } catch {
             return update(account.id, failure: error)
         }
         guard poll else { return }
+        gmailWatchTasks[account.id]?.cancel()
+        gmailWatchTasks[account.id] = Task { [weak self] in
+            await engine.watch { [weak self] in Task { [weak self] in await self?.requestSync(account.id) } }
+        }
         gmailPollTasks[account.id]?.cancel()
-        gmailPollTasks[account.id] = Task { [weak self, gmailPollInterval] in
+        gmailPollTasks[account.id] = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: gmailPollInterval)
-                await self?.requestSync(account.id)
+                try? await Task.sleep(for: .seconds(5))
+                await self?.checkGmailIfDue(account.id)
             }
         }
+    }
+
+    /// The app is in use (frontmost) or not: Gmail accounts are checked every 10 s while it is, and for
+    /// 2 minutes after, else every minute. Coming back checks them at once.
+    public func setInUse(_ active: Bool) {
+        if active {
+            if !inUse { for id in gmailEngines.keys { requestSync(id) } }
+            inUse = true
+            leftAt = nil
+        } else if inUse {
+            inUse = false
+            leftAt = .now
+        }
+    }
+
+    private var gmailInterval: Duration {
+        if inUse || leftAt.map({ ContinuousClock.now - $0 < .seconds(120) }) == true { return gmailActivePollInterval }
+        return gmailPollInterval
+    }
+
+    private func checkGmailIfDue(_ accountId: String) {
+        guard let last = lastGmailCheck[accountId] else { return requestSync(accountId) }
+        if ContinuousClock.now - last >= gmailInterval { requestSync(accountId) }
+    }
+
+    /// A Gmail check that's taking a while shows as syncing (a quick one, every 10 s, doesn't flicker).
+    private func showSyncing(_ accountId: String) {
+        guard running.contains(accountId), statuses[accountId]?.phase != .syncing else { return }
+        update(accountId, .syncing)
     }
 
     private func runSync(_ accountId: String) async {
@@ -425,7 +472,12 @@ public actor SyncCoordinator {
             pending.remove(accountId)
             if let gmail = gmailEngines[accountId] {
                 await limiter.acquire()
-                update(accountId, .syncing)
+                lastGmailCheck[accountId] = .now
+                let spinner = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(1.5))
+                    if !Task.isCancelled { await self?.showSyncing(accountId) }
+                }
+                defer { spinner.cancel() }
                 do {
                     try await flushQueue(accountId)
                     let result = try await gmail.sync { [weak self] downloaded, total in
@@ -627,11 +679,13 @@ public actor SyncCoordinator {
         _ accountId: String, _ phase: AccountSyncStatus.Phase, success: Bool = false, detail: String? = nil
     ) {
         var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .idle, lastSuccess: nil)
+        // Nothing to tell when nothing shown changes (a quiet Gmail check, every 10 s while in use).
+        let changed = status.phase != phase || status.errorDetail != detail
         status.phase = phase
         status.errorDetail = detail
         if success { status.lastSuccess = Date() }
         statuses[accountId] = status
-        onStatus(status)
+        if changed { onStatus(status) }
     }
 }
 

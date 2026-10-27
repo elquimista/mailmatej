@@ -139,6 +139,54 @@ public actor GmailIMAP {
         }
     }
 
+    // MARK: IDLE
+
+    /// Waits for changes in the open mailbox (IMAP IDLE, RFC 2177) and calls `onChange` for each the
+    /// server announces (new mail, a message gone, flags changed), for `duration` (IDLE is renewed well
+    /// within the 29 minutes servers allow), then ends the IDLE. Reading just waits for the server; a
+    /// timer ends the IDLE when its time is up, and if the server doesn't answer that within `timeout`
+    /// the connection is taken for dead: closed, and this throws.
+    public func idle(for duration: Duration, timeout: Double = 20, onChange: @Sendable () -> Void) async throws {
+        guard let connection else { throw IMAPError.closed }
+        let tag = nextTag()
+        try await connection.send(Data("\(tag) IDLE\r\n".utf8))
+        while true {  // "+ idling"
+            let response = try await connection.readResponse(timeout: timeout)
+            if response.first?.atom == "+" { break }
+            if response.first?.atom == tag { throw IMAPError.refused("IDLE") }
+        }
+        let finished = Finished()
+        let renewal = Task {
+            try? await Task.sleep(for: duration)
+            guard !finished.isSet else { return }
+            try? await connection.send(Data("DONE\r\n".utf8))
+            try? await Task.sleep(for: .seconds(timeout))
+            if !finished.isSet { await connection.close() }  // no answer: the connection is gone
+        }
+        defer {
+            finished.set()
+            renewal.cancel()
+        }
+        let wait = Double(duration.components.seconds) + timeout + 60
+        while true {
+            let response = try await connection.readResponse(timeout: wait)
+            if response.first?.atom == tag { return }  // the IDLE ended (by the timer, or the server)
+            if response.first?.atom == "*", response.count >= 3,
+                let kind = response[2].atom?.uppercased(), ["EXISTS", "EXPUNGE", "FETCH"].contains(kind)
+            {
+                onChange()
+            }
+        }
+    }
+
+    /// Set once, from any thread.
+    private final class Finished: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
+    }
+
     // MARK: Commands
 
     private func nextTag() -> String {
@@ -386,9 +434,26 @@ actor IMAPConnection {
 
     /// One response, parsed.
     func readResponse() async throws -> [IMAPValue] {
+        try await readResponse(timeout: 120)
+    }
+
+    /// One response, parsed; it must start within `timeout` seconds (else the connection counts as gone).
+    func readResponse(timeout: Double) async throws -> [IMAPValue] {
+        do {
+            return try await readWholeResponse(firstLineTimeout: timeout)
+        } catch let error as GmailIMAP.IMAPError {
+            throw error
+        } catch {
+            throw GmailIMAP.IMAPError.closed  // timed out (URL or POSIX error), or closed under it
+        }
+    }
+
+    private func readWholeResponse(firstLineTimeout: Double) async throws -> [IMAPValue] {
         var segments: [IMAPResponseParser.Segment] = []
+        var first = true
         while true {
-            let line = try await readLine()
+            let line = try await readLine(timeout: first ? firstLineTimeout : 120)
+            first = false
             segments.append(.text(line))
             // A line ending in "{n}" (or "{n+}") is followed by n bytes, then the response goes on.
             guard line.last == UInt8(ascii: "}"), let open = line.lastIndex(of: UInt8(ascii: "{")),
@@ -399,8 +464,8 @@ actor IMAPConnection {
         return IMAPResponseParser.parse(segments)
     }
 
-    private func fill() async throws {
-        let (data, atEnd) = try await task.readData(ofMinLength: 1, maxLength: 1 << 20, timeout: 120)
+    private func fill(timeout: Double = 120) async throws {
+        let (data, atEnd) = try await task.readData(ofMinLength: 1, maxLength: 1 << 20, timeout: timeout)
         if let data, !data.isEmpty {
             if bufferStart > 0, bufferStart > buffer.count / 2 {
                 buffer.removeFirst(bufferStart)
@@ -412,7 +477,7 @@ actor IMAPConnection {
         }
     }
 
-    private func readLine() async throws -> [UInt8] {
+    private func readLine(timeout: Double = 120) async throws -> [UInt8] {
         while true {
             if let end = buffer[bufferStart...].firstIndex(of: 0x0A) {
                 var line = Array(buffer[bufferStart..<end])
@@ -420,7 +485,7 @@ actor IMAPConnection {
                 bufferStart = end + 1
                 return line
             }
-            try await fill()
+            try await fill(timeout: timeout)
         }
     }
 
