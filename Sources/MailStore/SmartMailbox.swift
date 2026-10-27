@@ -683,8 +683,9 @@ extension MailStore {
         return ("EXISTS (SELECT 1 FROM \(table) WHERE \(split.link) AND \(split.filter) AND lower(\(split.column)) = lower(?))", [value])
     }
 
-    /// Fields a smart mailbox can be split by: the text fields with values of their own (not text
-    /// search), and » Source ▸ Mailbox ("Inbox – Alice") or Account.
+    /// Fields mail can be split by (a smart or special mailbox's Submailboxes tab): the text fields with
+    /// values of their own (not text search), Date's parts that group mail (not its Time or Formatted:
+    /// a submailbox per message), Content-Type, and » Source ▸ Mailbox ("Inbox – Alice") or Account.
     public static func canSplit(by field: SmartField) -> Bool { splitSource(field) != nil }
 
     /// Where a split's values come from: a joined table (or the message itself), and the value column.
@@ -693,6 +694,10 @@ extension MailStore {
             let roles = header.roles.map { String($0.rawValue) }.joined(separator: ", ")
             let column = part == .all ? SmartField.AddressPart.display : valueColumn(part)
             return ("address a", "a.messageId = m.id", "a.role IN (\(roles)) AND a.email <> ''", column)
+        }
+        if let column = field.contentTypeColumn { return ("message_part p", "p.messageId = m.id", "1", column) }
+        if let (part, local) = field.datePart, [.year, .month, .day, .hour, .zone].contains(part) {
+            return (nil, "", "1", dateText(part, local: local))
         }
         switch field {
         case .subject: return (nil, "", "1", "m.subject")
@@ -1097,6 +1102,19 @@ extension MailStore {
             filter = "(\(filter)) AND m.accountId = ?"
             args.append(account)
         }
+        return try splitValues(field: field, filter: filter, args: args, limit: limit)
+    }
+
+    /// The distinct values of `field` among a scope's messages (a special mailbox's, or one account's
+    /// part of it), as `smartValues` lists them.
+    public func values(of field: SmartField, in scope: MessageScope, limit: Int = 1000) throws -> [(value: String, unread: Int)] {
+        let (filter, args) = filterParts(scope: scope, search: nil)
+        return try splitValues(field: field, filter: filter, args: args, limit: limit)
+    }
+
+    private func splitValues(
+        field: SmartField, filter: String, args: [(any DatabaseValueConvertible)?], limit: Int
+    ) throws -> [(value: String, unread: Int)] {
         guard let split = Self.splitSource(field) else { return [] }
         let keepsOther = field.address?.part.isName ?? false
         let tables = split.table.map { "message m, \($0)" } ?? "message m"

@@ -318,6 +318,9 @@ public indirect enum MessageScope: Hashable, Sendable {
     case smartAccount(Int64, String)
     /// With "each account" and a value split both on: one account's messages with that value.
     case smartAccountValue(Int64, String, SmartField, String)
+    /// A special mailbox's submailbox for one value of a field (Inbox ▸ Ada Lovelace): the messages
+    /// of a scope (the special mailbox, or its submailbox for an account) with that value.
+    case value(MessageScope, SmartField, String)
     /// A special mailbox's submailbox (Inbox ▸ Alice): the child's messages, narrowed by the special
     /// mailbox's conditions (by its key).
     case within(String, MessageScope)
@@ -342,6 +345,7 @@ public indirect enum MessageScope: Hashable, Sendable {
         case .smartAccount(let id, let account): "smartaccount:\(id):\(account)"
         case .smartAccountValue(let id, let account, let field, let value):
             "smartaccountvalue:\(id):\(account):\(field.rawValue):\(value)"
+        case .value(let scope, let field, let value): "value:\(field.rawValue)|\(scope.key)|\(value)"
         case .within(let parent, let child): "within:\(parent)|\(child.key)"
         case .messages(let ids): "messages:" + ids.map(String.init).joined(separator: ",")
         }
@@ -362,6 +366,10 @@ public indirect enum MessageScope: Hashable, Sendable {
             guard rest.count == 3, let id = Int64(rest[0]), !rest[1].isEmpty else { return nil }
             let field = SmartField(rawValue: rest[1])
             self = .smartValue(id, field, rest[2])
+        case ("value", 2):  // the scope is a special mailbox's or an account's: its key has no "|"
+            let rest = parts[1].split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+            guard rest.count == 3, !rest[0].isEmpty, let scope = MessageScope(key: rest[1]) else { return nil }
+            self = .value(scope, SmartField(rawValue: rest[0]), rest[2])
         case ("within", 2):
             let rest = parts[1].split(separator: "|", maxSplits: 1).map(String.init)
             guard rest.count == 2, let child = MessageScope(key: rest[1]) else { return nil }

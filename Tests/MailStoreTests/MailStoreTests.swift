@@ -320,6 +320,19 @@ import Testing
         let grouped = MessageScope.smartAccountValue(id, "acc", .keyword, "$label1")
         #expect(MessageScope(key: grouped.key) == grouped)
         #expect(try store.messageIDs(scope: grouped).count == 1)
+        // A special mailbox's submailboxes by value: Inbox by From ‣ Name, and within an account.
+        #expect(try store.values(of: .fromName, in: .role("inbox")).map(\.value) == ["Ann Lee", ""])
+        let byName = MessageScope.value(.role("inbox"), .fromName, "Ann Lee")
+        #expect(try store.rows(ids: try store.messageIDs(scope: byName)).map(\.subject) == ["One"])
+        #expect(MessageScope(key: MessageScope.value(.role("inbox"), .fromName, "A|B: C").key) == .value(.role("inbox"), .fromName, "A|B: C"))
+        #expect(try store.values(of: .keyword, in: .allInAccount("acc")).map(\.value) == ["$label1"])
+        #expect(try store.values(of: .keyword, in: .allInAccount("other")).isEmpty)
+        // Date's parts that group mail split too, and Content-Type; Time and Formatted don't.
+        #expect(MailStore.canSplit(by: .datePart(.year, local: true)) && MailStore.canSplit(by: .contentTypeType))
+        #expect(!MailStore.canSplit(by: .datePart(.time, local: false)) && !MailStore.canSplit(by: .date))
+        let years = try store.values(of: .datePart(.year, local: true), in: .allMessages)
+        #expect(years.count == 2)
+        #expect(try store.messageIDs(scope: .value(.allMessages, .datePart(.year, local: true), years[1].value)).count == 1)
         // MailMate's operators and Options.
         #expect(try matches(.rule(.subject, .isIn, "two, three")) == ["Two"])
         #expect(try matches(.rule(.subject, .isNotIn, "two")) == ["One"])

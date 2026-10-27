@@ -35,8 +35,8 @@ struct SmartRuleContext {
                     continue
                 }
                 guard let scope = node.scope, scope != .smart(smartID) else { continue }
-                switch scope {
-                case .smartValue, .smartAccount, .smartAccountValue: continue  // dynamic submailboxes come and go
+                switch scope.base {
+                case .smartValue, .smartAccount, .smartAccountValue, .value: continue  // dynamic submailboxes come and go
                 default: break
                 }
                 // Nested mailboxes go by their path, as MailMate names them: "All Messages ‣ Alice".

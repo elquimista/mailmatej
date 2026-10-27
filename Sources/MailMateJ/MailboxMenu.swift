@@ -59,10 +59,11 @@ final class MailboxMenu: NSObject {
         return menu
     }
 
-    /// Dynamic submailboxes of smart mailboxes come and go with the mail, so they aren't offered.
+    /// Dynamic submailboxes (a smart mailbox's, a special mailbox's per value) come and go with the
+    /// mail, so they aren't offered.
     private static func isListed(_ node: SidebarNode) -> Bool {
-        switch node.scope {
-        case .smartValue?, .smartAccount?, .smartAccountValue?, nil: false
+        switch node.scope?.base {
+        case .smartValue?, .smartAccount?, .smartAccountValue?, .value?, nil: false
         default: true
         }
     }

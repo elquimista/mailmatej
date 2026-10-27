@@ -224,7 +224,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             // a per-value one never (its smart mailbox shows it, not dozens of children at once).
             case .smartAccount(let id, let account)?, .smartAccountValue(let id, let account, _, _)?:
                 own = busyAccounts(id)?.contains(account) ?? false
-            case .smartValue?: own = false
+            case .smartValue?, .value?: own = false
             case let scope? where scope.smartID != nil: own = !(busyAccounts(scope.smartID!) ?? []).isEmpty
             default: own = selfBusy(node)  // a special mailbox's submailbox (Inbox ▸ Alice): its mailbox
             }
@@ -471,7 +471,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for (role, title, symbol) in unifiedItems where role == "inbox" || roles.contains(role) {
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
             node.badge = counts.unreadByRole[role] ?? 0
-            node.children = submailboxes(of: node, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+            node.children = submailboxes(of: node, store: store, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
             // Smart mailboxes made inside it, before its submailboxes.
             node.children = smartNodes(store: store, accounts: accountsByID, inside: MessageScope.role(role).key) + node.children
             narrow(node, store: store)
@@ -479,7 +479,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         let all = SidebarNode(key: "unified.all", kind: .unified, title: "All Messages", symbol: "envelope", scope: .allMessages)  // MailMate's
         all.badge = (try? store.count(scope: .allMessages, counting: .unread)) ?? 0
-        all.children = submailboxes(of: all, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
+        all.children = submailboxes(of: all, store: store, mailboxes: mailboxes, accounts: accountsByID, counts: counts)
         narrow(all, store: store)
         // MailMate's special mailbox for everything, Junk and Deleted Messages included.
         let everything = SidebarNode(
@@ -610,8 +610,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// mailbox of that role (one per account, so by source and by account agree), named after the account.
     /// For Flagged and All Messages, by account: each account; by source: each mailbox holding such mail
     /// ("Inbox – Alice"); Source with "each account": accounts, each with its sources.
+    /// By another field (From, Subject, ...): a child per value, as a smart mailbox's; with "each
+    /// account", the accounts (or their mailboxes of the role), each with its own values.
     private static func submailboxes(
-        of node: SidebarNode, mailboxes: [MailboxRecord], accounts: [String: AccountRecord], counts: MailStore.Counts
+        of node: SidebarNode, store: MailStore, mailboxes: [MailboxRecord], accounts: [String: AccountRecord],
+        counts: MailStore.Counts
     ) -> [SidebarNode] {
         let settings = SubmailboxSettings.settings(for: node.key)
         guard settings.splits, let scope = node.scope else { return [] }
@@ -630,6 +633,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return child
         }
         func source(_ box: MailboxRecord) -> String { "\(box.name) – \(accounts[box.accountId]!.name)" }
+        /// The values of `field` among the messages of `parent` (the unified mailbox, or one of its accounts).
+        func valueNodes(_ field: SmartField, of parent: SidebarNode) -> [SidebarNode] {
+            guard let scope = parent.scope, let values = try? store.values(of: field, in: scope),
+                !(settings.unlessOnlyOne && values.count < 2)
+            else { return [] }
+            return values.map { value, unread in
+                let child = SidebarNode(
+                    key: "\(parent.key).value.\(value.lowercased())", kind: .mailbox, title: value.isEmpty ? "Other" : value,
+                    symbol: node.symbol, scope: .value(scope, field, value), accountId: parent.accountId)
+                child.badge = unread
+                return child
+            }
+        }
 
         var children: [SidebarNode]
         switch scope {
@@ -637,6 +653,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             children = known.filter { $0.role == role }.sorted(by: order).map { box in
                 child(box.accountId, accounts[box.accountId]!.name, .mailbox(box.id), accountId: box.accountId,
                       badge: box.unreadEmails, role: role)
+            }
+            if let field = settings.valueField {
+                guard settings.byAccount else { return valueNodes(field, of: node) }
+                for account in children { account.children = valueNodes(field, of: account) }
+                return children
             }
         case .flagged, .allMessages:
             let flagged = scope == .flagged
@@ -660,8 +681,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                 : sources.filter { $0.accountId == account.id }.reduce(0) { $0 + $1.unreadEmails },
                             role: nil)
                         if settings.splitsBySource { node.children = sourceNodes(sources.filter { $0.accountId == account.id }) }
+                        if let field = settings.valueField { node.children = valueNodes(field, of: node) }
                         return node
                     }
+                if settings.valueField != nil { return children }
+            } else if let field = settings.valueField {
+                return valueNodes(field, of: node)
             } else {
                 children = sourceNodes(sources)
             }
@@ -1498,6 +1523,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 return [account]
             case .mailbox(let box)?, .flaggedInMailbox(let box)?:
                 return mailboxAccounts[box].map { [$0] } ?? []
+            case .value(let scope, _, _)?:
+                return accounts(scope, visited: visited)
             case let scope? where scope.smartID != nil:
                 let id = scope.smartID!
                 guard !visited.contains(id), let record = smart[id] else { return nil }

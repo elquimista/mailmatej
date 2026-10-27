@@ -633,7 +633,8 @@ private class SubmailboxesLayout {
             valuePopup.addItem(withTitle: value.title)
             valuePopup.lastItem?.representedObject = value.id
         }
-        place(valuePopup, NSRect(x: 269, y: 15, width: 154, height: 25))  // Shows 150 pt at 271.
+        // Shows 150 pt at 271, its title's capitals on the label's (measured at 1x: at y 15 they sat 3 pt high).
+        place(valuePopup, NSRect(x: 269, y: 18, width: 154, height: 25))
         unlessOne.sizeToFit()
         place(unlessOne, NSRect(x: 36, y: 46, width: unlessOne.frame.width, height: 18))
         // (MailMate's name format row, removed here, sat between: the rest moves up its 27 pt.)
@@ -716,33 +717,47 @@ private final class SmartSubmailboxesPane: NSObject, EditorPane {
     }
 }
 
-/// Submailboxes of a unified mailbox (Inbox, Flagged, All Messages, ...): by account or by source.
+/// Submailboxes of a unified mailbox (Inbox, Flagged, All Messages, ...): by » Source (account),
+/// » Source ‣ Mailbox, or another field's values, from the Conditions tab's field menu as MailMate's.
 @MainActor
 private final class UnifiedSubmailboxesPane: NSObject, EditorPane {
     private var layout: SubmailboxesLayout!
     private let key: String
     private var settings: SubmailboxSettings
+    private var fieldMenu: FieldMenu!
     var view: NSView { layout.view }
 
     init(key: String) {
         self.key = key
         settings = SubmailboxSettings.settings(for: key)
         super.init()
-        layout = SubmailboxesLayout(
-            values: SubmailboxSettings.Value.allCases.map { ($0.title, $0.rawValue) }, target: self, action: #selector(changed))
+        layout = SubmailboxesLayout(values: [], target: self, action: #selector(changed))
+        fieldMenu = FieldMenu { [weak self] id in self?.fieldChosen(id) }
         refresh()
     }
 
+    private func fieldChosen(_ id: String) {
+        let parts = id.split(separator: "|").map(String.init)
+        guard parts.count == 2 else { return }
+        settings.field = SmartField(rawValue: parts[1])
+        save()
+    }
+
     private func refresh() {
+        fieldMenu.install(
+            in: layout.valuePopup, current: FieldMenu.id(field: settings.field), title: FieldMenu.title(field: settings.field),
+            enabled: { id in
+                let parts = id.split(separator: "|").map(String.init)
+                return parts.count == 2 && MailStore.canSplit(by: SmartField(rawValue: parts[1]))
+            })
         layout.update(
-            byValue: settings.bySource, value: settings.value.rawValue, unlessOnlyOne: settings.unlessOnlyOne,
+            byValue: settings.bySource, value: settings.field.rawValue, unlessOnlyOne: settings.unlessOnlyOne,
             byAccount: settings.byAccount)
         layout.unlessOne.isEnabled = settings.splits
     }
 
     @objc private func changed() {
-        settings.bySource = layout.byValue.state == .on
-        settings.value = (layout.valuePopup.selectedItem?.representedObject as? String).flatMap(SubmailboxSettings.Value.init) ?? .account
+        settings.bySource = layout.byValue.state == .on  // the field is set by its menu
         settings.unlessOnlyOne = layout.unlessOne.state == .on
         settings.byAccount = layout.byAccount.state == .on
         save()

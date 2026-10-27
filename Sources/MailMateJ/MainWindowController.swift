@@ -578,7 +578,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case .account(let id), .flaggedInAccount(let id), .allInAccount(let id), .smartAccount(_, let id),
             .smartAccountValue(_, let id, _, _):
             return [id]
-        case .within(_, let child):
+        case .within(_, let child), .value(let child, _, _):
             return accountsShown(in: child)
         default:
             return nil

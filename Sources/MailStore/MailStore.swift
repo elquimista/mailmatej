@@ -1195,6 +1195,11 @@ public final class MailStore: Sendable {
             let (test, testArgs) = Self.smartValueTest(field, value)
             clauses.append("\(clause) AND m.accountId = ? AND \(test)")
             args += smartArgs + [accountId] + testArgs
+        case .value(let scope, let field, let value):
+            let (clause, scopeArgs) = filterParts(scope: scope, search: nil)
+            let (test, testArgs) = Self.smartValueTest(field, value)
+            clauses.append("(\(clause)) AND \(test)")
+            args += scopeArgs + testArgs
         case .within:
             break  // handled above
         case .smartAccount(let id, let accountId):
