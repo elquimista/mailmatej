@@ -67,6 +67,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     init(model: AppModel) {
         self.model = model
         sidebar = SidebarViewController(model: model)
+        SidebarViewController.main = sidebar
         sidebar.remembersSelection = true
         list = MessageListViewController(
             store: model.store, columns: [.unread, .flag, .from, .subject, .date, .source, .attachment],
@@ -106,8 +107,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         sidebar.selectInitial()
         NotificationCenter.default.addObserver(
             forName: .mailStoreDidChange, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.storeDidChange() }
+        ) { [weak self] note in
+            let countsUnchanged = note.userInfo?[AppModel.countsUnchangedKey] != nil
+            MainActor.assumeIsolated { self?.storeDidChange(countsUnchanged: countsUnchanged) }
         }
         NotificationCenter.default.addObserver(
             forName: .syncStatusDidChange, object: nil, queue: .main
@@ -528,8 +530,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return rows.map(\.id)
     }
 
-    private func storeDidChange() {
-        sidebar.reload()
+    private func storeDidChange(countsUnchanged: Bool) {
+        sidebar.reload(keepingCounts: countsUnchanged)
         // The selected mailbox's scope can change in place (a special mailbox's conditions now narrow it).
         if let current = sidebar.selectedNode?.scope, current != scope, current.base == scope.base { scope = current }
         reloadList(.dataChanged)
@@ -2075,7 +2077,7 @@ extension MainWindowController {
     /// alphabetically (recently chosen ones first, see `MailboxPicker`).
     fileprivate func pickMailbox(move: Bool, ids: [Int64]? = nil) {
         guard let window else { return }
-        let roots = SidebarViewController.buildTree(model: model)
+        let roots = SidebarViewController.currentTree(model: model)
         let boxes = (try? model.store.mailboxes()) ?? []
         let boxByID = Dictionary(boxes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let ids = ids ?? targetIDs

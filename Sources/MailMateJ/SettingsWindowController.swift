@@ -66,7 +66,7 @@ struct MailboxMenuButton: NSViewRepresentable {
 struct CountersPane: View {
     @ObservedObject private var settings = CounterSettings.shared
     @State private var corner: Corner = .topRight
-    @State private var roots = SidebarViewController.buildTree(model: AppModel.shared)
+    @State private var roots = SidebarViewController.currentTree(model: AppModel.shared)
 
     var body: some View {
         HStack(alignment: .top, spacing: 28) {
@@ -107,7 +107,7 @@ struct CountersPane: View {
         }
         .padding(24)
         .frame(width: 560)
-        .onAppear { roots = SidebarViewController.buildTree(model: AppModel.shared) }
+        .onAppear { roots = SidebarViewController.currentTree(model: AppModel.shared) }
     }
 
     private func binding<T>(_ keyPath: WritableKeyPath<CounterConfig, T>) -> Binding<T> {

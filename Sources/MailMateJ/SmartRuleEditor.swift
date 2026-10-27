@@ -45,7 +45,7 @@ struct SmartRuleContext {
                 add(node.children, depth: depth + 1, path: path + [node.title])
             }
         }
-        roots = SidebarViewController.buildTree(model: model)
+        roots = SidebarViewController.currentTree(model: model)
         add(roots, depth: 0)
         mailboxes = list
         var disabled: Set<String> = []

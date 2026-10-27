@@ -38,11 +38,14 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
     private let content = EditorContentView()
     private var node: SidebarNode?
     private var tab = Tab.mailboxes
+    /// The tab `show` asks for, taken by the next `edit`.
+    private var wantedTab: Tab?
     private var storeObserver: Any?
 
     /// Opens the editor on the sidebar mailbox `key` (a smart mailbox on Mailboxes, or `tab`; others on
     /// Submailboxes), or brings it forward there.
     static func show(key: String, model: AppModel, over parent: NSWindow?, tab: Tab? = nil) {
+        let opened = shared == nil
         let controller = shared ?? MailboxEditorWindowController(model: model)
         shared = controller
         if controller.window?.isVisible != true, let parent, let window = controller.window {
@@ -52,11 +55,18 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
-        controller.sidebar.reload()
+        // An open editor's sidebar is current: it follows the main sidebar's every reload.
+        if opened { controller.sidebar.reload() }
+        // The mailbox opens on `tab` (its pane built once, not first on its default tab).
+        controller.wantedTab = tab
         _ = controller.sidebar.select(key: key)
         // Selecting what's already selected (the sidebar starts on Inbox) changes nothing: load it directly.
         if controller.node?.key != key, let node = controller.sidebar.node(forKey: key) { controller.edit(node) }
-        if let tab { controller.select(tab) }
+        // Still wanted: the mailbox was already being edited, so only the tab changes.
+        if let tab = controller.wantedTab {
+            controller.wantedTab = nil
+            controller.select(tab)
+        }
     }
 
     private init(model: AppModel) {
@@ -106,7 +116,10 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         window.setFrameAutosaveName("MailboxEditor")
 
         sidebar.onSelect = { [weak self] node in self?.edit(node) }
-        storeObserver = NotificationCenter.default.addObserver(forName: .mailStoreDidChange, object: nil, queue: .main) { [weak self] _ in
+        // Follows the main window's sidebar, which reloads with every store change (its sidebar copies that tree).
+        storeObserver = NotificationCenter.default.addObserver(
+            forName: SidebarViewController.treeDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
             MainActor.assumeIsolated { self?.storeDidChange() }
         }
     }
@@ -232,9 +245,12 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         let changedKind = self.node?.kind != node.kind
         self.node = node
         let tabs = availableTabs
-        if changedKind || !tabs.contains(tab) {
+        if let wanted = wantedTab, tabs.contains(wanted) {
+            tab = wanted
+        } else if changedKind || !tabs.contains(tab) {
             tab = node.kind == .smart ? .mailboxes : (tabs.first ?? .rules)
         }
+        wantedTab = nil
         tabStrip.update(selected: tab, enabled: tabs)
         updateTitle()
         content.show(node, tab: tab, model: model)

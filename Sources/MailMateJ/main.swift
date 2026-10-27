@@ -159,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // star for the run (then put back).
                     MailboxSymbols.set("star", for: "unified.inbox")
                     MailboxColors.set(.system("red"), for: "unified.inbox")
-                    let menu = MailboxMenu().build(roots: SidebarViewController.buildTree(model: AppModel.shared), selection: "")
+                    let menu = MailboxMenu().build(roots: SidebarViewController.currentTree(model: AppModel.shared), selection: "")
                     let items = menu.items.filter { $0.image != nil }.prefix(8)
                     let image = NSImage(size: NSSize(width: 220, height: CGFloat(items.count) * 22), flipped: true) { _ in
                         NSColor.windowBackgroundColor.setFill()

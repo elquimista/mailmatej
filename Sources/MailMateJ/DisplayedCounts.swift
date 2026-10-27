@@ -47,8 +47,9 @@ enum DisplayedCounts {
 
     // MARK: Counting
 
-    /// Sets the badges of `roots` (as built, with their usual counts) to their displayed counts.
-    static func apply(to roots: [SidebarNode], store: MailStore) {
+    /// Sets the badges of `roots` (as built, with their usual counts) to their displayed counts; only
+    /// those of the rows `counting` accepts (the others have theirs already).
+    static func apply(to roots: [SidebarNode], store: MailStore, counting: (SidebarNode) -> Bool = { _ in true }) {
         let kinds = UserDefaults.standard.dictionary(forKey: kindsKey) ?? [:]
         let includes = UserDefaults.standard.dictionary(forKey: includesKey) ?? [:]
         guard !kinds.isEmpty || !includes.isEmpty else { return }  // usual counts everywhere
@@ -60,7 +61,7 @@ enum DisplayedCounts {
             for node in nodes {
                 let kind = kind(for: node.key) ?? inherited
                 let include = includesSubmailboxes(node.key) ?? inheritedInclude
-                if node.kind != .header, kind != nil || include == true, let scope = node.scope {
+                if node.kind != .header, kind != nil || include == true, let scope = node.scope, counting(node) {
                     let counted = kind ?? .unread
                     let lists = include == true ? scopes(node) : [scope]
                     node.badge = count(counted, of: lists, store: store)

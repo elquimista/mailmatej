@@ -48,6 +48,10 @@ final class AppModel {
     }
     private var observation: StoreObservation?
     private var refreshScheduled = false
+    /// When the UI last read the store: commits before it are shown already.
+    private var refreshedAt = ContinuousClock.now
+    /// The newest commit seen, for the refresh scheduled for it.
+    private var latestCommit = ContinuousClock.now
     private(set) var dockCounters: DockCounters?
 
     static func bootstrap() throws {
@@ -77,7 +81,8 @@ final class AppModel {
 
     func start() {
         observation = store.observeChanges {
-            Task { @MainActor in AppModel.shared?.scheduleRefresh() }
+            let committed = ContinuousClock.now  // called as the commit ends, before any refresh that follows it
+            Task { @MainActor in AppModel.shared?.scheduleRefresh(committed: committed) }
         }
         myAddresses = (try? store.myAddresses()) ?? []
         refreshKnownAddresses()
@@ -557,12 +562,21 @@ final class AppModel {
         present(alert)
     }
 
-    /// Refreshes the UI from the store now, skipping the debounce meant for sync bursts.
-    func refreshNow() {
-        myAddresses = (try? store.myAddresses()) ?? myAddresses
-        dockCounters?.update()
-        NotificationCenter.default.post(name: .mailStoreDidChange, object: nil)
+    /// Refreshes the UI from the store now, skipping the debounce meant for sync bursts. With
+    /// `countsUnchanged` only the mailbox list changed (a new smart mailbox: its messages are counted
+    /// already, in its parent's), so the sidebar keeps its counts and the Dock its badges.
+    func refreshNow(countsUnchanged: Bool = false) {
+        refreshedAt = .now
+        if !countsUnchanged {
+            myAddresses = (try? store.myAddresses()) ?? myAddresses
+            dockCounters?.update()
+        }
+        NotificationCenter.default.post(
+            name: .mailStoreDidChange, object: nil, userInfo: countsUnchanged ? [Self.countsUnchangedKey: true] : nil)
     }
+
+    /// In a store change's userInfo: see `refreshNow(countsUnchanged:)`.
+    nonisolated static let countsUnchangedKey = "countsUnchanged"
 
     // MARK: Work in progress
 
@@ -816,7 +830,7 @@ final class AppModel {
     func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil, sources: [String]? = nil) -> Int64? {
         do {
             let id = try store.createSmartMailbox(name: name, parentId: parentId, parentKey: parentKey, sources: sources)
-            refreshNow()
+            refreshNow(countsUnchanged: true)
             return id
         } catch {
             present(error)
@@ -1216,12 +1230,17 @@ final class AppModel {
     }
 
     /// Coalesces bursts of commits (e.g. during an initial sync) into at most ~3 UI refreshes per second.
-    private func scheduleRefresh() {
-        guard !refreshScheduled else { return }
+    /// Commits a `refreshNow` has shown since (an action's own, refreshed at once) need no refresh again,
+    /// which would rebuild the sidebars a second time just after.
+    private func scheduleRefresh(committed: ContinuousClock.Instant) {
+        latestCommit = max(latestCommit, committed)
+        guard !refreshScheduled, committed > refreshedAt else { return }
         refreshScheduled = true
         Task {
             try? await Task.sleep(for: .milliseconds(300))
             refreshScheduled = false
+            guard latestCommit > refreshedAt else { return }
+            refreshedAt = .now
             let started = Date()
             myAddresses = (try? store.myAddresses()) ?? myAddresses
             dockCounters?.update()
