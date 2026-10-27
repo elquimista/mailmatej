@@ -482,6 +482,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         editor.setFrame(frame, display: true)  // as dragging its edge would
                         try? await Task.sleep(for: .milliseconds(500))
                     }
+                    // MMJ_DEBUG_EDITOR_REOPEN=<width>: closes the editor, opens it again and drags it to that width.
+                    if let width = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_REOPEN"] ?? ""),
+                        let editor = NSApp.windows.first(where: { $0.windowController is MailboxEditorWindowController })
+                    {
+                        editor.performClose(nil)
+                        try? await Task.sleep(for: .milliseconds(500))
+                        MailboxEditorWindowController.show(key: parts[0], model: AppModel.shared, over: target)
+                        try? await Task.sleep(for: .milliseconds(500))
+                        let editors = NSApp.windows.filter { $0.windowController is MailboxEditorWindowController }
+                        if let again = editors.first(where: \.isVisible) {
+                            NSLog("MMJ editor reopened at \(again.frame.size), autosave \"\(again.frameAutosaveName)\", \(editors.count) editor window(s)")
+                            var frame = again.frame
+                            frame.size.width = width
+                            again.setFrame(frame, display: true)
+                            try? await Task.sleep(for: .milliseconds(500))
+                        }
+                    }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_HOVER"] != nil { MailboxEditorWindowController.debugHoverTabs() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_TIPS"] != nil { MailboxEditorWindowController.debugLogToolTips() }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] != nil { MailboxEditorWindowController.debugDumpMailboxMenu() }

@@ -72,7 +72,6 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         window.toolbarStyle = .unified
         // Narrow enough to be out of the way, wide enough for a rule's rows beside the rule list.
         window.minSize = NSSize(width: 960, height: 360)
-        window.setFrameAutosaveName("MailboxEditor")
         // Tab goes from field to field in reading order (description, conditions, actions), as in MailMate,
         // also as rows come and go.
         window.autorecalculatesKeyViewLoop = true
@@ -101,7 +100,10 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 1010, height: 607))
+        // The size as last left, MailMate's the first time. Installing the content resized the window,
+        // so the saved frame goes on after it.
+        if !window.setFrameUsingName("MailboxEditor") { window.setContentSize(NSSize(width: 1010, height: 607)) }
+        window.setFrameAutosaveName("MailboxEditor")
 
         sidebar.onSelect = { [weak self] node in self?.edit(node) }
         storeObserver = NotificationCenter.default.addObserver(forName: .mailStoreDidChange, object: nil, queue: .main) { [weak self] _ in
