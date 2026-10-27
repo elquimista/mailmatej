@@ -4,8 +4,8 @@ import AppKit
 /// MailMate's storage bar (measured at 1x): a 22 pt strip under a 1 pt line, its bar 16 pt tall, 3 pt
 /// below the line and 8 pt in from the left, over a grey track; its corners rounded (4 pt), the fill's
 /// leading end too. What's under way is written across the bar in 10 pt digits that don't jitter,
-/// dark over the green and in the text color over the track, so it reads on both. The fill eases to
-/// each new amount.
+/// dark over the green and in the text color over the track, so it reads on both; in a narrow sidebar
+/// a shorter wording is used. The fill eases to each new amount.
 final class SyncProgressBar: NSView {
     static let height: CGFloat = 22
     private static let radius: CGFloat = 4
@@ -19,9 +19,10 @@ final class SyncProgressBar: NSView {
         }
     }
 
-    /// Written across the bar ("Downloading 120 of 560").
-    var text = "" {
-        didSet { if text != oldValue { needsDisplay = true } }
+    /// Written across the bar ("Downloading 120 of 560"), longest first: the first that fits is used
+    /// ("120 of 560" in a narrow sidebar).
+    var texts: [String] = [] {
+        didSet { if texts != oldValue { needsDisplay = true } }
     }
 
     /// The fraction drawn: eases toward `fraction`.
@@ -80,7 +81,9 @@ final class SyncProgressBar: NSView {
     /// The text centered on the bar: in the text color over the track, dark over the green (each
     /// clipped to its part).
     private func drawText(in bar: NSRect, track: NSBezierPath, fill: NSBezierPath?) {
-        guard !text.isEmpty else { return }
+        // The longest wording that fits with 6 pt to spare at either end, else the shortest.
+        let width = { (text: String) in (text as NSString).size(withAttributes: [.font: Self.font]).width }
+        guard let text = texts.first(where: { width($0) <= bar.width - 12 }) ?? texts.last, !text.isEmpty else { return }
         let size = (text as NSString).size(withAttributes: [.font: Self.font])
         let origin = backingAlignedRect(
             NSRect(x: bar.midX - size.width / 2, y: bar.midY - size.height / 2, width: size.width, height: size.height),

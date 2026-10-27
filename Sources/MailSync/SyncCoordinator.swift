@@ -28,6 +28,10 @@ public struct AccountSyncStatus: Sendable {
     public var busyMailboxes: Set<Int64> = []
     /// Changes made while the server couldn't be reached, waiting to be made there.
     public var queuedChanges = 0
+    /// A first (or repeated full) sync's progress: message headers downloaded, and in all.
+    public var headersDownloaded = 0
+    public var headersTotal = 0
+    public var isDownloadingHeaders = false
 }
 
 /// Runs sync for all accounts: a bounded number at a time, triggered by push, polling and the user.
@@ -422,11 +426,15 @@ public actor SyncCoordinator {
                 update(accountId, .syncing)
                 do {
                     try await flushQueue(accountId)
-                    let result = try await gmail.sync()
+                    let result = try await gmail.sync { [weak self] downloaded, total in
+                        await self?.reportHeaders(accountId, downloaded: downloaded, total: total)
+                    }
+                    endHeaders(accountId)
                     if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                     update(accountId, .idle, success: true)
                     startDownloads(accountId)
                 } catch {
+                    endHeaders(accountId)
                     update(accountId, failure: error)
                 }
                 await limiter.release()
@@ -437,16 +445,38 @@ public actor SyncCoordinator {
             update(accountId, .syncing)
             do {
                 try await flushQueue(accountId)
-                let result = try await engine.sync()
+                let result = try await engine.sync { [weak self] downloaded, total in
+                    await self?.reportHeaders(accountId, downloaded: downloaded, total: total)
+                }
+                endHeaders(accountId)
                 if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                 update(accountId, .idle, success: true)
                 startDownloads(accountId)
             } catch {
+                endHeaders(accountId)
                 update(accountId, failure: error)
             }
             await limiter.release()
         } while pending.contains(accountId)
         running.remove(accountId)
+    }
+
+    /// A full sync's progress, as the engine downloads message headers (called in order, from within
+    /// its sync, so it never comes after `endHeaders`).
+    private func reportHeaders(_ accountId: String, downloaded: Int, total: Int) {
+        var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .syncing, lastSuccess: nil)
+        status.isDownloadingHeaders = true
+        status.headersDownloaded = downloaded
+        status.headersTotal = max(total, downloaded)
+        statuses[accountId] = status
+        onStatus(status)
+    }
+
+    private func endHeaders(_ accountId: String) {
+        guard var status = statuses[accountId], status.isDownloadingHeaders else { return }
+        status.isDownloadingHeaders = false
+        statuses[accountId] = status
+        onStatus(status)
     }
 
     // MARK: Full download

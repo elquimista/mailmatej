@@ -138,10 +138,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let progressBar = SyncProgressBar()
     private var progressHeight: NSLayoutConstraint!
 
-    /// Shows the progress bar (`fraction` done) with `text` across it, or hides it.
-    func showProgress(_ shown: Bool, fraction: Double = 0, text: String = "") {
+    /// Shows the progress bar (`fraction` done) with the first of `texts` that fits across it, or hides it.
+    func showProgress(_ shown: Bool, fraction: Double = 0, texts: [String] = []) {
         progressBar.fraction = fraction
-        progressBar.text = text
+        progressBar.texts = texts
         guard progressBar.isHidden == shown else { return }
         progressBar.isHidden = !shown
         progressHeight.constant = shown ? SyncProgressBar.height : 0
@@ -150,9 +150,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var selectedNode: SidebarNode? { outline.item(atRow: outline.selectedRow) as? SidebarNode }
 
     /// Updates activity spinners, warnings and tooltips of visible rows in place (no reload, so
-    /// spinners keep animating). A row spins when its account syncs or downloads, when the download
-    /// is working on its mailbox, for unified mailboxes when any mailbox with that role is busy, and
-    /// for collapsed rows when anything inside them is busy.
+    /// spinners keep animating). Spinners stay where the work is: a row spins when its account syncs
+    /// or downloads, when the download is working on its mailbox, for unified mailboxes when any
+    /// mailbox with that role is busy, for collapsed rows when anything inside them is busy, and for a
+    /// smart mailbox whose mailbox list names a busy account or mailbox itself (not through All
+    /// Messages or a unified mailbox, which would set nearly every smart mailbox spinning); of its
+    /// submailboxes, only the busy account's.
     func refreshStatuses() {
         guard showsStatus else { return }
         let busyIDs = model.busyMailboxIDs
@@ -181,21 +184,53 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return own || inside
         }
         for root in roots where root.key != "header.mailboxes" { root.children.forEach { update($0) } }
-        // Unified mailboxes, from what the account trees reported.
-        for node in roots.first(where: { $0.key == "header.mailboxes" })?.children ?? [] {
-            switch node.scope {
-            case .role(let role)?: node.isBusy = busyRoles.contains(role)
-            case .allMessages?: node.isBusy = !busyIDs.isEmpty
-            default: node.isBusy = false
-            }
-            func markSubmailboxes(_ nodes: [SidebarNode]) {
-                for child in nodes {
-                    child.isBusy = selfBusy(child)
-                    markSubmailboxes(child.children)
+
+        guard let unified = roots.first(where: { $0.key == "header.mailboxes" }) else { return reconfigureVisibleRows() }
+        // Smart mailboxes: by the busy accounts whose mail their Mailboxes tab brings in by name (an
+        // account, one of its mailboxes being downloaded, or another smart mailbox), Any/All/None followed.
+        let smart = Dictionary(((try? model.store.smartMailboxes()) ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let mailboxAccounts = Dictionary(((try? model.store.mailboxes()) ?? []).map { ($0.id, $0.accountId) }, uniquingKeysWith: { a, _ in a })
+        /// nil: the smart mailbox names no account (it lists Inbox, say).
+        var busyBySmart: [Int64: Set<String>?] = [:]
+        func busyAccounts(_ id: Int64, visited: Set<Int64> = []) -> Set<String>? {
+            if let known = busyBySmart[id] { return known }
+            guard !visited.contains(id), let record = smart[id] else { return nil }
+            let accounts = record.definition.sources.namedAccounts { key -> Set<String>? in
+                switch MessageScope(key: key)?.base {
+                case .account(let account)?, .allInAccount(let account)?, .flaggedInAccount(let account)?:
+                    return model.isBusy(accountId: account) ? [account] : []
+                case .mailbox(let box)?, .flaggedInMailbox(let box)?:
+                    // While its account syncs or downloads (mail arriving in it), or it's downloading itself.
+                    guard let account = mailboxAccounts[box] else { return [] }
+                    return model.isBusy(accountId: account) || busyIDs.contains(box) ? [account] : []
+                case let scope? where scope.smartID != nil:
+                    return busyAccounts(scope.smartID!, visited: visited.union([id]))
+                default:
+                    return nil  // names no account (Inbox, All Messages)
                 }
             }
-            markSubmailboxes(node.children)
+            busyBySmart[id] = .some(accounts)
+            return accounts
         }
+        @discardableResult
+        func mark(_ node: SidebarNode) -> Bool {
+            let own: Bool
+            switch node.scope?.base {
+            case .role(let role)?: own = busyRoles.contains(role)
+            case .allMessages?: own = !busyIDs.isEmpty
+            // A smart mailbox's per-account submailbox: when the smart mailbox brings in that busy account;
+            // a per-value one never (its smart mailbox shows it, not dozens of children at once).
+            case .smartAccount(let id, let account)?, .smartAccountValue(let id, let account, _, _)?:
+                own = busyAccounts(id)?.contains(account) ?? false
+            case .smartValue?: own = false
+            case let scope? where scope.smartID != nil: own = !(busyAccounts(scope.smartID!) ?? []).isEmpty
+            default: own = selfBusy(node)  // a special mailbox's submailbox (Inbox ▸ Alice): its mailbox
+            }
+            let inside = node.children.map(mark).contains(true)
+            node.isBusy = own || (inside && !outline.isItemExpanded(node))
+            return own || inside
+        }
+        unified.children.forEach { mark($0) }
         reconfigureVisibleRows()
     }
 

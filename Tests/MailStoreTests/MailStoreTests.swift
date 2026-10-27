@@ -515,6 +515,31 @@ import Testing
         #expect(try store.fieldValues(.contentTypeSubtype, sources: SmartSources()) == ["calendar", "png"])
     }
 
+    @Test func mailboxListsBringInAccountsAsTheirMatchSays() {
+        // Busy: Gmail's account, which AGENT-095 (a smart mailbox) brings in.
+        let leaf: (String) -> Set<String>? = { key in
+            switch key {
+            case "account:gmail", "smart:95": ["gmail"]
+            case "account:alice": []  // names an account, not a busy one
+            default: nil  // names none: Inbox, All Messages
+            }
+        }
+        func rule(_ key: String, _ op: SmartOperator = .is) -> SmartCondition { .rule(.mailbox, op, key) }
+        // Imbox: All of [Other ▸ Inbox, None of [AGENT-095]]: Gmail's mail stays out.
+        let imbox = SmartSources(root: .compound(.all, [rule("within:role:inbox|smart:7"), .compound(.none, [rule("smart:95")])]))
+        #expect(imbox.accounts(bringingIn: leaf).isEmpty)
+        #expect(SmartSources(root: .compound(.any, [rule("role:inbox"), rule("smart:95")])).accounts(bringingIn: leaf) == ["gmail"])
+        #expect(SmartSources(root: .compound(.all, [rule("account:gmail"), rule("smart:95")])).accounts(bringingIn: leaf) == ["gmail"])
+        // Inbox names no account, so it doesn't limit an All: AGENT-095 (All of [Inbox, the group]) spins.
+        #expect(SmartSources(root: .compound(.all, [rule("account:gmail"), rule("role:inbox")])).accounts(bringingIn: leaf) == ["gmail"])
+        #expect(SmartSources(root: .compound(.all, [rule("role:inbox"), rule("smart:95")])).accounts(bringingIn: leaf) == ["gmail"])
+        // An account that isn't busy does: only its mail.
+        #expect(SmartSources(root: .compound(.all, [rule("account:alice"), rule("smart:95")])).accounts(bringingIn: leaf).isEmpty)
+        #expect(SmartSources(root: .compound(.any, [rule("role:inbox")])).namedAccounts(bringingIn: leaf) == nil)
+        #expect(SmartSources(root: .compound(.any, [rule("account:gmail", .isNot)])).accounts(bringingIn: leaf).isEmpty)
+        #expect(SmartSources(root: .compound(.any, [.rule(.mailbox, .is, "account:gmail", enabled: false)])).accounts(bringingIn: leaf).isEmpty)
+    }
+
     @Test func theFullNameIsTheIdentitiesName() throws {
         try store.replaceIdentities(accountId: "acc", [
             ("1", "Contact@x.com", "contact@x.com"), ("2", "", "me@example.com"), ("3", "Ada", "ada@x.com"),

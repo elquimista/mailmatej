@@ -92,6 +92,48 @@ public struct SmartSources: Codable, Hashable, Sendable {
     }
 }
 
+extension SmartSources {
+    /// Which of some accounts (busy ones, say) this mailbox list brings in by name, following Any, All
+    /// and None as the smart mailbox does. `leaf` says which of them a mailbox key brings in (an account
+    /// itself, a mailbox's account, another smart mailbox's), or nil for a key that names no account
+    /// (Inbox, All Messages): such a row neither adds accounts (Any) nor limits them (All). Under None
+    /// (or "is not") a key only takes accounts away; unchecked rows don't count.
+    public func accounts(bringingIn leaf: (String) -> Set<String>?) -> Set<String> { Self.accounts(root, leaf) ?? [] }
+
+    /// `accounts(bringingIn:)`, nil when the list names no account at all.
+    public func namedAccounts(bringingIn leaf: (String) -> Set<String>?) -> Set<String>? { Self.accounts(root, leaf) }
+
+    /// nil: the rows name no account.
+    static func accounts(_ condition: SmartCondition, _ leaf: (String) -> Set<String>?) -> Set<String>? {
+        guard condition.isEnabled else { return nil }
+        switch condition {
+        case .rule(_, let op, let value, _, _):
+            return op.isNegative ? nil : leaf(value)
+        case .compound(.none, _, _):
+            return nil
+        case .compound(.any, let children, _):
+            let named = children.compactMap { accounts($0, leaf) }
+            return named.isEmpty ? nil : named.reduce(into: Set<String>()) { $0.formUnion($1) }
+        case .compound(.all, let children, _):
+            // What every row naming accounts has in common, less what None (and "is not") rows leave out.
+            var included: Set<String>?
+            var excluded = Set<String>()
+            for child in children where child.isEnabled {
+                switch child {
+                case .compound(.none, let inner, _):
+                    excluded.formUnion(accounts(.compound(.any, inner), leaf) ?? [])
+                case .rule(_, let op, let value, _, _) where op.isNegative:
+                    excluded.formUnion(leaf(value) ?? [])
+                default:
+                    guard let these = accounts(child, leaf) else { continue }
+                    included = included.map { $0.intersection(these) } ?? these
+                }
+            }
+            return included?.subtracting(excluded)
+        }
+    }
+}
+
 /// The Submailboxes tab: a child for each value of a field among the messages, and/or each account.
 public struct SmartSplit: Codable, Hashable, Sendable {
     public var byValue = false

@@ -46,32 +46,39 @@ public actor GmailAccountSync {
     static let historyState = "GmailHistory"
     /// Where an unfinished first (or repeated) full sync started in Gmail's history.
     static let fullSyncState = "GmailFullStart"
+    /// Set while a full sync fetches every message again (not only those not stored yet), and how many
+    /// it has done, so one interrupted by quitting carries on where it was.
+    static let refetchState = "GmailRefetch"
+    static let refetchDoneState = "GmailRefetchDone"
 
     // MARK: Sync
 
     /// One round: labels, then the changes since the last round (everything, the first time).
+    /// `progress` hears how many message headers a full sync has downloaded, and of how many.
     @discardableResult
-    public func sync() async throws -> JMAPAccountSync.Result {
+    public func sync(progress: @escaping @Sendable (_ downloaded: Int, _ total: Int) async -> Void = { _, _ in }) async throws
+        -> JMAPAccountSync.Result
+    {
         var result = JMAPAccountSync.Result()
         result.mailboxes = try await syncLabels()
-        if try store.syncState(accountId: account.id, type: Self.mappingState) != Self.mappingVersion {
-            // Mailboxes mean something new: everything is fetched again (from where history stands now).
-            try store.setSyncState(nil, accountId: account.id, type: Self.historyState)
-            try await fullSync(refetchKnown: true, into: &result)
-            try store.setSyncState(Self.mappingVersion, accountId: account.id, type: Self.mappingState)
+        // An account synced when mailboxes meant something else (or before that was recorded) has every
+        // message fetched again. A first sync still under way records nothing yet: it just carries on.
+        let mapping = try store.syncState(accountId: account.id, type: Self.mappingState)
+        let synced = try store.syncState(accountId: account.id, type: Self.historyState) != nil
+        let refetching = try store.syncState(accountId: account.id, type: Self.refetchState) != nil
+        if !refetching, mapping.map({ $0 != Self.mappingVersion }) ?? synced { try startRefetch() }
+        if try store.syncState(accountId: account.id, type: Self.refetchState) != nil {
+            try await fullSync(refetchKnown: true, into: &result, progress: progress)
         } else if let since = try store.syncState(accountId: account.id, type: Self.historyState) {
             do {
                 try await syncHistory(since: since, into: &result)
             } catch GmailClient.GmailError.historyExpired {
                 // Too long since the last check: list everything again, refreshing the messages known.
-                try store.setSyncState(nil, accountId: account.id, type: Self.historyState)
-                try await fullSync(refetchKnown: true, into: &result)
+                try startRefetch()
+                try await fullSync(refetchKnown: true, into: &result, progress: progress)
             }
         } else {
-            try await fullSync(refetchKnown: false, into: &result)
-        }
-        if try store.syncState(accountId: account.id, type: Self.mappingState) == nil {
-            try store.setSyncState(Self.mappingVersion, accountId: account.id, type: Self.mappingState)
+            try await fullSync(refetchKnown: false, into: &result, progress: progress)
         }
         // Only after changes: a quiet check writes nothing (with many accounts checked every minute,
         // writes would keep refreshing the lists).
@@ -114,32 +121,58 @@ public actor GmailAccountSync {
         return mailboxes.count
     }
 
+    /// Marks the account for fetching every message again (see `refetchState`), from where Gmail's
+    /// history stands now.
+    private func startRefetch() throws {
+        try store.setSyncState("1", accountId: account.id, type: Self.refetchState)
+        try store.setSyncState(nil, accountId: account.id, type: Self.refetchDoneState)
+        try store.setSyncState(nil, accountId: account.id, type: Self.historyState)
+        try store.setSyncState(nil, accountId: account.id, type: Self.fullSyncState)
+    }
+
     /// Lists every message (newest first) and stores the ones not known yet; with `refetchKnown`, all
-    /// of them. Resumes where an interrupted one stopped: messages already stored are skipped, and
+    /// of them. Resumes where an interrupted one stopped: messages already stored are skipped (when
+    /// fetching all again, those it had done, less a margin: new mail moves the list down), and
     /// Gmail's history from where it started then catches up on what changed meanwhile.
-    private func fullSync(refetchKnown: Bool, into result: inout JMAPAccountSync.Result) async throws {
+    private func fullSync(
+        refetchKnown: Bool, into result: inout JMAPAccountSync.Result, progress: @Sendable (Int, Int) async -> Void
+    ) async throws {
+        // The account's size, for the progress bar, and (unless resuming) where history stands.
+        let profile = try await client.profile()
+        let total = profile.messagesTotal ?? 0
         let start: String
         if let started = try store.syncState(accountId: account.id, type: Self.fullSyncState) {
             start = started
         } else {
-            guard let current = try await client.profile().historyId else { throw GmailClient.APIError(status: 0, message: "no history id") }
+            guard let current = profile.historyId else { throw GmailClient.APIError(status: 0, message: "no history id") }
             start = current
             try store.setSyncState(start, accountId: account.id, type: Self.fullSyncState)
         }
         let known = refetchKnown ? [] : try store.remoteIDs(accountId: account.id)
+        var skip = refetchKnown ? max(0, (Int(try store.syncState(accountId: account.id, type: Self.refetchDoneState) ?? "") ?? 0) - 50) : 0
         var listed = Set<String>()
+        var read = 0
         var token: String?
+        await progress(0, total)
         repeat {
             let page = try await client.listMessages(pageToken: token)
             token = page.next
             let ids = page.messages.map(\.id)
             listed.formUnion(ids)
-            // In chunks, so the list fills in as it goes.
-            for chunk in ids.filter({ !known.contains($0) }).chunked(100) {
+            let done = min(skip, ids.count)
+            skip -= done
+            let todo = ids.dropFirst(done).filter { !known.contains($0) }
+            read += ids.count - todo.count  // already done before quitting
+            // In chunks, so the list fills in as it goes (and quitting loses at most one's work).
+            for chunk in todo.chunked(50) {
                 let (found, _) = try await metadata(Array(chunk))
                 try store.upsertMessages(accountId: account.id, found.compactMap(incoming))
                 result.created += found.count
+                read += chunk.count
+                if refetchKnown { try store.setSyncState(String(read), accountId: account.id, type: Self.refetchDoneState) }
+                await progress(read, max(total, read))
             }
+            if todo.isEmpty { await progress(read, max(total, read)) }
             try store.recountMailboxes(accountId: account.id)
         } while token != nil
         let gone = try store.remoteIDs(accountId: account.id).subtracting(listed)
@@ -147,8 +180,12 @@ public actor GmailAccountSync {
             try store.deleteMessages(accountId: account.id, remoteIds: Array(gone))
             result.destroyed += gone.count
         }
+        // Done: from now on, Gmail's history (and the mailboxes as they're mapped now).
         try store.setSyncState(start, accountId: account.id, type: Self.historyState)
-        try store.setSyncState(nil, accountId: account.id, type: Self.fullSyncState)
+        try store.setSyncState(Self.mappingVersion, accountId: account.id, type: Self.mappingState)
+        for state in [Self.fullSyncState, Self.refetchState, Self.refetchDoneState] {
+            try store.setSyncState(nil, accountId: account.id, type: state)
+        }
         var catchUp = JMAPAccountSync.Result()
         try await syncHistory(since: start, into: &catchUp)
         result.updated += catchUp.updated

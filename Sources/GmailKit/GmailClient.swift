@@ -78,6 +78,9 @@ public struct GmailClient: Sendable {
     public func message(_ id: String, format: Format, headers: [String] = []) async throws -> Message? {
         var query = [URLQueryItem(name: "format", value: format.rawValue)]
         query += headers.map { URLQueryItem(name: "metadataHeaders", value: $0) }
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_REQUESTS"] != nil { NSLog("MMJ gmail get \(format.rawValue) \(id)") }
+        #endif
         do {
             return try decode(Message.self, try await get("messages/\(id)", query: query, cost: format.cost))
         } catch let error as APIError where error.status == 404 {

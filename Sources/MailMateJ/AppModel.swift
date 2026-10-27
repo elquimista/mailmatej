@@ -85,6 +85,13 @@ final class AppModel {
         dockCounters = DockCounters(store: store)
         dockCounters?.update()
         #if DEBUG
+            if let id = ProcessInfo.processInfo.environment["MMJ_DEBUG_FORGET_MAIL"] {
+                // An account's messages and sync state gone, as before its first sync (for testing it).
+                try? store.deleteMessages(accountId: id, remoteIds: Array((try? store.remoteIDs(accountId: id)) ?? []))
+                for type in ["Email", "Mailbox", "GmailHistory", "GmailMapping", "GmailFullStart", "GmailRefetch", "GmailRefetchDone"] {
+                    try? store.setSyncState(nil, accountId: id, type: type)
+                }
+            }
             addDevAccountsIfRequested()
             if ProcessInfo.processInfo.environment["MMJ_KEYCHAIN_SELFTEST"] != nil { keychainSelfTest() }
         #endif
@@ -1165,9 +1172,24 @@ final class AppModel {
         return s.phase == .syncing || s.isDownloading
     }
 
-    /// "Downloaded X of Y messages" while an account isn't fully stored locally.
+    /// Message headers downloaded and in all, over the accounts still downloading theirs in a first (or
+    /// full) sync: just `accountIds`' when given. Nil when none is.
+    func headerProgress(accountIds: Set<String>?) -> (downloaded: Int, total: Int)? {
+        let reading = statuses.values.filter { status in
+            status.isDownloadingHeaders && status.headersTotal > 0 && (accountIds?.contains(status.accountId) ?? true)
+        }
+        guard !reading.isEmpty else { return nil }
+        return (reading.map(\.headersDownloaded).reduce(0, +), reading.map(\.headersTotal).reduce(0, +))
+    }
+
+    /// "Downloaded X of Y message headers" while an account's first sync lists its mail, then
+    /// "Downloaded X of Y messages" while it isn't fully stored locally.
     func downloadInfo(accountId: String) -> String? {
-        guard let s = statuses[accountId], s.total > 0, s.downloaded < s.total else { return nil }
+        guard let s = statuses[accountId] else { return nil }
+        if s.isDownloadingHeaders, s.headersTotal > 0 {
+            return "Downloaded \(s.headersDownloaded.formatted()) of \(s.headersTotal.formatted()) message headers"
+        }
+        guard s.total > 0, s.downloaded < s.total else { return nil }
         return "Downloaded \(s.downloaded.formatted()) of \(s.total.formatted()) messages"
     }
 

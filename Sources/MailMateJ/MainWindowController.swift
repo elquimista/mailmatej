@@ -538,20 +538,46 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         updateProgress()
     }
 
-    /// The sidebar's progress bar: how much of the selected mailbox is downloaded, while messages are
-    /// downloading and it isn't all here yet.
+    /// The sidebar's progress bar: first, while accounts behind the selected mailbox are still
+    /// downloading their message headers (a first sync, which fills the lists), how far they've got;
+    /// then how much of the selected mailbox is downloaded, while whole messages are downloading and it
+    /// isn't all here yet.
     private func updateProgress() {
         #if DEBUG
             if let shown = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_PROGRESS"] ?? "") {  // e.g. "0.4"
-                return sidebar.showProgress(true, fraction: shown, text: "Downloading \(Int(shown * 560)) of 560")
+                return sidebar.showProgress(true, fraction: shown, texts: ["Downloading \(Int(shown * 560)) of 560", "\(Int(shown * 560)) of 560"])
             }
         #endif
+        if hasMailbox, let headers = model.headerProgress(accountIds: accountsShown(in: scope)),
+            headers.downloaded < headers.total
+        {
+            let count = "\(headers.downloaded.formatted()) of \(headers.total.formatted())"
+            return sidebar.showProgress(
+                true, fraction: Double(headers.downloaded) / Double(headers.total),
+                texts: ["Downloading headers \(count)", "Headers \(count)", count])
+        }
         guard hasMailbox, model.downloadProgress != nil, let counts = try? model.store.downloadCounts(scope: scope),
             counts.total > 0, counts.downloaded < counts.total
         else { return sidebar.showProgress(false) }
+        let count = "\(counts.downloaded.formatted()) of \(counts.total.formatted())"
         sidebar.showProgress(
-            true, fraction: Double(counts.downloaded) / Double(counts.total),
-            text: "Downloading \(counts.downloaded.formatted()) of \(counts.total.formatted())")
+            true, fraction: Double(counts.downloaded) / Double(counts.total), texts: ["Downloading \(count)", count])
+    }
+
+    /// The accounts a mailbox shows mail of, when that's one account (its mailboxes, its account row);
+    /// nil for mailboxes across accounts.
+    private func accountsShown(in scope: MessageScope) -> Set<String>? {
+        switch scope {
+        case .mailbox(let id), .flaggedInMailbox(let id):
+            return (try? model.store.mailboxes())?.first { $0.id == id }.map { [$0.accountId] }
+        case .account(let id), .flaggedInAccount(let id), .allInAccount(let id), .smartAccount(_, let id),
+            .smartAccountValue(_, let id, _, _):
+            return [id]
+        case .within(_, let child):
+            return accountsShown(in: child)
+        default:
+            return nil
+        }
     }
 
     /// "Subject — Mailbox (N messages)", as MailMate titles its window.

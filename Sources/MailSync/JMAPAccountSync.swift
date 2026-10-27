@@ -29,9 +29,10 @@ public actor JMAPAccountSync {
         public var arrived: [String] = []
     }
 
-    /// One full sync round: mailboxes, identities, then emails.
+    /// One full sync round: mailboxes, identities, then emails. `progress` hears how many message
+    /// headers a first full sync has downloaded, and of how many (not called for later changes).
     @discardableResult
-    public func sync() async throws -> Result {
+    public func sync(progress: @escaping @Sendable (_ downloaded: Int, _ total: Int) async -> Void = { _, _ in }) async throws -> Result {
         let session = try await client.currentSession()
         let accountId = try remoteAccountId(session)
         syncLog.notice(
@@ -42,7 +43,7 @@ public actor JMAPAccountSync {
             try await syncIdentities(accountId)
             lastIdentitySync = Date()
         }
-        try await syncEmails(accountId, session: session, into: &result)
+        try await syncEmails(accountId, session: session, into: &result, progress: progress)
         try await fillInReferences(accountId)
         try await fillInRecipientGroups(accountId)
         try await fillInSentZones(accountId)
@@ -310,7 +311,9 @@ public actor JMAPAccountSync {
 
     // MARK: Emails
 
-    private func syncEmails(_ accountId: String, session: Session, into result: inout Result) async throws {
+    private func syncEmails(
+        _ accountId: String, session: Session, into result: inout Result, progress: @Sendable (Int, Int) async -> Void
+    ) async throws {
         let pageSize = min(session.maxObjectsInGet, 500)
         if let since = try store.syncState(accountId: account.id, type: "Email") {
             do {
@@ -320,16 +323,19 @@ public actor JMAPAccountSync {
                 // Server can't give a delta (state too old): fall back to a full sync.
             }
         }
-        try await initialEmailSync(accountId, pageSize: pageSize, into: &result)
+        try await initialEmailSync(accountId, pageSize: pageSize, into: &result, progress: progress)
     }
 
     /// Pages through every email, newest first. The state captured on the first page is
     /// saved at the end; anything that changes meanwhile is picked up by the next `/changes`.
-    private func initialEmailSync(_ accountId: String, pageSize: Int, into result: inout Result) async throws {
+    private func initialEmailSync(
+        _ accountId: String, pageSize: Int, into result: inout Result, progress: @Sendable (Int, Int) async -> Void
+    ) async throws {
         var anchor: String?
         var position = 0
         var firstState: String?
         var seen = Set<String>()
+        var total: Int?
 
         while true {
             var queryArgs: [String: JSONValue] = [
@@ -343,6 +349,7 @@ public actor JMAPAccountSync {
             } else {
                 queryArgs["position"] = .number(Double(position))
             }
+            if total == nil { queryArgs["calculateTotal"] = true }  // for the progress bar
             var request = JMAPRequest()
             let query = request.call("Email/query", queryArgs)
             let get = request.call("Email/get", [
@@ -364,9 +371,11 @@ public actor JMAPAccountSync {
             }
             let page = try response.decode(GetResponse<Email>.self, get)
             if firstState == nil { firstState = page.state }
+            if total == nil { total = (try? response.decode(QueryResponse.self, query))?.total }
 
             try store.upsertMessages(accountId: account.id, page.list.map(Self.incoming))
             for email in page.list where seen.insert(email.id).inserted { result.created += 1 }
+            await progress(seen.count, max(total ?? 0, seen.count))
 
             if ids.count < pageSize { break }
             anchor = ids.last
