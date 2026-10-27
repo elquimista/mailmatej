@@ -411,7 +411,8 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         return (header, part)
     }
 
-    /// The pop-up's title, as MailMate writes nested fields: "From ‣ Domain" ("From" with No Specifier).
+    /// The pop-up's title, as MailMate writes nested fields: "From ‣ Domain" ("From" with No Specifier),
+    /// each part as the menu names it ("» Source ‣ Mailbox").
     public var title: String {
         if let (header, part) = address {
             return part == .all ? header.title : "\(header.title) \u{2023} \(part.path)"
@@ -432,13 +433,13 @@ public struct SmartField: RawRepresentable, Codable, Hashable, Sendable {
         case .keyword: return "Tags/Keywords"
         case .status: return "Message is"  // with its status: "Message is Read"
         case .date: return "Date"
-        case .dateLocal: return "Date \u{2023} Local"
+        case .dateLocal: return "Date \u{2023} \u{00BB} Local"
         case .received: return "Date \u{2023} Received"
         case .sent: return "Date \u{2023} Sent"
-        case .mailbox: return "Source \u{2023} Mailbox"
-        case .account: return "Source"  // » Source's No Specifier
+        case .mailbox: return "\u{00BB} Source \u{2023} Mailbox"
+        case .account: return "\u{00BB} Source"  // its No Specifier
         default:
-            if let (part, local) = datePart { return "Date \u{2023} \(local ? "Local \u{2023} " : "")\(part.title)" }
+            if let (part, local) = datePart { return "Date \u{2023} \(local ? "\u{00BB} Local \u{2023} " : "")\(part.title)" }
             return rawValue
         }
     }

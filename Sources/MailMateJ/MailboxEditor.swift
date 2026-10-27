@@ -656,6 +656,12 @@ private class SubmailboxesLayout {
         if let item = valuePopup.itemArray.first(where: { $0.representedObject as? String == value }) { valuePopup.select(item) }
         valuePopup.isEnabled = on
         unlessOne.isEnabled = on
+        // Like a condition's field pop-up, it grows to show its whole title ("Date ‣ » Local ‣ Year").
+        if let cell = valuePopup.cell, let font = valuePopup.font {
+            let text = ceil((valuePopup.titleOfSelectedItem as NSString? ?? "").size(withAttributes: [.font: font]).width)
+            let padding = valuePopup.frame.width - cell.titleRect(forBounds: valuePopup.bounds).width
+            valuePopup.frame.size.width = max(154, ceil(padding + text))
+        }
     }
 }
 
