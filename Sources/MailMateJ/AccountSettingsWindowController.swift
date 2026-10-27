@@ -35,6 +35,7 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
     private let typePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var serverLabels: [NSTextField] = []
     private let gmailNote = NSTextField(wrappingLabelWithString: "")
+    private let helpButton = NSButton(title: "", target: nil, action: nil)
     /// Account Type was picked by hand, so the address no longer decides it.
     private var typeChosen = false
     /// The server was filled in from the address (not typed), so a new address may replace it.
@@ -154,10 +155,11 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         gmailNote.isHidden = true
         content.addSubview(gmailNote)
 
-        let help = NSButton(title: "", target: self, action: #selector(showHelp(_:)))
-        help.bezelStyle = .helpButton
-        help.frame = NSRect(x: 17, y: 248, width: 25, height: 25)
-        content.addSubview(help)
+        helpButton.target = self
+        helpButton.action = #selector(showHelp(_:))
+        helpButton.bezelStyle = .helpButton
+        helpButton.frame = NSRect(x: 17, y: 248, width: 25, height: 25)
+        content.addSubview(helpButton)
 
         for (button, x) in [(cancelButton, 271.0), (addButton, 367.0)] {
             button.bezelStyle = .push
@@ -175,6 +177,9 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         progress.isDisplayedWhenStopped = false
         progress.frame = NSRect(x: 245, y: 252, width: 16, height: 16)
         content.addSubview(progress)
+
+        // The bottom row stays at the bottom as the window fits its type (a flipped view's top margin).
+        for view in [helpButton, cancelButton, addButton, progress] { view.autoresizingMask = .minYMargin }
 
         return content
     }
@@ -346,7 +351,27 @@ final class AccountSettingsWindowController: NSWindowController, NSWindowDelegat
         }
         gmailNote.isHidden = !gmail || editing != nil
         if editing == nil { addButton.title = gmail ? "Sign In…" : "Add" }
+        fitHeight()
         window?.recalculateKeyViewLoop()
+    }
+
+    /// Ends the window 12 pt below its last row, as below the JMAP server section's Password: Gmail's
+    /// sign-in note when adding, else its Account Type row.
+    private func fitHeight() {
+        guard let window else { return }
+        let last: CGFloat
+        if !isGmail {
+            last = passwordField.frame.maxY
+        } else if !gmailNote.isHidden {
+            last = gmailNote.frame.minY + gmailNote.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: gmailNote.frame.width, height: 1000)).height
+        } else {
+            last = 125 + 21  // Account Type's row
+        }
+        let height = (last + 12 + 32 + 12).rounded()  // the buttons, then MailMate's 12 pt margin
+        guard let content = window.contentView, content.frame.height != height else { return }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: content.frame.width, height: height)))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)  // the top stays put
+        window.setFrame(frame, display: true, animate: window.isVisible)
     }
 
     private func setType(_ type: AccountType) {
