@@ -2,9 +2,10 @@ import Foundation
 
 /// Gmail over IMAP (imap.gmail.com), signed in with the same Google token as the API (XOAUTH2), for
 /// downloading whole messages fast: IMAP isn't metered per message as the Gmail API is (60 quota units
-/// a message against 6,000 a minute), only by volume (about 2.5 GB a day). Read-only (mailboxes are
-/// EXAMINEd, bodies fetched with BODY.PEEK). Gmail's extensions give what the API would: each message's
-/// Gmail id (X-GM-MSGID, the API's id in decimal), thread (X-GM-THRID) and labels (X-GM-LABELS).
+/// a message against 6,000 a minute), only by volume (about 2.5 GB a day). Downloads only read
+/// (mailboxes EXAMINEd, bodies fetched with BODY.PEEK); the one thing written is flags the API has
+/// nothing for (replied, forwarded). Gmail's extensions give what the API would: each message's Gmail id
+/// (X-GM-MSGID, the API's id in decimal), thread (X-GM-THRID) and labels (X-GM-LABELS).
 public actor GmailIMAP {
     public struct Message: Sendable {
         public var uid: UInt32
@@ -137,6 +138,66 @@ public actor GmailIMAP {
                 labels: labels, flags: flags, internalDate: fields["INTERNALDATE"]?.text.flatMap(Self.internalDate),
                 size: fields["RFC822.SIZE"]?.atom.flatMap { Int($0) }, raw: fields["BODY[]"]?.data)
         }
+    }
+
+    // MARK: Flags
+
+    /// A mailbox opened with CONDSTORE (RFC 7162): what its UIDs and mod-sequences are good for.
+    public struct Opened: Sendable {
+        public var uidValidity: UInt32?
+        public var highestModSeq: UInt64?
+    }
+
+    /// Opens a mailbox with CONDSTORE: read-write (SELECT), or read-only (EXAMINE).
+    public func open(_ mailbox: String, readOnly: Bool) async throws -> Opened {
+        Self.opened(try await command("\(readOnly ? "EXAMINE" : "SELECT") \(Self.quoted(mailbox)) (CONDSTORE)"))
+    }
+
+    /// UIDs of the open mailbox's messages an IMAP search finds ("ANSWERED", "X-GM-MSGID 123…").
+    public func search(_ criteria: String) async throws -> [UInt32] {
+        Self.searchResults(try await command("UID SEARCH \(criteria)"))
+    }
+
+    /// SELECT's or EXAMINE's untagged responses' codes: "OK [UIDVALIDITY 3] …", "OK [HIGHESTMODSEQ 9] …".
+    static func opened(_ responses: [[IMAPValue]]) -> Opened {
+        var opened = Opened()
+        for code in responses.joined().compactMap(\.atom) where code.hasPrefix("[") {
+            let parts = code.dropFirst().dropLast().split(separator: " ")
+            guard parts.count == 2 else { continue }
+            switch parts[0].uppercased() {
+            case "UIDVALIDITY": opened.uidValidity = UInt32(parts[1])
+            case "HIGHESTMODSEQ": opened.highestModSeq = UInt64(parts[1])
+            default: break
+            }
+        }
+        return opened
+    }
+
+    /// The UIDs in SEARCH responses ("SEARCH 4 9 12 (MODSEQ 917)": CONDSTORE's list is skipped).
+    static func searchResults(_ responses: [[IMAPValue]]) -> [UInt32] {
+        responses.flatMap { response -> [UInt32] in
+            guard response.first?.atom?.uppercased() == "SEARCH" else { return [] }
+            return response.dropFirst().compactMap { $0.atom.flatMap { UInt32($0) } }
+        }
+    }
+
+    /// Flags of the open mailbox's messages, with their Gmail ids: of these UIDs, or of all whose flags or
+    /// labels changed after the mod-sequence `changedSince` (CONDSTORE).
+    public func flags(_ uids: [UInt32]?, changedSince: UInt64? = nil) async throws -> [(gmailId: String, flags: Set<String>)] {
+        if let uids, uids.isEmpty { return [] }
+        let modifier = changedSince.map { " (CHANGEDSINCE \($0))" } ?? ""
+        return try await command("UID FETCH \(uids.map(Self.uidSet) ?? "1:*") (UID X-GM-MSGID FLAGS)\(modifier)").compactMap { response in
+            guard let fields = Self.fetchFields(response), let id = fields["X-GM-MSGID"]?.atom.flatMap({ UInt64($0) }),
+                case .list(let values)? = fields["FLAGS"]
+            else { return nil }
+            return (String(id, radix: 16), Set(values.compactMap(\.atom)))
+        }
+    }
+
+    /// Adds or removes flags on messages of the open (SELECTed) mailbox.
+    public func store(_ uids: [UInt32], flags: [String], add: Bool) async throws {
+        guard !uids.isEmpty, !flags.isEmpty else { return }
+        _ = try await command("UID STORE \(Self.uidSet(uids)) \(add ? "+" : "-")FLAGS.SILENT (\(flags.joined(separator: " ")))")
     }
 
     // MARK: IDLE

@@ -355,6 +355,29 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Which of `keywords` an account's messages have, by remote id: of these messages, or (nil) of every
+    /// message with any of them.
+    public func keywords(accountId: String, remoteIds: [String]?, among keywords: Set<String>) throws -> [String: Set<String>] {
+        guard !keywords.isEmpty, remoteIds?.isEmpty != true else { return [:] }
+        return try dbPool.read { db in
+            var found: [String: Set<String>] = [:]
+            let names = Array(keywords)
+            let sql = """
+                SELECT m.remoteId, k.keyword FROM message_keyword k JOIN message m ON m.id = k.messageId
+                WHERE m.accountId = ? AND k.keyword IN (\(Self.placeholders(names.count)))
+                """
+            for chunk in remoteIds.map({ $0.chunked(500).map(Array.init) }) ?? [[]] {
+                let rows = remoteIds == nil
+                    ? try Row.fetchAll(db, sql: sql, arguments: StatementArguments([accountId] + names))
+                    : try Row.fetchAll(
+                        db, sql: sql + " AND m.remoteId IN (\(Self.placeholders(chunk.count)))",
+                        arguments: StatementArguments([accountId] + names + chunk))
+                for row in rows { found[row["remoteId"], default: []].insert(row["keyword"]) }
+            }
+            return found
+        }
+    }
+
     /// The thread of an account's message with this Message-ID (without angle brackets), if it's stored.
     public func threadId(accountId: String, messageIdHeader: String) throws -> String? {
         try dbPool.read { db in

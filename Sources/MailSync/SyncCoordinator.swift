@@ -258,6 +258,18 @@ public actor SyncCoordinator {
     }
 
     #if DEBUG
+        public func debugGmailIMAPFlags(accountId: String, remoteId: String) async throws -> [Set<String>] {
+            try await gmailEngines[accountId]?.debugIMAPFlags(remoteId: remoteId) ?? []
+        }
+
+        public func debugGmailFlags(accountId: String, fromScratch: Bool) async throws {
+            try await gmailEngines[accountId]?.debugCheckFlags(fromScratch: fromScratch)
+        }
+
+        public func debugGmailStoreFlag(accountId: String, remoteId: String, flag: String, add: Bool) async throws {
+            try await gmailEngines[accountId]?.debugStoreFlag(remoteId: remoteId, flag: flag, add: add)
+        }
+
         public func debugGmailDrafts(accountId: String) async throws -> [String] {
             try await gmailEngines[accountId]?.debugDraftMessageIds() ?? []
         }

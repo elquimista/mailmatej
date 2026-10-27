@@ -134,4 +134,12 @@ import Testing
         #expect(plain.type == "text/plain" && String(decoding: plain.content, as: UTF8.self) == "Just text")
         #expect(MailHeaders.quotedPrintable(bytes: Array("a=3Db=\r\nc= \r\nd".utf8)) == Data("a=bcd".utf8))
     }
+
+    @Test func searchesForTheIMAPFlags() {
+        #expect(GmailAccountSync.searchKey("\\Answered") == "ANSWERED")
+        #expect(GmailAccountSync.searchKey("$Forwarded") == "KEYWORD $Forwarded")
+        #expect(GmailAccountSync.anyOf(["a"]) == "a")
+        #expect(GmailAccountSync.anyOf(["a", "b", "c"]) == "OR a OR b c")
+        #expect(GmailAccountSync.imapKeywords == ["$answered": "\\Answered", "$forwarded": "$Forwarded"])
+    }
 }

@@ -33,6 +33,27 @@ struct GmailIMAPTests {
         #expect(ok.first?.atom == "m3" && ok[1].atom == "OK" && ok[2].atom == "[READ-ONLY]")
     }
 
+    @Test func readsCondstoreCodesAndSearches() {
+        let responses = [
+            #"* FLAGS (\Answered \Flagged \Draft \Deleted \Seen $Forwarded $NotPhishing $Phishing)"#,
+            #"* OK [PERMANENTFLAGS (\Answered \Flagged \Draft \Deleted \Seen $Forwarded \*)] Flags permitted."#,
+            "* OK [UIDVALIDITY 11] UIDs valid.",
+            "* 91234 EXISTS",
+            "* OK [UIDNEXT 99112] Predicted next UID.",
+            "* OK [HIGHESTMODSEQ 4182733] Highest",
+        ].map { Array(IMAPResponseParser.parse([text($0)]).dropFirst()) }
+        let opened = GmailIMAP.opened(responses)
+        #expect(opened.uidValidity == 11 && opened.highestModSeq == 4_182_733)
+        let search = [Array(IMAPResponseParser.parse([text("* SEARCH 4 9 12 (MODSEQ 917)")]).dropFirst())]
+        #expect(GmailIMAP.searchResults(search) == [4, 9, 12])
+        #expect(GmailIMAP.searchResults([Array(IMAPResponseParser.parse([text("* SEARCH")]).dropFirst())]).isEmpty)
+        // CHANGEDSINCE's FETCH has MODSEQ beside the items asked for.
+        let fetch = IMAPResponseParser.parse([text(#"* 5 FETCH (UID 12 X-GM-MSGID 1612345678901234568 FLAGS (\Answered \Seen $Forwarded) MODSEQ (4182730))"#)])
+        let fields = GmailIMAP.fetchFields(Array(fetch.dropFirst()))
+        guard case .list(let flags)? = fields?["FLAGS"] else { Issue.record("no flags"); return }
+        #expect(flags.compactMap(\.atom) == ["\\Answered", "\\Seen", "$Forwarded"])
+    }
+
     @Test func writesUIDSetsAsRanges() {
         #expect(GmailIMAP.uidSet([5, 1, 2, 3, 9, 12, 13, 14, 20]) == "1:3,5,9,12:14,20")
         #expect(GmailIMAP.uidSet([7]) == "7")

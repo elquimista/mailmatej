@@ -67,6 +67,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_FLAGS"] {
+                    // "<account id>|<subject>|<step>,…" on the account's message with that subject: answer,
+                    // unanswer, forward, unforward (as replying or forwarding marks it), ext+answered,
+                    // ext-answered, ext+forwarded, ext-forwarded (the IMAP flag set elsewhere, not here),
+                    // check (the flag check), scratch (a first flag check again), read (toggled in Gmail
+                    // through its API, twice), report, wait=<seconds>.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    let id = parts[0], model: AppModel = AppModel.shared
+                    guard let messageId = ((try? model.store.messageIDs(scope: .account(id))) ?? []).first(where: { (try? model.store.detail(id: $0))?.subject == parts[1] }),
+                        let ref = (try? model.store.refs(ids: [messageId]))?.first
+                    else { return NSLog("MMJ flags: no message “\(parts[1])”") }
+                    for step in parts[2].split(separator: ",").map(String.init) {
+                        do {
+                            switch step {
+                            case "answer", "unanswer", "forward", "unforward":
+                                let keyword = step.hasSuffix("answer") ? "$answered" : "$forwarded", on = !step.hasPrefix("un")
+                                try model.store.setKeyword(keyword, on, messageIds: [messageId])
+                                try await model.coordinatorForDebug.update(
+                                    accountId: id, remoteIds: [ref.remoteId], patch: ["keywords/\(keyword)": on ? .bool(true) : .null])
+                            case let ext where ext.hasPrefix("ext"):
+                                let flag = ext.hasSuffix("answered") ? "\\Answered" : "$Forwarded"
+                                try await model.coordinatorForDebug.debugGmailStoreFlag(accountId: id, remoteId: ref.remoteId, flag: flag, add: ext.hasPrefix("ext+"))
+                            case "check", "scratch":
+                                try await model.coordinatorForDebug.debugGmailFlags(accountId: id, fromScratch: step == "scratch")
+                            case "read":
+                                await model.debugRemoteReadChange(accountId: id, subject: parts[1])
+                            case "imapflags":  // all of them, as Gmail's IMAP has them
+                                NSLog("MMJ flags \(ref.remoteId) in IMAP: \(try await model.coordinatorForDebug.debugGmailIMAPFlags(accountId: id, remoteId: ref.remoteId).map { $0.sorted() })")
+                            case "report":
+                                NSLog("MMJ flags \(ref.remoteId): \((try? model.store.keywords(messageId: messageId))?.sorted() ?? [])")
+                            case let wait where wait.hasPrefix("wait="):
+                                try? await Task.sleep(for: .seconds(Double(wait.dropFirst(5)) ?? 1))
+                            default: NSLog("MMJ flags: no step \(step)")
+                            }
+                        } catch {
+                            NSLog("MMJ flags \(step): \(error)")
+                        }
+                    }
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_COMPOSE"] {
                     // "<account id>|<step>,…", as the compose window does: identities (logs them), draft (saves a
                     // test draft to the account's own address, replacing the last), load (reopens it), discard,

@@ -43,6 +43,12 @@ public actor GmailAccountSync {
     private var lastIdentitySync: Date?
     /// Drafts' own ids (Gmail deletes a draft by it), by their messages' ids.
     private var draftIds: [String: String] = [:]
+    /// All Mail's IMAP name (it depends on the account's language).
+    private var allMailName: String?
+    /// When the replied and forwarded marks were last checked (see `syncFlags`), and whether the Inbox
+    /// watch has seen a change since.
+    private var lastFlagCheck: Date?
+    private var flagsDue = true
 
     /// The headers stored for every message.
     static let headerNames = ["From", "Sender", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
@@ -107,6 +113,20 @@ public actor GmailAccountSync {
         // writes would keep refreshing the lists).
         if result.created + result.updated + result.destroyed > 0 || result.mailboxes > 0 {
             try store.recountMailboxes(accountId: account.id)
+        }
+        // The replied and forwarded marks, which only IMAP has: when the Inbox watch saw a change, else
+        // every few minutes; not while a full sync is under way (its messages aren't all stored yet).
+        if try store.syncState(accountId: account.id, type: Self.historyState) != nil,
+            try store.syncState(accountId: account.id, type: Self.refetchState) == nil,
+            flagsDue || lastFlagCheck.map({ Date().timeIntervalSince($0) > Self.flagCheckInterval }) ?? true
+        {
+            do {
+                try await syncFlags()
+            } catch {
+                syncLog.error("Gmail flags for \(self.account.name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
+            }
+            lastFlagCheck = Date()
+            flagsDue = false
         }
         return result
     }
@@ -267,7 +287,7 @@ public actor GmailAccountSync {
                         else { continue }
                         incoming.append(updated)
                     }
-                    try store.upsertMessages(accountId: account.id, incoming)
+                    try upsert(incoming)
                     result.updated += incoming.count
                     done += chunk.count
                     await progress(done, entries.count)
@@ -397,7 +417,7 @@ public actor GmailAccountSync {
             let headersOnly = changed.filter { known.contains($0) && !refreshed.contains($0) && !gone.contains($0) }
             let (metadata, missingMetadata) = try await fetch(headersOnly, format: .metadata)
             let messages = metadata.compactMap(incoming)
-            try store.upsertMessages(accountId: account.id, messages)
+            try upsert(messages)
             let (whole, missingWhole) = try await fetch(new, format: .raw)
             let stored = try storeWhole(whole)
             deleted.formUnion(gone + missingMetadata + missingWhole)
@@ -450,7 +470,7 @@ public actor GmailAccountSync {
             incoming.append(stored)
             copies.append((message.id, data, body, parts))
         }
-        try store.upsertMessages(accountId: account.id, incoming)
+        try upsert(incoming)
         let ids = try store.messageIDsByRemoteID(accountId: account.id, remoteIds: copies.map(\.id))
         for copy in copies {
             guard let id = ids[copy.id] else { continue }
@@ -477,7 +497,7 @@ public actor GmailAccountSync {
             else { continue }
             incoming.append(stored)
         }
-        try store.upsertMessages(accountId: account.id, incoming)
+        try upsert(incoming)
         return (incoming.map(\.remoteId), missing)
     }
 
@@ -498,16 +518,17 @@ public actor GmailAccountSync {
                 try await imap.connect()
                 try await imap.examine("INBOX")
                 backoff = 5
-                onChange()  // catch up on what happened while not watching
-                #if DEBUG
-                    let logs = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil
-                    let signal: @Sendable () -> Void = {
-                        if logs { NSLog("MMJ gmail idle: change announced") }
+                // A change (or catching up on what happened while not watching) may be in flags too.
+                let signal: @Sendable () -> Void = {
+                    #if DEBUG
+                        if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil { NSLog("MMJ gmail idle: change announced") }
+                    #endif
+                    Task {
+                        await self.flagsMayHaveChanged()
                         onChange()
                     }
-                #else
-                    let signal = onChange
-                #endif
+                }
+                signal()
                 while !Task.isCancelled { try await imap.idle(for: .seconds(240), onChange: signal) }
             } catch {
                 syncLog.notice("Gmail watch for \(self.account.name, privacy: .public) stopped: \(ErrorText.technical(error), privacy: .public)")
@@ -527,13 +548,15 @@ public actor GmailAccountSync {
     // MARK: Changes
 
     /// Makes a change the app describes as JMAP does (see `JMAPAccountSync.update`) with Gmail's labels:
-    /// `keywords/$seen` and `$flagged` are the Unread and Starred labels; a message's new set of
+    /// `keywords/$seen` and `$flagged` are the Unread and Starred labels, `$answered` and `$forwarded` IMAP
+    /// flags (see `imapKeywords`); a message's new set of
     /// mailboxes (`mailboxIds`) adds their labels and takes off the other mailboxes' (moving, as into a
     /// folder: Sent and Drafts stay); `mailboxIds/<id>` adds or takes off one. Archive is MailMate's
     /// "[Gmail]/Archive" label, made the first time it's needed.
     public func update(remoteIds: [String], patch: [String: JSONValue]) async throws {
         guard !remoteIds.isEmpty else { return }
         var add = Set<String>(), remove = Set<String>()
+        var flagsOn = Set<String>(), flagsOff = Set<String>()
         func set(_ label: String, _ on: Bool) {
             if on { add.insert(label); remove.remove(label) } else { remove.insert(label); add.remove(label) }
         }
@@ -560,17 +583,23 @@ public actor GmailAccountSync {
                 } else if box != Self.archive || archiveLabel != nil {
                     set(box == Self.archive ? archiveLabel! : box, false)
                 }
+            case _ where key.hasPrefix("keywords/"):
+                // Replied and forwarded are IMAP flags; other keywords (tags, $junk) have no Gmail equivalent.
+                guard let flag = Self.imapKeywords[String(key.dropFirst("keywords/".count))] else { break }
+                if on { flagsOn.insert(flag); flagsOff.remove(flag) } else { flagsOff.insert(flag); flagsOn.remove(flag) }
             default:
-                break  // other keywords (tags, $junk) have no Gmail equivalent
+                break
             }
         }
-        guard !add.isEmpty || !remove.isEmpty else { return }
-        do {
-            try await client.modify(remoteIds, add: Array(add), remove: Array(remove))
-        } catch let error as GmailClient.APIError where error.status == 400 || error.status == 404 {
-            try? await restore(remoteIds: remoteIds)  // back to Gmail's state
-            throw JMAPAccountSync.ChangeRefused(count: remoteIds.count, deleting: false, reason: error.message)
+        if !add.isEmpty || !remove.isEmpty {
+            do {
+                try await client.modify(remoteIds, add: Array(add), remove: Array(remove))
+            } catch let error as GmailClient.APIError where error.status == 400 || error.status == 404 {
+                try? await restore(remoteIds: remoteIds)  // back to Gmail's state
+                throw JMAPAccountSync.ChangeRefused(count: remoteIds.count, deleting: false, reason: error.message)
+            }
         }
+        if !flagsOn.isEmpty || !flagsOff.isEmpty { try await storeFlags(remoteIds, on: flagsOn, off: flagsOff) }
     }
 
     /// The label behind a mailbox: Archive's is "[Gmail]/Archive", made now if the account has none.
@@ -593,7 +622,7 @@ public actor GmailAccountSync {
     public func restore(remoteIds: [String]) async throws {
         let (refreshed, gone) = try await refresh(remoteIds.filter { store.blobs.contains(accountId: account.id, blobId: $0) })
         let (found, missing) = try await fetch(remoteIds.filter { !refreshed.contains($0) && !gone.contains($0) }, format: .metadata)
-        try store.upsertMessages(accountId: account.id, found.compactMap(incoming))
+        try upsert(found.compactMap(incoming))
         if !(missing + gone).isEmpty { try store.deleteMessages(accountId: account.id, remoteIds: missing + gone) }
     }
 
@@ -906,6 +935,140 @@ public actor GmailAccountSync {
         }
         try store.blobs.write(data, accountId: account.id, blobId: blobId)
         return data
+    }
+}
+
+// MARK: - IMAP flags
+
+extension GmailAccountSync {
+    /// The marks Gmail's API has nothing for, kept as IMAP flags as MailMate keeps them: the keyword
+    /// here, the flag there.
+    static let imapKeywords = ["$answered": "\\Answered", "$forwarded": "$Forwarded"]
+    /// Where the flag check left off in All Mail: "UIDVALIDITY HIGHESTMODSEQ".
+    static let flagsState = "GmailFlags"
+    /// How often the flags are checked when the Inbox watch announces nothing (changes elsewhere).
+    static let flagCheckInterval: TimeInterval = 300
+
+    func flagsMayHaveChanged() { flagsDue = true }
+
+    #if DEBUG
+        /// A flag check now; `fromScratch` as the first one is (every flagged message's).
+        public func debugCheckFlags(fromScratch: Bool) async throws {
+            if fromScratch { try store.setSyncState(nil, accountId: account.id, type: Self.flagsState) }
+            try await syncFlags()
+        }
+
+        /// A message's IMAP flags in All Mail, all of them, as Gmail has them.
+        public func debugIMAPFlags(remoteId: String) async throws -> [Set<String>] {
+            try await withAllMail { imap, _ in
+                guard let id = UInt64(remoteId, radix: 16) else { return [] }
+                return try await imap.flags(try await imap.search("X-GM-MSGID \(id)")).map(\.flags)
+            }
+        }
+
+        /// Sets or clears an IMAP flag on a message as another app would (not through the store).
+        public func debugStoreFlag(remoteId: String, flag: String, add: Bool) async throws {
+            try await storeFlags([remoteId], on: add ? [flag] : [], off: add ? [] : [flag])
+        }
+    #endif
+
+    /// Stores messages from Gmail's labels, keeping the marks only IMAP has (the API can't tell them, so
+    /// they stay as the flag check or this app left them).
+    func upsert(_ messages: [IncomingMessage]) throws {
+        guard !messages.isEmpty else { return }
+        let kept = try store.keywords(accountId: account.id, remoteIds: messages.map(\.remoteId), among: Set(Self.imapKeywords.keys))
+        try store.upsertMessages(accountId: account.id, messages.map { message in
+            guard let marks = kept[message.remoteId] else { return message }
+            var message = message
+            message.keywords = Array(Set(message.keywords).union(marks))
+            return message
+        })
+    }
+
+    /// Sets and clears IMAP flags on messages, found in All Mail by their Gmail ids (one in Spam or Trash
+    /// isn't there, and its marks don't matter). A lost connection counts as Gmail out of reach, so the
+    /// change waits in the queue.
+    func storeFlags(_ remoteIds: [String], on: Set<String>, off: Set<String>) async throws {
+        do {
+            try await withAllMail { imap, _ in
+                var uids: [UInt32] = []
+                for chunk in remoteIds.chunked(20) {
+                    let ids = chunk.compactMap { UInt64($0, radix: 16) }.map { "X-GM-MSGID \($0)" }
+                    if !ids.isEmpty { uids += try await imap.search(Self.anyOf(ids)) }
+                }
+                try await imap.store(uids, flags: Array(on), add: true)
+                try await imap.store(uids, flags: Array(off), add: false)
+            }
+        } catch GmailIMAP.IMAPError.closed {
+            throw URLError(.networkConnectionLost)
+        }
+    }
+
+    /// Brings the replied and forwarded marks in line with Gmail's IMAP flags, which its history doesn't
+    /// report: the first time, every flagged message's (and others' go); then those changed since
+    /// (CONDSTORE's CHANGEDSINCE).
+    func syncFlags() async throws {
+        let left = try store.syncState(accountId: account.id, type: Self.flagsState)?.split(separator: " ").compactMap { UInt64($0) }
+        let state = try await withAllMail { imap, opened -> String? in
+            guard let validity = opened.uidValidity, let modseq = opened.highestModSeq else { return nil }
+            if let left, left.count == 2, left[0] == UInt64(validity) {
+                guard modseq > left[1] else { return nil }
+                try self.applyFlags(try await imap.flags(nil, changedSince: left[1]), all: false)
+            } else {
+                let flagged = try await imap.search(Self.anyOf(Self.imapKeywords.values.sorted().map(Self.searchKey)))
+                try self.applyFlags(try await imap.flags(flagged), all: true)
+            }
+            return "\(validity) \(modseq)"
+        }
+        if let state { try store.setSyncState(state, accountId: account.id, type: Self.flagsState) }
+    }
+
+    /// Stores what IMAP says of messages' flags as their marks (`all`: these are every flagged message, so
+    /// the others' marks go). Only what changes is written.
+    private func applyFlags(_ fetched: [(gmailId: String, flags: Set<String>)], all: Bool) throws {
+        let current = try store.keywords(
+            accountId: account.id, remoteIds: all ? nil : fetched.map(\.gmailId), among: Set(Self.imapKeywords.keys))
+        var wanted: [String: Set<String>] = [:]
+        for (id, flags) in fetched {
+            let lowered = Set(flags.map { $0.lowercased() })
+            wanted[id] = Set(Self.imapKeywords.filter { lowered.contains($0.value.lowercased()) }.map(\.key))
+        }
+        var on: [String: [String]] = [:], off: [String: [String]] = [:]
+        for id in Set(wanted.keys).union(current.keys) {
+            let want = wanted[id] ?? [], have = current[id] ?? []
+            for keyword in want.subtracting(have) { on[keyword, default: []].append(id) }
+            for keyword in have.subtracting(want) { off[keyword, default: []].append(id) }
+        }
+        let ids = try store.messageIDsByRemoteID(
+            accountId: account.id, remoteIds: Array(Set(on.values.joined()).union(off.values.joined())))
+        for (keyword, remoteIds) in on { try store.setKeyword(keyword, true, messageIds: remoteIds.compactMap { ids[$0] }) }
+        for (keyword, remoteIds) in off { try store.setKeyword(keyword, false, messageIds: remoteIds.compactMap { ids[$0] }) }
+    }
+
+    /// Runs `work` on a new IMAP connection with All Mail open (read-write, CONDSTORE), closed after.
+    private func withAllMail<T: Sendable>(_ work: (GmailIMAP, GmailIMAP.Opened) async throws -> T) async throws -> T {
+        let imap = GmailIMAP(email: account.username, tokens: tokens)
+        do {
+            try await imap.connect()
+            if allMailName == nil { allMailName = try await imap.folders().all }
+            guard let allMail = allMailName else { throw GmailIMAP.IMAPError.malformed("no All Mail") }
+            let result = try await work(imap, try await imap.open(allMail, readOnly: false))
+            await imap.close()
+            return result
+        } catch {
+            await imap.close()
+            throw error
+        }
+    }
+
+    /// IMAP search criteria matching any of these: "OR a OR b c".
+    static func anyOf(_ criteria: [String]) -> String {
+        criteria.dropLast().reversed().reduce(criteria.last ?? "ALL") { "OR \($1) \($0)" }
+    }
+
+    /// The search for messages with a flag: "ANSWERED" for \Answered, "KEYWORD $Forwarded".
+    static func searchKey(_ flag: String) -> String {
+        flag.hasPrefix("\\") ? String(flag.dropFirst()).uppercased() : "KEYWORD " + flag
     }
 }
 
