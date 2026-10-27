@@ -628,6 +628,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+        func debugSidebarContextMenu(key: String) -> [String] { sidebar.debugContextMenu(key: key) }
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
         var debugSidebarOrder: String { sidebar.debugOrder }
@@ -838,9 +839,14 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         model.showInFinder(messageId: id, window: window)
     }
 
-    @objc func getAllMail(_ sender: Any?) {
-        model.syncAll()
+    /// Mailbox › Synchronize (⇧⌘N), as MailMate's: synchronizes the accounts the selected mailbox's mail
+    /// comes from (all of them with nothing selected).
+    @objc func synchronize(_ sender: Any?) {
+        sidebar.synchronize(sidebar.selectedNode)
     }
+
+    /// Synchronize's title for the selected mailbox.
+    var synchronizeTitle: String { sidebar.synchronizeTitle(for: sidebar.selectedNode) }
 
     /// Mailbox › New Smart Mailbox (⌥⌘N): inside the selected smart mailbox, else at the top level.
     @objc func newSmartMailbox(_ sender: Any?) {
@@ -849,8 +855,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     /// The selected mailbox's commands, for the Mailbox menu (see `SidebarViewController.menuGroups`).
     var mailboxMenuGroups: [[NSMenuItem]] {
-        sidebar.selectedNode.map { sidebar.menuGroups(for: $0, newSmartMailbox: false) } ?? []
+        sidebar.selectedNode.map { sidebar.menuGroups(for: $0) } ?? []
     }
+
+    /// Why the selected account's last sync failed, for under Mailbox › Synchronize.
+    var syncWarningItem: NSMenuItem? { sidebar.selectedNode.flatMap(sidebar.syncWarningItem(for:)) }
 
     /// The open JMAP Account Settings window, if any (one at a time).
     private(set) var accountSettings: AccountSettingsWindowController?

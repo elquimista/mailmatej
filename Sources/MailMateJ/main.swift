@@ -65,6 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(4))
                 }
+                if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIDEBAR_MENU"] {
+                    for key in keys.split(separator: ",").map(String.init) {  // logs each mailbox's context menu
+                        NSLog("MMJ sidebar menu \(key): \(windowController?.debugSidebarContextMenu(key: key).joined(separator: " | ") ?? "")")
+                    }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil {
                     NSLog("MMJ badges: \(windowController?.debugSidebarBadges ?? "")")
                 }
@@ -755,7 +760,7 @@ enum MainMenu {
         let mailbox = submenu(main, "Mailbox")
         mailbox.addItem(withTitle: "New Smart Mailbox", action: #selector(MainWindowController.newSmartMailbox(_:)), keyEquivalent: "n")
             .keyEquivalentModifierMask = [.command, .control]
-        mailbox.addItem(withTitle: "Get All Mail", action: #selector(MainWindowController.getAllMail(_:)), keyEquivalent: "N")
+        mailbox.addItem(withTitle: "Synchronize", action: #selector(MainWindowController.synchronize(_:)), keyEquivalent: "N")
         mailbox.delegate = MailboxMenu.shared
 
         // MailMate's Message menu and shortcuts, for the commands MailMateJ has.
@@ -811,13 +816,15 @@ enum MainMenu {
     }
 
     /// Fills the Mailbox menu with the selected mailbox's commands each time it opens, between New Smart
-    /// Mailbox and Get All Mail (which stay, for their shortcuts).
+    /// Mailbox and Synchronize (which stay, for their shortcuts), naming the mailbox in Synchronize.
     @MainActor
     final class MailboxMenu: NSObject, NSMenuDelegate {
         static let shared = MailboxMenu()
 
         func menuNeedsUpdate(_ menu: NSMenu) {
-            guard let newSmart = menu.items.first, let getAll = menu.items.last, newSmart !== getAll else { return }
+            guard let newSmart = menu.items.first(where: { $0.action == #selector(MainWindowController.newSmartMailbox(_:)) }),
+                let synchronize = menu.items.first(where: { $0.action == #selector(MainWindowController.synchronize(_:)) })
+            else { return }
             menu.removeAllItems()
             menu.addItem(newSmart)
             let controller = NSApp.mainWindow?.windowController as? MainWindowController
@@ -827,9 +834,10 @@ enum MainMenu {
                 menu.addItem(.separator())
                 group.forEach(menu.addItem)
             }
-            // With the selected account's Sync Now, as MailMate's Synchronize sits with its sync items.
-            if groups.last?.first?.title != "Sync Now" { menu.addItem(.separator()) }
-            menu.addItem(getAll)
+            menu.addItem(.separator())
+            synchronize.title = controller?.synchronizeTitle ?? "Synchronize"
+            menu.addItem(synchronize)
+            controller?.syncWarningItem.map(menu.addItem)
         }
     }
 

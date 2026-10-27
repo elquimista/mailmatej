@@ -375,6 +375,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         /// Logs a mailbox's message items (title, enabled); `choose` ("erase", "read") does one as its
         /// menu item does (Erase confirmed).
+        /// A mailbox's context menu: titles, "-" between groups, "(off)" when greyed out.
+        func debugContextMenu(key: String) -> [String] {
+            guard let node = find(key, in: roots) else { return ["no \(key)"] }
+            let menu = NSMenu()
+            fillContextMenu(menu, for: node)
+            return menu.items.map { $0.isSeparatorItem ? "-" : $0.title + ($0.isEnabled && ($0.action != nil || $0.submenu != nil) ? "" : " (off)") }
+        }
+
         func debugEmpty(key: String, choose: String?) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ empty: no \(key)") }
             let items = messageItems(node)
@@ -930,19 +938,38 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     // MARK: Context menu
 
+    /// The Mailbox menu's items, for the clicked mailbox: New Smart Mailbox, its commands, Synchronize.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let node = outline.item(atRow: outline.clickedRow) as? SidebarNode else { return }
-        for (index, group) in menuGroups(for: node, newSmartMailbox: true).enumerated() {
+        fillContextMenu(menu, for: node)
+    }
+
+    private func fillContextMenu(_ menu: NSMenu, for node: SidebarNode) {
+        func item(_ title: String, _ action: Selector) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.representedObject = node
+            item.target = self
+            return item
+        }
+        var groups = menuGroups(for: node)
+        if node.kind != .header || node.key == "header.mailboxes" {
+            groups.insert([item("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))], at: 0)
+        }
+        if node.kind != .header {
+            groups.append([item(synchronizeTitle(for: node), #selector(synchronizeClicked(_:)))] + (syncWarningItem(for: node).map { [$0] } ?? []))
+        }
+        for (index, group) in groups.enumerated() {
             if index > 0 { menu.addItem(.separator()) }
             group.forEach(menu.addItem)
         }
     }
 
-    /// A mailbox's commands, grouped as MailMate's Mailbox menu and context menu group them: New Smart
-    /// Mailbox; the account; Displayed Count, Color and Symbol; editing the mailbox; its messages;
-    /// syncing. The sidebar's context menu and the Mailbox menu (for the selected mailbox) show these.
-    func menuGroups(for node: SidebarNode, newSmartMailbox: Bool) -> [[NSMenuItem]] {
+    /// A mailbox's commands, grouped as MailMate's Mailbox menu groups them: the account; Displayed
+    /// Count, Color and Symbol; editing the mailbox; its messages; its rules. The Mailbox menu (for the
+    /// selected mailbox) and the sidebar's context menu (for the clicked one) show these, between New
+    /// Smart Mailbox and Synchronize.
+    func menuGroups(for node: SidebarNode) -> [[NSMenuItem]] {
         func item(_ title: String, _ action: Selector, _ object: Any? = nil) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.representedObject = object ?? node
@@ -950,9 +977,6 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return item
         }
         var groups: [[NSMenuItem]] = []
-        if newSmartMailbox, node.key == "header.mailboxes" || node.kind == .unified || node.kind == .smart {
-            groups.append([item("New Smart Mailbox", #selector(newSmartMailboxClicked(_:)))])
-        }
         if node.kind == .account, let accountId = node.accountId {
             groups.append([item("Edit Account…", #selector(editAccountClicked(_:)), accountId), item("Remove Account…", #selector(removeClicked(_:)))])
         }
@@ -976,17 +1000,42 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         } else if node.kind == .unified {
             groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
         }
-        if node.kind != .header { groups.append(messageItems(node)) }
-        if node.kind != .unified, node.kind != .smart, let accountId = node.accountId {
-            var sync = [item("Sync Now", #selector(syncClicked(_:)), accountId)]
-            if node.kind == .account, let warning = node.warning {  // why it last failed, under it
-                let line = NSMenuItem(title: warning.split(separator: "\n").first.map(String.init) ?? warning, action: nil, keyEquivalent: "")
-                line.isEnabled = false
-                sync.append(line)
-            }
-            groups.append(sync)
+        if node.kind != .header {
+            groups.append(messageItems(node))
+            groups.append([item("Edit Rules…", #selector(editRulesClicked(_:)))])
         }
         return groups.filter { !$0.isEmpty }
+    }
+
+    /// MailMate's title for Synchronize: the mailbox's name in quotes, except for a smart (or unified)
+    /// mailbox, which is synchronized through the mailboxes it's built on.
+    func synchronizeTitle(for node: SidebarNode?) -> String {
+        guard let node, node.kind != .header, node.kind != .smart, node.kind != .unified else { return "Synchronize" }
+        return "Synchronize “\(node.title)”"
+    }
+
+    /// Synchronizes the accounts a mailbox's mail comes from (all of them for none).
+    func synchronize(_ node: SidebarNode?) {
+        guard let node, node.kind != .header, let accounts = sourceAccounts(of: node) else { return model.syncAll() }
+        accounts.forEach(model.sync(accountId:))
+    }
+
+    @objc private func synchronizeClicked(_ sender: NSMenuItem) {
+        synchronize(sender.representedObject as? SidebarNode)
+    }
+
+    /// Edit Rules…: the mailbox editor's Rules tab for the mailbox.
+    @objc private func editRulesClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        MailboxEditorWindowController.show(key: node.key, model: model, over: view.window, tab: .rules)
+    }
+
+    /// Why an account's last sync failed, as a greyed-out line to go under its sync item.
+    func syncWarningItem(for node: SidebarNode) -> NSMenuItem? {
+        guard node.kind == .account, let warning = node.warning else { return nil }
+        let line = NSMenuItem(title: warning.split(separator: "\n").first.map(String.init) ?? warning, action: nil, keyEquivalent: "")
+        line.isEnabled = false
+        return line
     }
 
     // MARK: Mark All Read, Empty
@@ -1423,9 +1472,32 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
-    @objc private func syncClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        model.sync(accountId: id)
+    /// The accounts a mailbox's mail comes from, for Mailbox › Synchronize: its own account, or the ones a
+    /// smart mailbox's list brings in by name; nil for all of them (a unified mailbox, or a smart mailbox
+    /// whose list names no account, such as one built on Inbox).
+    func sourceAccounts(of node: SidebarNode) -> Set<String>? {
+        let mailboxAccounts = Dictionary(((try? model.store.mailboxes()) ?? []).map { ($0.id, $0.accountId) }, uniquingKeysWith: { a, _ in a })
+        let smart = Dictionary(((try? model.store.smartMailboxes()) ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func accounts(_ scope: MessageScope?, visited: Set<Int64>) -> Set<String>? {
+            switch scope?.base {
+            case .account(let account)?, .allInAccount(let account)?, .flaggedInAccount(let account)?,
+                .smartAccount(_, let account)?, .smartAccountValue(_, let account, _, _)?:
+                return [account]
+            case .mailbox(let box)?, .flaggedInMailbox(let box)?:
+                return mailboxAccounts[box].map { [$0] } ?? []
+            case let scope? where scope.smartID != nil:
+                let id = scope.smartID!
+                guard !visited.contains(id), let record = smart[id] else { return nil }
+                return record.definition.sources.namedAccounts { key in
+                    accounts(MessageScope(key: key), visited: visited.union([id]))
+                }
+            default:
+                return nil  // names no account (Inbox, All Messages)
+            }
+        }
+        if let account = node.accountId { return [account] }
+        guard let found = accounts(node.scope, visited: []), !found.isEmpty else { return nil }
+        return found
     }
 
     @objc private func removeClicked(_ sender: NSMenuItem) {
