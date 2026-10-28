@@ -364,10 +364,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .milliseconds(600))
                 }
                 // MMJ_DEBUG_SELECT_SUBJECT="<subject>|<subject>…": selects each in turn, logging its attachment rows.
+                // With MMJ_DEBUG_BADGES, the badges too: 80 ms after (an unread one just marked read) and once settled.
+                let badges = ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil
                 for subject in ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT_SUBJECT"]?.split(separator: "|") ?? [] {
                     windowController?.debugSelect(subject: String(subject))
+                    if badges {
+                        try? await Task.sleep(for: .milliseconds(80))
+                        NSLog("MMJ badges after 80 ms: \(windowController?.debugSidebarBadges ?? "")")
+                    }
                     try? await Task.sleep(for: .seconds(2))
                     NSLog("MMJ attachment rows: \(windowController?.debugAttachmentRows ?? [])")
+                    if badges { NSLog("MMJ badges settled: \(windowController?.debugSidebarBadges ?? "")") }
                 }
                 if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_SWATCHES"] {
                     // The Color menu's swatches at 1x on the dark menu background, side by side.

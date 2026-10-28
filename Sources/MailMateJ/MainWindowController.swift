@@ -220,9 +220,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             guard let self else { return }
             recordInHistory(id)
             guard let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
-            // The row turns read at once; the store and the server follow.
+            // The row turns read at once, and the counts; the store and the server follow.
             list.showSeen(true, id: id)
             correspondence.showSeen(true, id: id)
+            sidebar.adjustUnread(of: [id], by: -1)
             model.perform(.markRead, on: [id]) { _ in false }
         }
         correspondence.onToggleThread = { [weak self] row, collapse in
@@ -1819,6 +1820,16 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .unflag: rows.showFlagged(false, ids: ids)
             default: break
             }
+        }
+        // Smart mailboxes' unread counts too, by the messages it turns read or unread.
+        switch action {
+        case .markRead, .markUnread:
+            let read: Bool = if case .markRead = action { true } else { false }
+            if ids.count <= 500 {
+                let turning = ((try? model.store.marks(ids: ids)) ?? []).filter { $0.seen != read }.map(\.id)
+                sidebar.adjustUnread(of: turning, by: read ? -1 : 1)
+            }
+        default: break
         }
         model.perform(action, on: ids) { [weak self] count in
             await self?.confirmPermanentDelete(count) ?? false

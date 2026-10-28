@@ -424,6 +424,79 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Messages' keywords and mailboxes (by remote id), by remote id.
+    public func keywordsAndMailboxes(accountId: String, remoteIds: [String]) throws
+        -> [String: (keywords: Set<String>, mailboxes: Set<String>)]
+    {
+        guard !remoteIds.isEmpty else { return [:] }
+        let list = String(decoding: try JSONEncoder().encode(remoteIds), as: UTF8.self)
+        let messages = "SELECT id, remoteId FROM message WHERE accountId = ? AND remoteId IN (SELECT value FROM json_each(?))"
+        return try dbPool.read { db in
+            var result: [String: (keywords: Set<String>, mailboxes: Set<String>)] = [:]
+            for remoteId in try String.fetchAll(db, sql: "SELECT remoteId FROM (\(messages))", arguments: [accountId, list]) {
+                result[remoteId] = ([], [])
+            }
+            for row in try Row.fetchAll(
+                db, sql: "SELECT m.remoteId, k.keyword FROM (\(messages)) m JOIN message_keyword k ON k.messageId = m.id",
+                arguments: [accountId, list])
+            {
+                result[row["remoteId"]]?.keywords.insert(row["keyword"])
+            }
+            for row in try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT m.remoteId, b.remoteId AS box FROM (\(messages)) m
+                    JOIN message_mailbox mm ON mm.messageId = m.id JOIN mailbox b ON b.id = mm.mailboxId
+                    """,
+                arguments: [accountId, list])
+            {
+                result[row["remoteId"]]?.mailboxes.insert(row["box"])
+            }
+            return result
+        }
+    }
+
+    /// Sets messages' keywords (those of `managed`; the others stay) and mailboxes (by remote id), by
+    /// remote id, writing only what differs: a server's changes of marks and mailboxes, applied without
+    /// fetching the messages again.
+    public func setKeywordsAndMailboxes(
+        accountId: String, _ wanted: [String: (keywords: Set<String>, mailboxes: Set<String>)], among managed: Set<String>
+    ) throws {
+        guard !wanted.isEmpty else { return }
+        try dbPool.write { db in
+            var mailboxIds: [String: Int64] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId]) {
+                mailboxIds[row["remoteId"]] = row["id"]
+            }
+            let find = try db.cachedStatement(sql: "SELECT id FROM message WHERE accountId = ? AND remoteId = ?")
+            let keywords = try db.cachedStatement(sql: "SELECT keyword FROM message_keyword WHERE messageId = ?")
+            let boxes = try db.cachedStatement(sql: "SELECT mailboxId FROM message_mailbox WHERE messageId = ?")
+            for (remoteId, state) in wanted {
+                guard let id = try Int64.fetchOne(find, arguments: [accountId, remoteId]) else { continue }
+                let have = Set(try String.fetchAll(keywords, arguments: [id]))
+                for keyword in managed where have.contains(keyword) != state.keywords.contains(keyword) {
+                    let on = state.keywords.contains(keyword)
+                    try db.execute(
+                        sql: on ? "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)"
+                            : "DELETE FROM message_keyword WHERE messageId = ? AND keyword = ?",
+                        arguments: [id, keyword])
+                    if let column = Self.keywordColumns[keyword] {
+                        try db.execute(sql: "UPDATE message SET \(column) = ? WHERE id = ?", arguments: [on, id])
+                    }
+                }
+                let wantedBoxes = Set(state.mailboxes.compactMap { mailboxIds[$0] })
+                guard Set(try Int64.fetchAll(boxes, arguments: [id])) != wantedBoxes else { continue }
+                try db.execute(sql: "DELETE FROM message_mailbox WHERE messageId = ?", arguments: [id])
+                for box in wantedBoxes {
+                    try db.execute(sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [id, box])
+                }
+            }
+        }
+    }
+
+    /// The message columns that mirror keywords.
+    static let keywordColumns = ["$seen": "isSeen", "$flagged": "isFlagged", "$answered": "isAnswered", "$draft": "isDraft"]
+
     /// The thread of an account's message with this Message-ID (without angle brackets), if it's stored.
     public func threadId(accountId: String, messageIdHeader: String) throws -> String? {
         try dbPool.read { db in
@@ -601,6 +674,18 @@ public final class MailStore: Sendable {
         try dbPool.read { db in Set(try Int64.fetchAll(db, sql: "SELECT id FROM message WHERE NOT isSeen")) }
     }
 
+    /// A message's own Message-ID, the one it answers and its References, as stored (for a reply's
+    /// headers); nil while its References aren't stored yet (kept since v9; sync fills them in).
+    public func replyHeaders(id: Int64) throws -> (messageId: String?, inReplyTo: String?, references: [String])? {
+        try dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db, sql: "SELECT messageIdHeader, inReplyTo, referencesHeader FROM message WHERE id = ?", arguments: [id]),
+                let references = row["referencesHeader"] as String?
+            else { return nil }
+            return (row["messageIdHeader"], row["inReplyTo"], references.split(separator: " ").map(String.init))
+        }
+    }
+
     /// Whether a message is a draft (`$draft`).
     public func isDraft(id: Int64) throws -> Bool {
         try dbPool.read { db in try Bool.fetchOne(db, sql: "SELECT isDraft FROM message WHERE id = ?", arguments: [id]) ?? false }
@@ -638,10 +723,12 @@ public final class MailStore: Sendable {
     /// Sets or clears a keyword ("$seen", "$flagged", ...) and its column.
     public func setKeyword(_ keyword: String, _ on: Bool, messageIds: [Int64]) throws {
         guard !messageIds.isEmpty else { return }
-        let column = ["$seen": "isSeen", "$flagged": "isFlagged", "$answered": "isAnswered", "$draft": "isDraft"][keyword]
+        let column = Self.keywordColumns[keyword]
         // The ids as one JSON array: a statement each, whatever the number of messages.
         let ids = "[" + messageIds.map(String.init).joined(separator: ",") + "]"
+        let seen = keyword == "$seen"  // unread counts change with it
         try dbPool.write { db in
+            if seen { try Self.countInMailboxes(db, ids, sign: -1) }
             if let column {  // only those it changes (the others would refresh the lists for nothing)
                 try db.execute(
                     sql: "UPDATE message SET \(column) = ? WHERE id IN (SELECT value FROM json_each(?)) AND \(column) <> ?",
@@ -652,13 +739,16 @@ public final class MailStore: Sendable {
                     ? "INSERT OR IGNORE INTO message_keyword (messageId, keyword) SELECT value, ? FROM json_each(?)"
                     : "DELETE FROM message_keyword WHERE keyword = ? AND messageId IN (SELECT value FROM json_each(?))",
                 arguments: [keyword, ids])
+            if seen { try Self.countInMailboxes(db, ids, sign: 1) }
         }
     }
 
     /// Puts the messages in exactly one mailbox, as a move does.
     public func moveMessages(_ messageIds: [Int64], toMailboxId mailboxId: Int64) throws {
         guard !messageIds.isEmpty else { return }
+        let ids = "[" + messageIds.map(String.init).joined(separator: ",") + "]"
         try dbPool.write { db in
+            try Self.countInMailboxes(db, ids, sign: -1)
             try db.execute(
                 sql: "DELETE FROM message_mailbox WHERE messageId IN (\(Self.placeholders(messageIds.count)))",
                 arguments: StatementArguments(messageIds))
@@ -666,6 +756,7 @@ public final class MailStore: Sendable {
                 try db.execute(
                     sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [id, mailboxId])
             }
+            try Self.countInMailboxes(db, ids, sign: 1)
         }
     }
 
@@ -698,14 +789,36 @@ public final class MailStore: Sendable {
     /// Puts each message in exactly its mailboxes, all in one transaction.
     public func setMailboxes(_ assignments: [Int64: [Int64]]) throws {
         guard !assignments.isEmpty else { return }
+        let ids = "[" + assignments.keys.map(String.init).joined(separator: ",") + "]"
         try dbPool.write { db in
+            try Self.countInMailboxes(db, ids, sign: -1)
             let clear = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
             let add = try db.cachedStatement(sql: "INSERT OR IGNORE INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)")
             for (messageId, mailboxIds) in assignments {
                 try clear.execute(arguments: [messageId])
                 for box in mailboxIds { try add.execute(arguments: [messageId, box]) }
             }
+            try Self.countInMailboxes(db, ids, sign: 1)
         }
+    }
+
+    /// Keeps the mailboxes' own counts (their badges, which servers keep) in step with a change made
+    /// here, so they change with it rather than when the server's counts come back: `sign` -1 takes
+    /// these messages (a JSON array of ids) out of their mailboxes' counts before the change, 1 counts
+    /// them in again after it.
+    static func countInMailboxes(_ db: Database, _ ids: String, sign: Int) throws {
+        try db.execute(
+            sql: """
+                WITH changed AS MATERIALIZED (
+                    SELECT mm.mailboxId AS box, count(*) AS total, sum(NOT m.isSeen) AS unread
+                    FROM json_each(?) j JOIN message_mailbox mm ON mm.messageId = j.value JOIN message m ON m.id = j.value
+                    GROUP BY mm.mailboxId)
+                UPDATE mailbox SET
+                    totalEmails = max(0, totalEmails + ? * (SELECT total FROM changed WHERE box = mailbox.id)),
+                    unreadEmails = max(0, unreadEmails + ? * (SELECT unread FROM changed WHERE box = mailbox.id))
+                WHERE id IN (SELECT box FROM changed)
+                """,
+            arguments: [ids, sign, sign])
     }
 
     /// Messages stored before References were (remote ids), for the sync to fill in.
@@ -1227,6 +1340,31 @@ public final class MailStore: Sendable {
         return try dbPool.read { db in try Int.fetchOne(db, sql: sql, arguments: arguments) ?? 0 }
     }
 
+    /// How many of these messages each list shows (in one statement per few dozen lists, testing only
+    /// these messages): what a change to them changes in the lists' counts. nil for a list that picks
+    /// messages by being read or not, whose count a change of that moves in other ways.
+    public func counts(of ids: [Int64], in scopes: [MessageScope]) throws -> [Int?] {
+        guard !ids.isEmpty, !scopes.isEmpty else { return scopes.map { _ in 0 } }
+        let list = "[" + ids.map(String.init).joined(separator: ",") + "]"
+        let filters = Self.$testingFewMessages.withValue(true) { scopes.map { filterParts(scope: $0, search: nil) } }
+        let bySeen = filters.map { clause, args in
+            clause.contains("isSeen") || args.contains { ($0 as? String)?.lowercased() == "$seen" }
+        }
+        var counts: [Int?] = scopes.map { _ in nil }
+        try dbPool.read { db in
+            for chunk in Array(filters.indices.filter { !bySeen[$0] }).chunked(40) {
+                let sums = chunk.map { "coalesce(sum(\(filters[$0].0)), 0)" }.joined(separator: ", ")
+                let args = chunk.flatMap { filters[$0].1 } + [list]
+                guard let row = try Row.fetchOne(
+                    db, sql: "SELECT \(sums) FROM message m WHERE m.id IN (SELECT value FROM json_each(?)) AND \(Self.shown)",
+                    arguments: StatementArguments(args))
+                else { continue }
+                for (column, index) in chunk.enumerated() { counts[index] = row[column] }
+            }
+        }
+        return counts
+    }
+
     /// Which of these messages are in a list.
     public func ids(_ ids: [Int64], in scope: MessageScope) throws -> Set<Int64> {
         guard !ids.isEmpty else { return [] }
@@ -1254,6 +1392,18 @@ public final class MailStore: Sendable {
     /// complete; or once their download failed (shown as far as they're known, fetched when opened).
     static let shown = "m.downloadState <> 0"
 
+    /// Set while making SQL that tests only a few messages (`counts(of:in:)`): a list's mailbox or text
+    /// search is then looked up for each message, rather than listing every message it has (which
+    /// takes milliseconds each, however few messages are tested).
+    @TaskLocal static var testingFewMessages = false
+
+    /// The test that a message is in a mailbox (its id the argument).
+    static var inMailbox: String {
+        testingFewMessages
+            ? "EXISTS (SELECT 1 FROM message_mailbox WHERE messageId = m.id AND mailboxId = ?)"
+            : "m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId = ?)"
+    }
+
     /// `filter`'s clause with its arguments as a list, to combine into larger queries (smart mailboxes).
     func filterParts(scope: MessageScope, search: SmartCondition?) -> (String, [(any DatabaseValueConvertible)?]) {
         var clauses: [String] = []
@@ -1277,21 +1427,23 @@ public final class MailStore: Sendable {
         case .everything:
             clauses.append("1")
         case .role(let role):
-            clauses.append("""
-                m.id IN (SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
-                         WHERE b.role = ?)
-                """)
+            clauses.append(Self.testingFewMessages
+                ? "EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId WHERE mm.messageId = m.id AND b.role = ?)"
+                : """
+                    m.id IN (SELECT mm.messageId FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
+                             WHERE b.role = ?)
+                    """)
             args.append(role)
         case .flagged:
             clauses.append("m.isFlagged")
         case .mailbox(let id):
-            clauses.append("m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId = ?)")
+            clauses.append(Self.inMailbox)
             args.append(id)
         case .account(let id):
             clauses.append("m.accountId = ?")
             args.append(id)
         case .flaggedInMailbox(let id):
-            clauses.append("m.isFlagged AND m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId = ?)")
+            clauses.append("m.isFlagged AND \(Self.inMailbox)")
             args.append(id)
         case .flaggedInAccount(let id):
             clauses.append("m.isFlagged AND m.accountId = ?")

@@ -24,6 +24,9 @@ final class SidebarNode: NSObject {
     var offlineReason: String?
     var info: String?
     var isBusy = false
+    /// Its badge is a mailbox's own count (kept by the server, and here as changes are made), not one
+    /// queried from the messages: fresh with every rebuild, also one that keeps the queried counts.
+    var countedFromMailboxes = false
     /// Made by a Submailboxes tab (one per value, account or source of the mailbox above), so it comes
     /// and goes with the mail: nothing can be made inside it.
     var isGenerated = false
@@ -298,7 +301,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// mailbox list changed: a new smart mailbox), the rows already here keep their counts and generated
     /// submailboxes, so only new rows are queried.
     func reload(keepingCounts: Bool = false) {
-        if !keepingCounts { builtGeneration += 1 }  // a tree being built in the background has older counts
+        if !keepingCounts {
+            builtGeneration += 1  // a tree being built in the background has older counts
+            // Counted now, changes made so far included.
+            buildSerial += 1
+            appliedSerial = buildSerial
+            adjustments = []
+        }
         var reuse: [String: SidebarNode]?
         if keepingCounts {
             var old: [String: SidebarNode] = [:]
@@ -333,6 +342,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         isBuilding = true
         let generation = builtGeneration
+        buildSerial += 1
+        let serial = buildSerial
         let store = model.store
         Task {
             let built = await Task.detached(priority: .userInitiated) { BuiltTree(roots: Self.buildTree(store: store)) }.value
@@ -340,6 +351,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             // Built from before a change that came meanwhile: its counts are still newer than the rows',
             // but rows it has or lacks (a mailbox deleted since) wait for the build that follows.
             if generation == builtGeneration, !buildAgain || Self.keys(built.roots) == Self.keys(roots) {
+                // Nor do its mailboxes' own counts, which an action since may have changed here already.
+                if buildAgain { Self.keepMailboxCounts(of: roots, in: built.roots) }
+                // Unread counts moved since it started: in it too (those from before it, it counted).
+                adjustments.removeAll { $0.serial < serial }
+                for adjustment in adjustments { Self.adjust(built.roots, by: adjustment.changes) }
+                appliedSerial = serial
                 builtGeneration += 1
                 apply(built.roots)
                 onRebuilt?()
@@ -349,6 +366,72 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 reloadInBackground()
             }
         }
+    }
+
+    /// Each background build's number (`buildSerial`, the last one started) and the last put in place.
+    private var buildSerial = 0
+    private var appliedSerial = 0
+    /// Unread counts `adjustUnread` moved (row key → by how much), each with the last build started
+    /// before its change: builds started before it don't have it, so they get it too.
+    private var adjustments: [(serial: Int, changes: [String: Int])] = []
+
+    /// Messages just turned read (`change` -1) or unread (1). Rows counting unread mail with a query
+    /// (smart mailboxes and their submailboxes, All Messages, ...) move by how many of them they show,
+    /// found off the main thread in milliseconds, rather than with the next count of everything (which
+    /// follows, and puts right any it couldn't work out: those picking messages by being read).
+    func adjustUnread(of ids: [Int64], by change: Int) {
+        guard Self.main === self, showsStatus, !ids.isEmpty, ids.count <= 500 else { return }
+        let serial = buildSerial  // before the change: builds from now on count it
+        let usual = DisplayedCounts.countingUnread(roots)
+        var rows: [(key: String, scope: MessageScope)] = []
+        func collect(_ nodes: [SidebarNode]) {
+            for n in nodes {
+                if !n.countedFromMailboxes, let scope = n.scope, usual.contains(n.key) { rows.append((n.key, scope)) }
+                collect(n.children)
+            }
+        }
+        collect(roots)
+        guard !rows.isEmpty else { return }
+        let (store, scopes) = (model.store, rows.map(\.scope))
+        Task {
+            let counts = await Task.detached(priority: .userInitiated) { try? store.counts(of: ids, in: scopes) }.value
+            // Gone when a count of everything that has the change already shows.
+            guard let counts, appliedSerial <= serial else { return }
+            var changes: [String: Int] = [:]
+            for (row, count) in zip(rows, counts) {
+                if let count, count > 0 { changes[row.key] = change * count }
+            }
+            guard !changes.isEmpty else { return }
+            adjustments.append((serial, changes))
+            Self.adjust(roots, by: changes)
+            reconfigureVisibleRows()
+        }
+    }
+
+    private static func adjust(_ nodes: [SidebarNode], by changes: [String: Int]) {
+        for n in nodes {
+            if let change = changes[n.key] { n.badge = max(0, n.badge + change) }
+            adjust(n.children, by: changes)
+        }
+    }
+
+    /// Gives `fresh`'s rows the mailbox counts (see `countedFromMailboxes`) the same rows have in `current`.
+    private static func keepMailboxCounts(of current: [SidebarNode], in fresh: [SidebarNode]) {
+        var counts: [String: Int] = [:]
+        func index(_ nodes: [SidebarNode]) {
+            for n in nodes {
+                if n.countedFromMailboxes { counts[n.key] = n.badge }
+                index(n.children)
+            }
+        }
+        index(current)
+        func update(_ nodes: [SidebarNode]) {
+            for n in nodes {
+                if n.countedFromMailboxes, let count = counts[n.key] { n.badge = count }
+                update(n.children)
+            }
+        }
+        update(fresh)
     }
 
     /// Nodes made off the main thread, handed to it once (nothing else holds them).
@@ -376,6 +459,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 for n in nodes {
                     if let node = old[n.key] {
                         node.badge = n.badge
+                        node.countedFromMailboxes = n.countedFromMailboxes
                         node.warning = n.warning
                         node.isOffline = n.isOffline
                         node.offlineReason = n.offlineReason
@@ -651,6 +735,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for (role, title, symbol) in unifiedItems where role == "inbox" || roles.contains(role) {
             let node = SidebarNode(key: "unified.\(role)", kind: .unified, title: title, symbol: symbol, scope: .role(role))
             node.badge = counts.unreadByRole[role] ?? 0
+            node.countedFromMailboxes = true
             node.children = submailboxes(of: node, store: store, mailboxes: mailboxes, accounts: accountsByID, counts: counts, reuse: reuse)
             // Smart mailboxes made inside it, before its submailboxes.
             node.children = smartNodes(smart, inside: MessageScope.role(role).key, store: store, accounts: accountsByID, count: count, reuse: reuse)
@@ -692,21 +777,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 symbol: MailboxSymbols.symbol(for: account),
                 scope: .account(account.id), accountId: account.id)
             node.badge = counts.unreadByAccount[account.id] ?? 0
+            node.countedFromMailboxes = true
             node.children = Self.mailboxTree(byAccount[account.id] ?? [], accountId: account.id)
             sources.children.append(node)
         }
         let roots = [unified, sources]
+        if withCounts { DisplayedCounts.apply(to: roots, store: store, counting: { reuse?[$0.key] == nil }) }
         if let reuse {
-            // Rows that were here keep their counts (displayed counts too); only new ones are counted.
+            // Rows that were here keep their queried counts (displayed counts too); only new ones are
+            // counted. The mailboxes' own counts are as they are now (an action just changed them).
             func keep(_ nodes: [SidebarNode]) {
                 for n in nodes {
-                    if let old = reuse[n.key] { n.badge = old.badge }
+                    if let old = reuse[n.key], !n.countedFromMailboxes { n.badge = old.badge }
                     keep(n.children)
                 }
             }
             keep(roots)
         }
-        if withCounts { DisplayedCounts.apply(to: roots, store: store, counting: { reuse?[$0.key] == nil }) }
         return roots
     }
 
@@ -792,9 +879,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// its counts come from here (the server's count the whole mailboxes).
     nonisolated private static func narrow(_ node: SidebarNode, store: MailStore, count: (String, MessageScope) -> Int?) {
         guard let key = node.scope?.key, store.hasSpecialCondition(key: key) else { return }
+        node.countedFromMailboxes = false
         if let scope = node.scope, let n = count(node.key, scope) { node.badge = n }
         func wrap(_ nodes: [SidebarNode]) {
             for child in nodes {
+                child.countedFromMailboxes = false
                 if let scope = child.scope {
                     child.scope = .within(key, scope)
                     if let n = count(child.key, .within(key, scope)) { child.badge = n }
@@ -829,6 +918,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             child.isGenerated = true
             child.role = role
             child.badge = badge
+            child.countedFromMailboxes = true
             return child
         }
         func source(_ box: MailboxRecord) -> String { "\(box.name) – \(accounts[box.accountId]!.name)" }
@@ -912,6 +1002,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     symbol: Self.symbol(forRole: box.role), scope: .mailbox(box.id), accountId: accountId)
                 node.role = box.role
                 node.badge = box.unreadEmails
+                node.countedFromMailboxes = true
                 node.children = build(box.remoteId)
                 return node
             }

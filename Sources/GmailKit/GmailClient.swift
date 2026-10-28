@@ -220,7 +220,11 @@ public struct GmailClient: Sendable {
 
     public struct HistoryPage: Decodable, Sendable {
         public struct Record: Decodable, Sendable {
-            public struct Change: Decodable, Sendable { public var message: MessageRef }
+            public struct Change: Decodable, Sendable {
+                public var message: MessageRef
+                /// The labels added or removed (labelsAdded, labelsRemoved).
+                public var labelIds: [String]?
+            }
             public var messagesAdded: [Change]?
             public var messagesDeleted: [Change]?
             public var labelsAdded: [Change]?

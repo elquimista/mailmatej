@@ -59,17 +59,38 @@ enum DisplayedCounts {
         }
         func walk(_ nodes: [SidebarNode], inherited: Kind?, including inheritedInclude: Bool?) {
             for node in nodes {
-                let kind = kind(for: node.key) ?? inherited
-                let include = includesSubmailboxes(node.key) ?? inheritedInclude
-                if node.kind != .header, kind != nil || include == true, let scope = node.scope, counting(node) {
-                    let counted = kind ?? .unread
-                    let lists = include == true ? scopes(node) : [scope]
-                    node.badge = count(counted, of: lists, store: store)
+                let kind = (kinds[node.key] as? String).flatMap(Kind.init(rawValue:)) ?? inherited
+                let include = includes[node.key] as? Bool ?? inheritedInclude
+                if node.kind != .header, kind != nil || include == true, let scope = node.scope {
+                    node.countedFromMailboxes = false  // counted here, even a mailbox's
+                    if counting(node) {
+                        let counted = kind ?? .unread
+                        let lists = include == true ? scopes(node) : [scope]
+                        node.badge = count(counted, of: lists, store: store)
+                    }
                 }
                 walk(node.children, inherited: kind, including: include)
             }
         }
         walk(roots, inherited: nil, including: nil)
+    }
+
+    /// The rows (by key) whose badge is the usual count: their unread messages, no other Displayed Count
+    /// chosen for them or above them, nor Include Submailboxes.
+    static func countingUnread(_ roots: [SidebarNode]) -> Set<String> {
+        let kinds = UserDefaults.standard.dictionary(forKey: kindsKey) ?? [:]
+        let includes = UserDefaults.standard.dictionary(forKey: includesKey) ?? [:]
+        var keys = Set<String>()
+        func walk(_ nodes: [SidebarNode], inherited: Kind?, including inheritedInclude: Bool?) {
+            for node in nodes {
+                let kind = (kinds[node.key] as? String).flatMap(Kind.init(rawValue:)) ?? inherited
+                let include = includes[node.key] as? Bool ?? inheritedInclude
+                if (kind ?? .unread) == .unread, include != true { keys.insert(node.key) }
+                walk(node.children, inherited: kind, including: include)
+            }
+        }
+        walk(roots, inherited: nil, including: nil)
+        return keys
     }
 
     private static func count(_ kind: Kind, of lists: [MessageScope], store: MailStore) -> Int {

@@ -242,6 +242,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func showPlaceholder(_ text: String) {
+        renderGeneration += 1  // a page still being prepared doesn't show over this
         placeholder.stringValue = text
         placeholder.isHidden = false
         scroll.isHidden = true
@@ -285,12 +286,17 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func showStatus(_ text: String) {
+        renderGeneration += 1  // a page still being prepared doesn't show over this
         attachments = []
         applyRules(loadRemote: false)
         loadPage(content: "<p class=\"status\">\(MessagePage.escape(text))</p>", bar: nil, plain: false, remote: false)
     }
 
+    /// Bumped by each render: a page prepared in the background shows only if no render came after it.
+    private var renderGeneration = 0
+
     private func render(_ body: MessageBody) {
+        renderGeneration += 1
         currentBody = body
         attachments = currentID.map { Self.attachments(messageId: $0, html: body.html, store: model.store) } ?? []
         guard let html = body.html, let id = currentID else {
@@ -301,12 +307,30 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         let allowedBy = currentSender.flatMap { try? model.store.remoteContentAllowEntries(email: $0) } ?? []
         // Fail closed: remote content only loads when the strict and script rules are in place.
         let loadRemote = (loadRemoteForCurrent || !allowedBy.isEmpty) && Self.strictRules != nil && Self.scriptRules != nil
-        let prepared = MessageHTML.prepare(html, messageId: id, blockRemote: !loadRemote)
-        let bar = prepared.remoteCount == 0 ? nil : MessagePage.Bar(
-            remote: prepared.remoteCount, strict: prepared.strictCount, loaded: loadRemote,
-            canAlwaysLoad: currentSender != nil, allowedBy: allowedBy)
-        applyRules(loadRemote: loadRemote)
-        loadPage(content: prepared.html, bar: bar, plain: false, remote: loadRemote)
+        let canAlwaysLoad = currentSender != nil
+        func show(_ prepared: PreparedHTML, page: String) {
+            let bar = prepared.remoteCount == 0 ? nil : MessagePage.Bar(
+                remote: prepared.remoteCount, strict: prepared.strictCount, loaded: loadRemote,
+                canAlwaysLoad: canAlwaysLoad, allowedBy: allowedBy)
+            applyRules(loadRemote: loadRemote)
+            loadPage(page, bar: bar)
+        }
+        @Sendable nonisolated func prepare() -> (PreparedHTML, String) {
+            let prepared = MessageHTML.prepare(html, messageId: id, blockRemote: !loadRemote)
+            return (prepared, MessagePage.html(content: prepared.html, plain: false, remote: loadRemote))
+        }
+        // Most messages take a few milliseconds; a big newsletter (they run to a megabyte) up to 70, so
+        // it's prepared off the main thread, the message shown before staying until it's ready.
+        guard html.utf8.count > 100_000 else {
+            let (prepared, page) = prepare()
+            return show(prepared, page: page)
+        }
+        let generation = renderGeneration
+        Task {
+            let (prepared, page) = await Task.detached(priority: .userInitiated) { prepare() }.value
+            guard generation == renderGeneration else { return }
+            show(prepared, page: page)
+        }
     }
 
     private func rerender() {
@@ -314,13 +338,16 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func loadPage(content: String, bar: MessagePage.Bar?, plain: Bool, remote: Bool) {
+        loadPage(MessagePage.html(content: content, plain: plain, remote: remote), bar: bar)
+    }
+
+    private func loadPage(_ html: String, bar: MessagePage.Bar?) {
         webView.resetHover()
         header.update(fields: headerFields, attachments: attachments.map(Self.headerAttachment), bar: bar)
         showsOptionVariants = false
         header.showsOptionVariants = NSEvent.modifierFlags.contains(.option)
         contentHeight = 0  // until the new page reports its own
         layoutDocument()
-        let html = MessagePage.html(content: content, plain: plain, remote: remote)
         #if DEBUG
             if let path = ProcessInfo.processInfo.environment["MMJ_DUMP_HTML"] {
                 try? html.write(toFile: path, atomically: true, encoding: .utf8)

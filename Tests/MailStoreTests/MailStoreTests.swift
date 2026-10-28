@@ -819,6 +819,78 @@ import Testing
         #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("full body")) == [id])
     }
 
+    @Test func mailboxCountsFollowChangesMadeHere() throws {
+        try upsert([
+            message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200, keywords: ["$seen"]),
+            message("3", from: "c@x.com", box: "tr", at: 300),
+        ])
+        try store.recountMailboxes(accountId: "acc")  // as the server counts them
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3"])
+        let boxes = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.remoteId, $0.id) })
+        func counts() throws -> [String: [Int]] {
+            Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.remoteId, [$0.totalEmails, $0.unreadEmails]) })
+        }
+        /// The counts as changed here, and as a recount from the messages has them, after `change`.
+        func expectRecounted(_ change: () throws -> Void, _ expected: [String: [Int]]) throws {
+            try change()
+            let changed = try counts()
+            try store.recountMailboxes(accountId: "acc")
+            #expect(changed == expected)
+            #expect(try counts() == expected)
+        }
+        try expectRecounted({ try store.setKeyword("$seen", true, messageIds: [ids["1"]!]) },
+                            ["in": [2, 0], "tr": [1, 1], "se": [0, 0]])
+        try expectRecounted({ try store.setKeyword("$seen", false, messageIds: [ids["1"]!, ids["2"]!]) },
+                            ["in": [2, 2], "tr": [1, 1], "se": [0, 0]])
+        try expectRecounted({ try store.moveMessages([ids["1"]!, ids["3"]!], toMailboxId: boxes["se"]!) },
+                            ["in": [1, 1], "tr": [0, 0], "se": [2, 2]])
+        try expectRecounted({ try store.setMailboxes([ids["1"]!: [boxes["in"]!, boxes["tr"]!], ids["2"]!: []]) },
+                            ["in": [1, 1], "tr": [1, 1], "se": [1, 1]])
+    }
+
+    @Test func countsOfAFewMessagesPerList() throws {
+        try upsert([
+            message("1", from: "a@payoneer.com", at: 100), message("2", from: "b@x.com", at: 200),
+            message("3", from: "c@payoneer.com", box: "tr", at: 300),
+        ])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3"])
+        let payoneer = try store.createSmartMailbox(name: "Payoneer", parentId: nil)
+        var definition = SmartDefinition(sources: SmartSources(scopes: [MessageScope.allMessages.key]))
+        definition.condition = .compound(.all, [.rule(.fromDomain, .is, "payoneer.com")])
+        try store.updateSmartMailbox(id: payoneer, definition: definition)
+        let unread = try store.createSmartMailbox(name: "Unread", parentId: nil)
+        definition.condition = .compound(.all, [.rule(.status, .is, SmartStatus.unread.rawValue)])
+        try store.updateSmartMailbox(id: unread, definition: definition)
+
+        let all = [ids["1"]!, ids["2"]!, ids["3"]!]
+        // Trash is outside All Messages; a list picking messages by being read can't be worked out so.
+        #expect(try store.counts(of: all, in: [.smart(payoneer), .allMessages, .role("trash"), .smart(unread)])
+            == [1, 2, 1, nil])
+        #expect(try store.counts(of: [ids["2"]!], in: [.smart(payoneer), .everything]) == [0, 1])
+    }
+
+    @Test func keywordsAndMailboxesByRemoteID() throws {
+        try upsert([message("1", from: "a@x.com", at: 100, keywords: ["$seen", "$answered"]), message("2", from: "b@x.com", at: 200)])
+        var state = try store.keywordsAndMailboxes(accountId: "acc", remoteIds: ["1", "2", "gone"])
+        #expect(state["1"]?.keywords == ["$seen", "$answered"] && state["1"]?.mailboxes == ["in"])
+        #expect(state["2"]?.keywords == [] && state["gone"] == nil)
+
+        let count = Counter()
+        let observation = store.observeChanges { count.increment() }
+        defer { observation.cancel() }
+        // Unread and flagged, into Trash; keywords not managed ($answered) stay.
+        try store.setKeywordsAndMailboxes(
+            accountId: "acc", ["1": (["$flagged"], ["tr"]), "2": ([], ["in"])], among: ["$seen", "$flagged"])
+        state = try store.keywordsAndMailboxes(accountId: "acc", remoteIds: ["1", "2"])
+        #expect(state["1"]?.keywords == ["$flagged", "$answered"] && state["1"]?.mailboxes == ["tr"])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1"])
+        #expect(try store.marks(ids: [ids["1"]!]).first.map { [$0.seen, $0.flagged] } == [false, true])
+        #expect(count.value == 1)
+        // Nothing different: nothing written.
+        try store.setKeywordsAndMailboxes(accountId: "acc", ["2": ([], ["in"])], among: ["$seen", "$flagged"])
+        #expect(count.value == 1)
+    }
+
     @Test func messagesShowOnceDownloaded() throws {
         try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200)])
         let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2"])

@@ -142,4 +142,30 @@ import Testing
         #expect(GmailAccountSync.anyOf(["a", "b", "c"]) == "OR a OR b c")
         #expect(GmailAccountSync.imapKeywords == ["$answered": "\\Answered", "$forwarded": "$Forwarded"])
     }
+
+    @Test func labelChangesApplyAsTheirLabelsWouldMap() throws {
+        let boxes: Set<String> = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "ARCHIVE", "Label_7"]
+        typealias Change = GmailAccountSync.LabelChange
+        func apply(_ changes: [Change], _ keywords: Set<String>, _ mailboxes: Set<String>, archiveLabel: String? = nil)
+            -> GmailAccountSync.Marks?
+        {
+            GmailAccountSync.applying(changes, to: (keywords, mailboxes), mailboxLabels: boxes, archiveLabel: archiveLabel)
+        }
+        // Read, flagged; unrelated labels change nothing.
+        let read = try #require(apply([Change(added: false, labels: ["UNREAD"]), Change(added: true, labels: ["STARRED", "IMPORTANT"])],
+                                      [], ["INBOX"]))
+        #expect(read.keywords == ["$seen", "$flagged"] && read.mailboxes == ["INBOX"])
+        #expect(apply([Change(added: true, labels: ["UNREAD"])], ["$seen", "$answered"], ["INBOX"])?.keywords == ["$answered"])
+        // Archived in Gmail (Inbox taken off): Archive. Back to the Inbox: out of Archive.
+        #expect(apply([Change(added: false, labels: ["INBOX"])], [], ["INBOX"])?.mailboxes == ["ARCHIVE"])
+        #expect(apply([Change(added: true, labels: ["INBOX"])], [], ["ARCHIVE"])?.mailboxes == ["INBOX"])
+        #expect(apply([Change(added: true, labels: ["Label_7"])], [], ["INBOX"])?.mailboxes == ["INBOX", "Label_7"])
+        // With an archive label: it puts a message in Archive, alongside its other mailboxes.
+        #expect(apply([Change(added: true, labels: ["Label_9"])], [], ["INBOX"], archiveLabel: "Label_9")?.mailboxes
+            == ["INBOX", "ARCHIVE"])
+        #expect(apply([Change(added: false, labels: ["INBOX"])], [], ["INBOX", "ARCHIVE"], archiveLabel: "Label_9")?.mailboxes
+            == ["ARCHIVE"])
+        // In Archive and given a mailbox: whether it also has the archive label, only Gmail knows.
+        #expect(apply([Change(added: true, labels: ["INBOX"])], [], ["ARCHIVE"], archiveLabel: "Label_9") == nil)
+    }
 }

@@ -381,6 +381,8 @@ public actor GmailAccountSync {
         var added: [String] = []
         var changed = Set<String>()
         var deleted = Set<String>()
+        /// Each message's label changes, in order.
+        var relabeled: [String: [LabelChange]] = [:]
         var latest: String?
         repeat {
             let page = try await client.history(since: since, pageToken: token)
@@ -394,8 +396,11 @@ public actor GmailAccountSync {
                     deleted.insert(change.message.id)
                     changed.remove(change.message.id)
                 }
-                for change in (record.labelsAdded ?? []) + (record.labelsRemoved ?? []) where !deleted.contains(change.message.id) {
-                    changed.insert(change.message.id)
+                for (changes, isAdded) in [(record.labelsAdded ?? [], true), (record.labelsRemoved ?? [], false)] {
+                    for change in changes where !deleted.contains(change.message.id) {
+                        changed.insert(change.message.id)
+                        relabeled[change.message.id, default: []].append(LabelChange(added: isAdded, labels: change.labelIds ?? []))
+                    }
                 }
             }
             latest = page.historyId ?? latest
@@ -409,9 +414,16 @@ public actor GmailAccountSync {
         #endif
         let known = try store.remoteIDs(accountId: account.id)
         if !changed.isEmpty {
-            // New mail comes whole; for mail stored here (a label changed), its labels, with its headers
-            // from the copy here, or else from Gmail (its body follows with the downloads).
-            let changed = Array(changed)
+            // New mail comes whole. Mail stored here whose labels changed (read, flagged, moved) changes
+            // here as the history says, without fetching it again (a request and 5 quota units each:
+            // marking thousands read used to hold up new mail for minutes). What that can't tell, and
+            // mail added again, gets its labels from Gmail, with its headers from the copy here, or else
+            // from Gmail too (its body follows with the downloads).
+            let newlyAdded = Set(added)
+            let applied = try applyLabelChanges(
+                relabeled.filter { known.contains($0.key) && !newlyAdded.contains($0.key) && changed.contains($0.key) })
+            result.updated += applied.count
+            let changed = Array(changed.subtracting(applied))
             let new = changed.filter { !known.contains($0) }
             let (refreshed, gone) = try await refresh(changed.filter { known.contains($0) && store.blobs.contains(accountId: account.id, blobId: $0) })
             let headersOnly = changed.filter { known.contains($0) && !refreshed.contains($0) && !gone.contains($0) }
@@ -431,6 +443,69 @@ public actor GmailAccountSync {
             result.destroyed += gone.count
         }
         if let latest, latest != since { try store.setSyncState(latest, accountId: account.id, type: Self.historyState) }
+    }
+
+    /// A label change in Gmail's history: labels added to a message, or taken off it.
+    struct LabelChange: Equatable {
+        var added: Bool
+        var labels: [String]
+    }
+
+    /// A stored message's marks and mailboxes (by remote id), as the store has them.
+    typealias Marks = (keywords: Set<String>, mailboxes: Set<String>)
+
+    /// Applies label changes to the messages stored here; returns those it applied (see `applying`).
+    private func applyLabelChanges(_ changes: [String: [LabelChange]]) throws -> Set<String> {
+        guard !changes.isEmpty else { return [] }
+        let stored = try store.keywordsAndMailboxes(accountId: account.id, remoteIds: Array(changes.keys))
+        var updated: [String: Marks] = [:]
+        for (id, list) in changes {
+            guard let marks = stored[id],
+                let after = Self.applying(list, to: marks, mailboxLabels: mailboxLabels, archiveLabel: archiveLabel)
+            else { continue }
+            updated[id] = after
+        }
+        try store.setKeywordsAndMailboxes(accountId: account.id, updated, among: Self.labelKeywords)
+        return Set(updated.keys)
+    }
+
+    /// The keywords Gmail keeps as labels: UNREAD (the absence of $seen), STARRED and DRAFT.
+    static let labelKeywords: Set<String> = ["$seen", "$flagged", "$draft"]
+
+    /// A message's marks and mailboxes after label changes, in order, as `incoming` has them from its
+    /// labels: read, flagged and draft from UNREAD, STARRED and DRAFT; a mailbox per label shown as one;
+    /// Archive by the archive label, or when no other mailbox is left. Labels not shown here (IMPORTANT,
+    /// categories) change nothing. nil when it can't be told from the changes: a message in Archive
+    /// given a mailbox, in an account whose Archive is also a label (does it have that label? Gmail knows).
+    static func applying(
+        _ changes: [LabelChange], to marks: Marks, mailboxLabels: Set<String>, archiveLabel: String?
+    ) -> Marks? {
+        var (keywords, mailboxes) = marks
+        for change in changes {
+            for label in change.labels {
+                let keyword = ["UNREAD": "$seen", "STARRED": "$flagged", "DRAFT": "$draft"][label]
+                if let keyword {
+                    // UNREAD is the absence of $seen.
+                    if change.added == (label != "UNREAD") { keywords.insert(keyword) } else { keywords.remove(keyword) }
+                }
+                if label == archiveLabel {
+                    if change.added { mailboxes.insert(archive) } else { mailboxes.remove(archive) }
+                } else if mailboxLabels.contains(label), label != archive {
+                    if change.added {
+                        if archiveLabel != nil, mailboxes.contains(archive) { return nil }
+                        mailboxes.insert(label)
+                    } else {
+                        mailboxes.remove(label)
+                    }
+                }
+            }
+            if mailboxes.subtracting([archive]).isEmpty {
+                mailboxes.insert(archive)
+            } else if archiveLabel == nil {
+                mailboxes.remove(archive)
+            }
+        }
+        return (keywords, mailboxes)
     }
 
     /// Messages in a format, a few requests at a time (they're paced under Gmail's quota, see

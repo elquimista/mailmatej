@@ -1077,7 +1077,7 @@ final class AppModel {
         guard let messageId, let detail else { throw CocoaError(.fileNoSuchFile) }
 
         var body = try store.body(messageId: messageId)
-        if body?.text == nil { body = try await fetchBody(messageId: messageId, accountId: detail.accountId) }
+        if body == nil { body = try await fetchBody(messageId: messageId, accountId: detail.accountId) }
         var text = body?.text ?? ""
         if text.isEmpty, let html = body?.html { text = Compose.plainText(fromHTML: html) }
         let original = Compose.Original(detail, text: text)
@@ -1093,11 +1093,22 @@ final class AppModel {
             setup.attachmentsAccountId = detail.accountId
             setup.original = (messageId, "$forwarded")
         } else {
-            (setup.inReplyTo, setup.references) = try await coordinator.replyHeaders(
-                accountId: detail.accountId, remoteId: detail.remoteId)
+            (setup.inReplyTo, setup.references) = try await replyHeaders(messageId: messageId, detail: detail)
             setup.original = (messageId, "$answered")
         }
         return setup
+    }
+
+    /// In-Reply-To and References for a reply: from the store, so the window opens at once (offline
+    /// too); from the server only for a message whose References aren't stored yet.
+    private func replyHeaders(messageId: Int64, detail: MessageDetail) async throws -> (inReplyTo: [String], references: [String]) {
+        guard let stored = try store.replyHeaders(id: messageId) else {
+            return try await coordinator.replyHeaders(accountId: detail.accountId, remoteId: detail.remoteId)
+        }
+        guard let own = stored.messageId else { return ([], []) }
+        return ([own], Compose.references(
+            messageId: [own], references: stored.references.isEmpty ? nil : stored.references,
+            inReplyTo: stored.inReplyTo.map { [$0] }))
     }
 
     /// Sends, then marks the original answered (or forwarded), here and on the server. The drafts it
