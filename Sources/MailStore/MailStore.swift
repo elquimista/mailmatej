@@ -1752,6 +1752,40 @@ public final class MailStore: Sendable {
         return StoreObservation(cancellable)
     }
 
+    /// Starts noting which messages each write changes, for `takeChangedMessages` (`SmartCounter`
+    /// keeps its counts from them): temporary triggers on the connection every write goes through, on
+    /// everything a list's conditions can test (a condition on anything else needs one here too). A mailbox
+    /// renamed or given another role is noted as -1.
+    func noteChangedMessages() throws {
+        var sql = "CREATE TEMP TABLE IF NOT EXISTS changed_message (id INTEGER PRIMARY KEY);"
+        func note(_ name: String, _ event: String, _ table: String, _ id: String, when: String = "") {
+            sql += """
+                CREATE TEMP TRIGGER IF NOT EXISTS changed_message_\(name) AFTER \(event) ON main.\(table)\(when)
+                BEGIN INSERT OR IGNORE INTO changed_message VALUES (\(id)); END;
+                """
+        }
+        note("added", "INSERT", "message", "NEW.id")
+        note("updated", "UPDATE", "message", "NEW.id")
+        note("deleted", "DELETE", "message", "OLD.id")
+        for table in ["message_mailbox", "message_keyword", "address", "message_part", "message_body"] {
+            note("\(table)_added", "INSERT", table, "NEW.messageId")
+            note("\(table)_deleted", "DELETE", table, "OLD.messageId")
+        }
+        note("message_body_updated", "UPDATE", "message_body", "NEW.messageId")  // its text is searched
+        note("mailbox", "UPDATE OF name, role", "mailbox", "-1", when: " WHEN OLD.name IS NOT NEW.name OR OLD.role IS NOT NEW.role")
+        try dbPool.writeWithoutTransaction { db in try db.execute(sql: sql) }
+    }
+
+    /// The messages written since the last call (since `noteChangedMessages`, the first time), and
+    /// whether a mailbox was renamed or changed role (which changes lists without touching messages).
+    func takeChangedMessages() throws -> (ids: [Int64], mailboxesChanged: Bool) {
+        try dbPool.write { db in
+            let ids = try Int64.fetchAll(db, sql: "SELECT id FROM changed_message")
+            try db.execute(sql: "DELETE FROM changed_message")
+            return (ids.filter { $0 >= 0 }, ids.contains(-1))
+        }
+    }
+
     // MARK: Helpers
 
     /// ORDER BY terms for `sort`, on a table aliased `m`.

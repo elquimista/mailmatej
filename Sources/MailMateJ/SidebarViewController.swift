@@ -324,6 +324,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         apply(fresh)
     }
 
+    /// Smart mailboxes' counts, kept from build to build (the main sidebar's background builds).
+    private lazy var smartCounter: SmartCounter? = try? SmartCounter(store: model.store)
     /// Bumped by each reload that counts: a tree built in the background shows only if none came after it started.
     private var builtGeneration = 0
     private var isBuilding = false
@@ -346,7 +348,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let serial = buildSerial
         let store = model.store
         Task {
-            let built = await Task.detached(priority: .userInitiated) { BuiltTree(roots: Self.buildTree(store: store)) }.value
+            let counter = smartCounter
+            let built = await Task.detached(priority: .userInitiated) {
+                BuiltTree(roots: Self.buildTree(store: store, counter: counter))
+            }.value
             isBuilding = false
             // Built from before a change that came meanwhile: its counts are still newer than the rows',
             // but rows it has or lacks (a mailbox deleted since) wait for the build that follows.
@@ -710,16 +715,28 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// The sidebar's tree. Without `counts` the unread counts of smart and special mailboxes aren't
     /// queried. With `reuse` (the rows as they were, by key) those rows keep their counts and generated
-    /// submailboxes: only rows new since are queried.
+    /// submailboxes: only rows new since are queried. With `counter`, smart mailboxes are counted from the
+    /// messages changed since its last build.
     /// Runs off the main thread too (see `reloadInBackground`): it reads only the store and the defaults;
     /// account rows get their sync states from `refreshStatuses`.
-    nonisolated static func buildTree(store: MailStore, counts withCounts: Bool = true, reuse: [String: SidebarNode]? = nil) -> [SidebarNode] {
+    nonisolated static func buildTree(
+        store: MailStore, counts withCounts: Bool = true, reuse: [String: SidebarNode]? = nil, counter: SmartCounter? = nil
+    ) -> [SidebarNode] {
+        // Smart mailboxes' counts from the messages changed since the last build, when counting them all.
+        let counter = withCounts && reuse == nil && (try? counter?.refresh()) != nil ? counter : nil
+        #if DEBUG
+            if let counter, ProcessInfo.processInfo.environment["MMJ_DEBUG_COUNTS"] != nil {
+                let wrong = (try? counter.mismatches()) ?? ["couldn't check"]
+                NSLog("MMJ counts: \(wrong.isEmpty ? "all as counted anew" : wrong.joined(separator: "; "))")
+            }
+        #endif
         let accounts = (try? store.accounts()) ?? []
         let mailboxes = (try? store.mailboxes()) ?? []
         let smart = (try? store.smartMailboxes()) ?? []
         /// A row's unread count, when counting and the row is new (kept rows get theirs back at the end).
         func count(_ key: String, _ scope: MessageScope) -> Int? {
             guard withCounts, reuse?[key] == nil else { return nil }
+            if case .smart(let id) = scope, let unread = counter?.unreadCount(smart: id) { return unread }
             return (try? store.count(scope: scope, counting: .unread)) ?? 0
         }
         let counts = (try? store.counts(
@@ -738,7 +755,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             node.countedFromMailboxes = true
             node.children = submailboxes(of: node, store: store, mailboxes: mailboxes, accounts: accountsByID, counts: counts, reuse: reuse)
             // Smart mailboxes made inside it, before its submailboxes.
-            node.children = smartNodes(smart, inside: MessageScope.role(role).key, store: store, accounts: accountsByID, count: count, reuse: reuse)
+            node.children = smartNodes(
+                smart, inside: MessageScope.role(role).key, store: store, accounts: accountsByID, count: count, reuse: reuse,
+                counter: counter)
                 + node.children
             narrow(node, store: store, count: count)
             unified.children.append(node)
@@ -752,12 +771,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             key: "unified.everything", kind: .unified, title: "All / Junk / Deleted", symbol: "envelope", scope: .everything)
         everything.badge = count(everything.key, .everything) ?? 0
         everything.children = smartNodes(
-            smart, inside: MessageScope.everything.key, store: store, accounts: accountsByID, count: count, reuse: reuse)
+            smart, inside: MessageScope.everything.key, store: store, accounts: accountsByID, count: count, reuse: reuse,
+            counter: counter)
         all.children = [everything]
-            + smartNodes(smart, inside: MessageScope.allMessages.key, store: store, accounts: accountsByID, count: count, reuse: reuse)
+            + smartNodes(
+                smart, inside: MessageScope.allMessages.key, store: store, accounts: accountsByID, count: count, reuse: reuse,
+                counter: counter)
             + all.children
         unified.children.append(all)
-        unified.children += smartNodes(smart, store: store, accounts: accountsByID, count: count, reuse: reuse)
+        unified.children += smartNodes(smart, store: store, accounts: accountsByID, count: count, reuse: reuse, counter: counter)
         unified.children = ordered(unified.children)
         // Special mailboxes placed inside smart ones go there, after its own smart submailboxes.
         for placement in (try? store.specialPlacements()) ?? [] {
@@ -802,7 +824,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// The top-level ones, or with `inside` those inside that special mailbox (by its scope key).
     nonisolated private static func smartNodes(
         _ smart: [SmartMailboxRecord], inside special: String? = nil, store: MailStore, accounts: [String: AccountRecord],
-        count: (String, MessageScope) -> Int?, reuse: [String: SidebarNode]?
+        count: (String, MessageScope) -> Int?, reuse: [String: SidebarNode]?, counter: SmartCounter?
     ) -> [SidebarNode] {
         let byParent = Dictionary(grouping: smart, by: \.parentId)
         func nodes(_ parent: Int64?) -> [SidebarNode] {
@@ -812,7 +834,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     scope: .smart(record.id))
                 node.badge = count(node.key, .smart(record.id)) ?? 0
                 let generated = reuse?[node.key].map { $0.children.filter(\.isGenerated) }
-                node.children = nodes(record.id) + (generated ?? splitNodes(record, store: store, accounts: accounts))
+                node.children = nodes(record.id) + (generated ?? splitNodes(record, store: store, accounts: accounts, counter: counter))
                 return node
             }
         }
@@ -824,10 +846,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// A smart mailbox's Submailboxes tab as sidebar rows: a child per value, or per account; with both,
     /// the accounts, each with its own values (as unified mailboxes group sources by account).
-    nonisolated private static func splitNodes(_ record: SmartMailboxRecord, store: MailStore, accounts: [String: AccountRecord]) -> [SidebarNode] {
+    nonisolated private static func splitNodes(
+        _ record: SmartMailboxRecord, store: MailStore, accounts: [String: AccountRecord], counter: SmartCounter?
+    ) -> [SidebarNode] {
         let split = record.definition.split
+        func values(account: String?) throws -> [(value: String, unread: Int)] {
+            if let counter { return try counter.values(smart: record.id, field: split.field, account: account) }
+            return try store.smartValues(id: record.id, field: split.field, account: account)
+        }
         func valueNodes(account: String?) -> [SidebarNode] {
-            guard split.byValue, let values = try? store.smartValues(id: record.id, field: split.field, account: account),
+            guard split.byValue, let values = try? values(account: account),
                 !(split.unlessOnlyOne && values.count < 2)
             else { return [] }
             return values.map { value, unread in
@@ -841,7 +869,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 return node
             }
         }
-        guard split.byAccount, let list = try? store.smartAccounts(id: record.id) else { return valueNodes(account: nil) }
+        guard split.byAccount, let list = counter?.accounts(smart: record.id) ?? (try? store.smartAccounts(id: record.id))
+        else { return valueNodes(account: nil) }
         let sorted = list.compactMap { entry in accounts[entry.accountId].map { ($0, entry.unread) } }
             .sorted { AccountRecord.ordered($0.0, $1.0) }
         return sorted.map { account, unread in

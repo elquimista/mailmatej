@@ -633,11 +633,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 if let actions = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS"] {
-                    // Comma-separated toolbar actions, 3 s apart.
+                    // Comma-separated toolbar actions, 3 s apart; with MMJ_DEBUG_BADGES, the badges 80 ms after each.
+                    let badges = ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil
                     for name in actions.split(separator: ",") {
                         windowController?.debugPerform(String(name))
+                        if badges {
+                            try? await Task.sleep(for: .milliseconds(80))
+                            NSLog("MMJ badges 80 ms after \(name): \(windowController?.debugSidebarBadges ?? "")")
+                        }
                         try? await Task.sleep(for: .seconds(3))
                         NSLog("MMJ after \(name): selection \(windowController?.debugSelection ?? [])")
+                        if badges { NSLog("MMJ badges settled after \(name): \(windowController?.debugSidebarBadges ?? "")") }
                     }
                 }
                 // MMJ_DEBUG_SEND=1 (with MMJ_DEBUG_ACTIONS opening a compose window): fill it from MMJ_DEBUG_*,

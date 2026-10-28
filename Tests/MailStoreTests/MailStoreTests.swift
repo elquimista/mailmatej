@@ -889,6 +889,81 @@ import Testing
         #expect(try store.counts(of: [ids["2"]!], in: [.smart(payoneer), .everything]) == [0, 1])
     }
 
+    @Test func smartCountsFollowWhatChanges() throws {
+        try store.save(AccountRecord(id: "acc2", name: "Other", sessionURL: "http://x", username: "two@example.com", authKind: .basic))
+        try store.applyMailboxes(accountId: "acc2", upserts: [
+            IncomingMailbox(remoteId: "in", parentRemoteId: nil, name: "Inbox", role: "inbox", sortOrder: 0, totalEmails: 0, unreadEmails: 0),
+        ], destroyed: [], replaceAll: true)
+        try upsert([
+            message("1", from: "a@vendor.com", at: 100, subject: "Your invoice"), message("2", from: "b@x.com", at: 200),
+            message("3", from: "c@vendor.com", box: "tr", at: 300), message("4", from: "d@x.com", at: 400, keywords: ["$seen"]),
+            message("5", from: "e@x.com", at: Date().timeIntervalSince1970),
+        ])
+        try store.upsertMessages(accountId: "acc2", [message("6", from: "f@vendor.com", at: 500)])
+        let other = try store.messageIDsByRemoteID(accountId: "acc2", remoteIds: ["6"])
+        try store.setDownloadState(1, messageIds: Array(other.values))
+        var ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3", "4", "5"])
+        let boxes = Dictionary(uniqueKeysWithValues: try store.mailboxes().filter { $0.accountId == "acc" }.map { ($0.remoteId, $0.id) })
+
+        func smart(_ name: String, parent: Int64? = nil, _ definition: SmartDefinition) throws -> Int64 {
+            let id = try store.createSmartMailbox(name: name, parentId: parent)
+            try store.updateSmartMailbox(id: id, definition: definition)
+            return id
+        }
+        var byAccount = SmartSplit()
+        (byAccount.byValue, byAccount.field) = (true, .account)
+        let vendors = try smart("Vendors", SmartDefinition(
+            sources: SmartSources(scopes: [MessageScope.allMessages.key]), condition: .compound(.all, [.rule(.fromDomain, .is, "vendor.com")]),
+            split: byAccount))
+        // One counted from its submailboxes' messages (a text search among them), one that can't be (its
+        // submailbox lists it), one that changes with time, one by keyword.
+        let money = try smart("Money", SmartDefinition(sources: SmartSources(scopes: [], includeSubmailboxes: true)))
+        _ = try smart("Invoices", parent: money, SmartDefinition(condition: .compound(.all, [.rule(.subject, .contains, "invoice")])))
+        _ = try smart("Receipts", parent: money, SmartDefinition(condition: .compound(.all, [.rule(.unquoted, .contains, "receipt")])))
+        let loop = try smart("Loop", SmartDefinition(
+            sources: SmartSources(scopes: [MessageScope.role("inbox").key], includeSubmailboxes: true),
+            condition: .compound(.all, [.rule(.status, .is, SmartStatus.flagged.rawValue)])))
+        _ = try smart("Back", parent: loop, SmartDefinition(sources: SmartSources(scopes: [MessageScope.smart(loop).key, "all"])))
+        let recent = try smart("Recent", SmartDefinition(condition: .compound(.all, [.rule(.sent, .withinLast, "1")])))
+        _ = try smart("Labelled", SmartDefinition(condition: .compound(.all, [.rule(.keyword, .is, "$label1")])))
+
+        #expect(store.includedSubmailboxes(of: money)?.count == 2 && store.includedSubmailboxes(of: loop) == nil)
+
+        let counter = try SmartCounter(store: store)
+        func expectCounted(_ change: () throws -> Void, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            try change()
+            try counter.refresh()
+            #expect(try counter.mismatches() == [], sourceLocation: sourceLocation)
+        }
+        try expectCounted {}
+        #expect(counter.unreadCount(smart: vendors) == 2 && counter.unreadCount(smart: money) == 1 && counter.unreadCount(smart: recent) == 1)
+        #expect(try counter.values(smart: vendors, field: .account).map { "\($0.value) \($0.unread)" } == ["Other 1", "Test 1"])
+        try expectCounted { try store.setKeyword("$seen", true, messageIds: [ids["1"]!, ids["2"]!]) }
+        #expect(counter.unreadCount(smart: vendors) == 1 && counter.unreadCount(smart: money) == 0)
+        try expectCounted { try store.setKeyword("$flagged", true, messageIds: [ids["2"]!, ids["4"]!]) }
+        try expectCounted { try store.moveMessages([ids["2"]!, ids["3"]!], toMailboxId: boxes["in"]!) }
+        try expectCounted { try store.setKeyword("$label1", true, messageIds: [ids["4"]!]) }
+        // New mail counts once it's downloaded; a text found in its body once that's here.
+        try expectCounted { try store.upsertMessages(accountId: "acc", [message("7", from: "g@vendor.com", at: 700)]) }
+        ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3", "4", "5", "7"])
+        try expectCounted { try store.setDownloadState(1, messageIds: [ids["7"]!]) }
+        try expectCounted { try store.saveBody(messageId: ids["7"]!, MessageBody(html: nil, text: "Your receipt.")) }
+        #expect(counter.unreadCount(smart: money) == 1)
+        try expectCounted { try store.deleteMessages(accountId: "acc", remoteIds: ["3"]) }
+        // A mailbox given another role (Trash's messages leave All Messages), smart mailboxes changed.
+        try expectCounted {
+            try store.applyMailboxes(accountId: "acc", upserts: [
+                IncomingMailbox(remoteId: "se", parentRemoteId: nil, name: "Sent", role: "trash", sortOrder: 0, totalEmails: 0, unreadEmails: 0),
+            ], destroyed: [], replaceAll: false)
+            try store.moveMessages([ids["7"]!], toMailboxId: boxes["se"]!)
+        }
+        try expectCounted {
+            try store.updateSmartMailbox(id: vendors, definition: SmartDefinition(
+                condition: .compound(.all, [.rule(.fromDomain, .is, "x.com")]), split: byAccount))
+        }
+        try expectCounted { try store.deleteSmartMailbox(id: money) }
+    }
+
     @Test func keywordsAndMailboxesByRemoteID() throws {
         try upsert([message("1", from: "a@x.com", at: 100, keywords: ["$seen", "$answered"]), message("2", from: "b@x.com", at: 200)])
         var state = try store.keywordsAndMailboxes(accountId: "acc", remoteIds: ["1", "2", "gone"])

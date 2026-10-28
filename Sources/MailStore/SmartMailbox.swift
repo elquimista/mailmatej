@@ -552,17 +552,23 @@ final class SmartCatalog: @unchecked Sendable {
     private var special: [String: SmartCondition] = [:]
     /// Special mailboxes placed inside smart ones: their scope keys by smart mailbox, in order.
     private var placed: [Int64: [String]] = [:]
+    private var changes = 0
 
-    func setPlaced(_ placements: [Int64: [String]]) { lock.withLock { placed = placements } }
+    /// Bumped by every reload: lists kept from before it may now hold other messages.
+    var generation: Int { lock.withLock { changes } }
+
+    func setPlaced(_ placements: [Int64: [String]]) { lock.withLock { placed = placements; changes += 1 } }
     func placed(in id: Int64) -> [String] { lock.withLock { placed[id] ?? [] } }
 
     /// The conditions narrowing special mailboxes, by scope key.
-    func setSpecial(_ conditions: [String: SmartCondition]) { lock.withLock { special = conditions } }
+    func setSpecial(_ conditions: [String: SmartCondition]) { lock.withLock { special = conditions; changes += 1 } }
     func special(_ key: String) -> SmartCondition? { lock.withLock { special[key] } }
 
     func set(_ list: [SmartMailboxRecord]) {
-        lock.withLock { records = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) }) }
+        lock.withLock { records = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) }); changes += 1 }
     }
+
+    var all: [SmartMailboxRecord] { lock.withLock { Array(records.values) } }
 
     subscript(id: Int64) -> SmartMailboxRecord? { lock.withLock { records[id] } }
 
@@ -578,13 +584,7 @@ extension MailStore {
     func smartFilter(id: Int64, visited: Set<Int64> = []) -> (String, [(any DatabaseValueConvertible)?]) {
         guard let smart = smartCatalog[id], !visited.contains(id) else { return ("0", []) }
         let inside = visited.union([id])
-        // No mailboxes added (MailMate's new smart mailbox) means no messages: "All Messages" is a choice
-        // of its own. With "Include messages in any submailboxes" its submailboxes' still show.
-        let (sources, sourceArgs) = Self.isEmpty(smart.definition.sources.root)
-            ? ("0", []) : sql(smart.definition.sources.root, visited: inside)
-        let (condition, conditionArgs) = sql(smart.definition.condition, visited: inside)
-        var clause = "(\(sources)) AND (\(condition))"
-        var args = sourceArgs + conditionArgs
+        var (clause, args) = ownFilter(smart, visited: inside)
         if smart.definition.sources.includeSubmailboxes {
             for child in smartCatalog.children(of: id) {
                 let (childClause, childArgs) = smartFilter(id: child.id, visited: inside)
@@ -600,6 +600,37 @@ extension MailStore {
             }
         }
         return (clause, args)
+    }
+
+    /// A smart mailbox's own messages: from its sources, matching its conditions (without its
+    /// submailboxes', "Include messages in any submailboxes").
+    func smartOwnFilter(id: Int64) -> (String, [(any DatabaseValueConvertible)?]) {
+        guard let smart = smartCatalog[id] else { return ("0", []) }
+        return ownFilter(smart, visited: [id])
+    }
+
+    private func ownFilter(_ smart: SmartMailboxRecord, visited: Set<Int64>) -> (String, [(any DatabaseValueConvertible)?]) {
+        // No mailboxes added (MailMate's new smart mailbox) means no messages: "All Messages" is a choice
+        // of its own. With "Include messages in any submailboxes" its submailboxes' still show.
+        let (sources, sourceArgs) = Self.isEmpty(smart.definition.sources.root)
+            ? ("0", []) : sql(smart.definition.sources.root, visited: visited)
+        let (condition, conditionArgs) = sql(smart.definition.condition, visited: visited)
+        return ("(\(sources)) AND (\(condition))", sourceArgs + conditionArgs)
+    }
+
+    /// The submailboxes whose messages smart mailbox `id` shows with its own, when its messages are
+    /// just its own (`smartOwnFilter`) and theirs as each shows them: none of them refers back to it,
+    /// and no special mailbox is placed in it. Nil when they aren't.
+    func includedSubmailboxes(of id: Int64) -> [Int64]? {
+        guard let smart = smartCatalog[id] else { return nil }
+        guard smart.definition.sources.includeSubmailboxes else { return [] }
+        guard smartCatalog.placed(in: id).isEmpty else { return nil }
+        let children = smartCatalog.children(of: id)
+        for child in children {
+            let (inside, alone) = (smartFilter(id: child.id, visited: [id]), smartFilter(id: child.id))
+            guard inside.0 == alone.0, inside.1.map({ $0?.databaseValue }) == alone.1.map({ $0?.databaseValue }) else { return nil }
+        }
+        return children.map(\.id)
     }
 
     // MARK: #Thread-Id upkeep
@@ -662,6 +693,16 @@ extension MailStore {
                                        row["key"] as String])
         }
     }
+
+    /// What SQL made while it's set depends on besides each message's own state (see `SmartCounter`).
+    final class SQLNotes: @unchecked Sendable {
+        /// "Within the last n days": which messages that picks changes as time passes.
+        var dependsOnNow = false
+        /// #Thread-Id: a message's conversation can grow to take in messages that were already here.
+        var dependsOnOtherMessages = false
+    }
+
+    @TaskLocal static var sqlNotes: SQLNotes?
 
     static func isEmpty(_ condition: SmartCondition) -> Bool {
         if case .compound(_, let children, _) = condition { return children.allSatisfy(isEmpty) }
@@ -836,6 +877,7 @@ extension MailStore {
                         [columns.map { "\($0) : (\(query))" } ?? query])
             case .threadId:
                 // The conversation's messages as threads link them now (found anew each time).
+                Self.sqlNotes?.dependsOnOtherMessages = true
                 guard let id = Int64(value), let members = try? threadMembers(of: id), !members.isEmpty else {
                     return (op.isNegative ? "1" : "0", [])
                 }
@@ -875,6 +917,7 @@ extension MailStore {
                 default: ("(\(column) >= ? AND \(column) < ?)", [start, end])
                 }
             default:
+                Self.sqlNotes?.dependsOnNow = true
                 let days = Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
                 return ("\(not)(\(column) >= ?)", [Date().timeIntervalSince1970 - days * 86_400])
             }
