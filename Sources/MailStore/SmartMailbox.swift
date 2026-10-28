@@ -985,7 +985,7 @@ extension MailStore {
     public func specialCondition(key: String) -> SmartCondition { smartCatalog.special(key) ?? .compound(.all, []) }
 
     public func setSpecialCondition(_ condition: SmartCondition, key: String) throws {
-        try dbPool.write { db in
+        try write { db in
             if Self.isEmpty(condition) {
                 try db.execute(sql: "DELETE FROM mailbox_condition WHERE key = ?", arguments: [key])
             } else {
@@ -1026,7 +1026,7 @@ extension MailStore {
         if let sources { definition.sources = SmartSources(scopes: sources) }  // under Any
         let key = parentId == nil ? parentKey : nil
         let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
-        let id = try dbPool.write { db -> Int64 in
+        let id = try write { db -> Int64 in
             let order = try Int.fetchOne(
                 db, sql: "SELECT coalesce(max(sortOrder), -1) + 1 FROM smart_mailbox WHERE parentId IS ? AND parentKey IS ?",
                 arguments: [parentId, key]) ?? 0
@@ -1044,7 +1044,7 @@ extension MailStore {
     public func duplicateSmartMailbox(id: Int64) throws -> Int64? {
         guard let original = try smartMailboxes().first(where: { $0.id == id }) else { return nil }
         let json = String(decoding: try JSONEncoder().encode(original.definition), as: UTF8.self)
-        let copy = try dbPool.write { db -> Int64 in
+        let copy = try write { db -> Int64 in
             try db.execute(
                 sql: "UPDATE smart_mailbox SET sortOrder = sortOrder + 1 WHERE parentId IS ? AND parentKey IS ? AND sortOrder > ?",
                 arguments: [original.parentId, original.parentKey, original.sortOrder])
@@ -1070,7 +1070,7 @@ extension MailStore {
         let key = parentId == nil ? parentKey : nil
         var siblings = all.filter { $0.parentId == parentId && $0.parentKey == key && $0.id != id }.map(\.id)
         siblings.insert(id, at: min(max(0, index), siblings.count))
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "UPDATE smart_mailbox SET parentId = ?, parentKey = ? WHERE id = ?", arguments: [parentId, key, id])
             for (order, sibling) in siblings.enumerated() {
                 try db.execute(sql: "UPDATE smart_mailbox SET sortOrder = ? WHERE id = ?", arguments: [order, sibling])
@@ -1090,7 +1090,7 @@ extension MailStore {
     /// Places a special mailbox (by scope key) inside smart mailbox `parentId` at `index` among the special
     /// mailboxes there, or (nil) back among the top-level mailboxes.
     public func placeSpecialMailbox(key: String, inside parentId: Int64?, index: Int) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "DELETE FROM special_placement WHERE key = ?", arguments: [key])
             guard let parentId else { return }
             var keys = try String.fetchAll(
@@ -1108,7 +1108,7 @@ extension MailStore {
 
     /// Puts a smart mailbox first among its siblings.
     public func moveSmartMailboxFirst(id: Int64) throws {
-        try dbPool.write { db in
+        try write { db in
             let parent = try Int64?.fetchOne(db, sql: "SELECT parentId FROM smart_mailbox WHERE id = ?", arguments: [id]) ?? nil
             let lowest = try Int.fetchOne(
                 db, sql: "SELECT coalesce(min(sortOrder), 0) FROM smart_mailbox WHERE parentId IS ?", arguments: [parent]) ?? 0
@@ -1118,7 +1118,7 @@ extension MailStore {
     }
 
     public func updateSmartMailbox(id: Int64, name: String? = nil, definition: SmartDefinition? = nil) throws {
-        try dbPool.write { db in
+        try write { db in
             if let name { try db.execute(sql: "UPDATE smart_mailbox SET name = ? WHERE id = ?", arguments: [name, id]) }
             if let definition {
                 let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
@@ -1131,7 +1131,7 @@ extension MailStore {
 
     /// Deletes a smart mailbox and the ones inside it.
     public func deleteSmartMailbox(id: Int64) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "DELETE FROM smart_mailbox WHERE id = ?", arguments: [id])  // children cascade
         }
         try refreshSmartCatalog()

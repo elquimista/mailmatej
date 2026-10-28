@@ -29,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await MessageViewController.prepareBlockRules()
             AppModel.shared.start()
+            #if DEBUG
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_WRITE_WAIT"] != nil { startWriteWaitProbe() }
+            #endif
             let controller = MainWindowController(model: AppModel.shared)
             windowController = controller
             controller.showWindow(nil)
@@ -40,6 +43,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     #if DEBUG
+        /// MMJ_DEBUG_WRITE_WAIT: how long a click's write waits while syncs write. Every 50 ms the main
+        /// thread makes an empty write, as an action's would: each wait over 20 ms is logged, and every 5 s
+        /// the longest and the median.
+        private func startWriteWaitProbe() {
+            final class Waits: @unchecked Sendable {
+                var all: [Double] = []
+                var reported = ContinuousClock.now
+            }
+            let (store, waits) = (AppModel.shared.store, Waits())
+            Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+                let start = ContinuousClock.now
+                try? store.dbPool.writeWithoutTransaction { _ in }
+                let ms = Double(start.duration(to: .now).components.attoseconds) / 1e15 + Double(start.duration(to: .now).components.seconds) * 1000
+                waits.all.append(ms)
+                if ms > 20 { NSLog("MMJ write wait: \(String(format: "%.0f", ms)) ms") }
+                guard waits.reported.duration(to: .now) > .seconds(5) else { return }
+                let sorted = waits.all.sorted()
+                NSLog("MMJ write waits: \(sorted.count), longest \(String(format: "%.0f", sorted.last ?? 0)) ms, median \(String(format: "%.1f", sorted[sorted.count / 2])) ms")
+                waits.all = []
+                waits.reported = .now
+            }
+        }
+
         /// `MMJ_SNAPSHOT=/path/shot.png` writes an image of the main window a few seconds after launch,
         /// for checking the UI from scripts without Screen Recording permission.
         private func scheduleDebugSnapshot() {

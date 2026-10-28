@@ -119,7 +119,7 @@ extension MailStore {
     /// A new rule at the end of the mailbox's rules (or of `parentId`'s subrules).
     public func createRule(mailboxKey: String, parentId: Int64? = nil, definition: RuleDefinition = RuleDefinition()) throws -> Int64 {
         let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
-        return try dbPool.write { db in
+        return try write { db in
             let order = try Int.fetchOne(
                 db, sql: "SELECT coalesce(max(sortOrder), -1) + 1 FROM rule WHERE mailboxKey = ? AND parentId IS ?",
                 arguments: [mailboxKey, parentId]) ?? 0
@@ -143,7 +143,7 @@ extension MailStore {
         }
         let new = try copy(original, under: original.parentId, rename: true)
         // Right after the original: shift the later siblings.
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: "UPDATE rule SET sortOrder = sortOrder + 1 WHERE mailboxKey = ? AND parentId IS ? AND sortOrder > ? AND id <> ?",
                 arguments: [original.mailboxKey, original.parentId, original.sortOrder, new])
@@ -154,12 +154,12 @@ extension MailStore {
 
     public func updateRule(id: Int64, definition: RuleDefinition) throws {
         let json = String(decoding: try JSONEncoder().encode(definition), as: UTF8.self)
-        try dbPool.write { db in try db.execute(sql: "UPDATE rule SET definition = ? WHERE id = ?", arguments: [json, id]) }
+        try write { db in try db.execute(sql: "UPDATE rule SET definition = ? WHERE id = ?", arguments: [json, id]) }
     }
 
     /// Deletes a rule and its subrules.
     public func deleteRule(id: Int64) throws {
-        try dbPool.write { db in try db.execute(sql: "DELETE FROM rule WHERE id = ?", arguments: [id]) }
+        try write { db in try db.execute(sql: "DELETE FROM rule WHERE id = ?", arguments: [id]) }
     }
 
     /// Of `messageIds`, those in the rule's mailbox that meet its conditions.

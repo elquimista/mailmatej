@@ -29,6 +29,14 @@ public final class MailStore: Sendable {
                 let labels = email[email.index(after: at)...].split(separator: ".")
                 return labels.suffix(n).joined(separator: ".")
             })
+            #if DEBUG
+                // MMJ_DEBUG_TRANSACTIONS: write transactions over 20 ms (what other writes wait for), each by
+                // its first statement.
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TRANSACTIONS"] != nil, !db.configuration.readonly {
+                    let tracer = TransactionTracer()
+                    db.trace(options: .profile) { tracer.note($0) }
+                }
+            #endif
             // A name's first (0) or last (1) word, for Name ▸ First and Last.
             db.add(function: DatabaseFunction("mmj_name_word", argumentCount: 2, pure: true) { values in
                 guard let name = String.fromDatabaseValue(values[0]), let which = Int.fromDatabaseValue(values[1]) else { return nil }
@@ -42,6 +50,57 @@ public final class MailStore: Sendable {
         try refreshSmartCatalog()
     }
 
+    #if DEBUG
+        final class TransactionTracer: @unchecked Sendable {
+            private var began: ContinuousClock.Instant?
+            private var first: String?
+            private var statements = 0
+
+            func note(_ event: Database.TraceEvent) {
+                guard case .profile(let statement, _) = event else { return }
+                let sql = statement.sql.trimmingCharacters(in: .whitespacesAndNewlines)
+                if sql.hasPrefix("BEGIN") {
+                    (began, first, statements) = (.now, nil, 0)
+                } else if sql.hasPrefix("COMMIT") || sql.hasPrefix("ROLLBACK") {
+                    guard let began else { return }
+                    let held = began.duration(to: .now)
+                    if held > .milliseconds(20) {
+                        NSLog("MMJ transaction \(held) (\(statements) statements): \(first?.prefix(120) ?? "-")")
+                    }
+                    self.began = nil
+                } else {
+                    statements += 1
+                    if first == nil { first = sql.replacingOccurrences(of: "\n", with: " ") }
+                }
+            }
+        }
+    #endif
+
+    // MARK: Writing
+
+    /// Messages a background write takes at a time (`upsertMessages` and the like): about 15 ms each.
+    static let writeBatch = 100
+
+    /// Writes in a transaction, as `dbPool.write`. Off the main thread, writes take turns before they
+    /// queue for the database: one made on the main thread (an action's, shown at once) then waits for
+    /// the one write in progress at most, not for every account's sync queued ahead of it.
+    func write<T>(_ updates: (Database) throws -> T) throws -> T {
+        guard !Thread.isMainThread else { return try dbPool.write(updates) }
+        backgroundWrites.wait()
+        defer { backgroundWrites.signal() }
+        return try dbPool.write(updates)
+    }
+
+    /// `write` without a transaction around it.
+    func writeWithoutTransaction<T>(_ updates: (Database) throws -> T) throws -> T {
+        guard !Thread.isMainThread else { return try dbPool.writeWithoutTransaction(updates) }
+        backgroundWrites.wait()
+        defer { backgroundWrites.signal() }
+        return try dbPool.writeWithoutTransaction(updates)
+    }
+
+    private let backgroundWrites = DispatchSemaphore(value: 1)
+
     // MARK: Accounts
 
     /// The accounts, by description A to Z (see `AccountRecord.ordered`).
@@ -54,12 +113,12 @@ public final class MailStore: Sendable {
     }
 
     public func save(_ account: AccountRecord) throws {
-        try dbPool.write { db in try account.save(db) }
+        try write { db in try account.save(db) }
     }
 
     /// Removes an account and, through cascades, all of its local data.
     public func deleteAccount(id: String) throws {
-        try dbPool.write { db in _ = try AccountRecord.deleteOne(db, key: id) }
+        try write { db in _ = try AccountRecord.deleteOne(db, key: id) }
         blobs.removeAll(accountId: id)
     }
 
@@ -74,7 +133,7 @@ public final class MailStore: Sendable {
     }
 
     public func setSyncState(_ state: String?, accountId: String, type: String) throws {
-        try dbPool.write { db in
+        try write { db in
             if let state {
                 try db.execute(
                     sql: "INSERT OR REPLACE INTO syncState (accountId, objectType, state) VALUES (?, ?, ?)",
@@ -91,7 +150,7 @@ public final class MailStore: Sendable {
     public func replaceIdentities(accountId: String, _ identities: [(remoteId: String, name: String, email: String)])
         throws
     {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "DELETE FROM identity WHERE accountId = ?", arguments: [accountId])
             for i in identities {
                 try db.execute(
@@ -221,7 +280,7 @@ public final class MailStore: Sendable {
     public func applyMailboxes(accountId: String, upserts: [IncomingMailbox], destroyed: [String], replaceAll: Bool)
         throws
     {
-        try dbPool.write { db in
+        try write { db in
             let stmt = try db.cachedStatement(sql: """
                 INSERT INTO mailbox (accountId, remoteId, parentRemoteId, name, role, sortOrder, totalEmails, unreadEmails)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -281,126 +340,130 @@ public final class MailStore: Sendable {
     /// (and the lists refreshing) for seconds after a Mark All Read.
     public func upsertMessages(accountId: String, _ messages: [IncomingMessage]) throws {
         guard !messages.isEmpty else { return }
-        try dbPool.write { db in
-            var mailboxIds: [String: Int64] = [:]
-            for row in try Row.fetchAll(
-                db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId])
-            {
-                mailboxIds[row["remoteId"]] = row["id"]
-            }
+        // A batch at a time: each transaction short, so a write made meanwhile (an action's) waits little.
+        for chunk in messages.chunked(Self.writeBatch) {
+            let messages = Array(chunk)
+            try write { db in
+                var mailboxIds: [String: Int64] = [:]
+                for row in try Row.fetchAll(
+                    db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId])
+                {
+                    mailboxIds[row["remoteId"]] = row["id"]
+                }
 
-            let upsert = try db.cachedStatement(sql: """
-                INSERT INTO message (accountId, remoteId, threadId, blobId, messageIdHeader, inReplyTo, subject,
-                    sortSubject, fromDisplay, fromEmail, preview, size, receivedAt, sentAt, hasAttachment,
-                    isSeen, isFlagged, isAnswered, isDraft, referencesHeader, sentZone)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (accountId, remoteId) DO UPDATE SET
-                    threadId = excluded.threadId, blobId = excluded.blobId,
-                    messageIdHeader = excluded.messageIdHeader, inReplyTo = excluded.inReplyTo,
-                    referencesHeader = excluded.referencesHeader,
-                    subject = excluded.subject, sortSubject = excluded.sortSubject,
-                    fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
-                    size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
-                    sentZone = coalesce(excluded.sentZone, sentZone),
-                    hasAttachment = excluded.hasAttachment, isSeen = excluded.isSeen,
-                    isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft,
-                    downloadState = CASE WHEN blobId = excluded.blobId THEN downloadState ELSE 0 END
-                RETURNING id
-                """)
-            // The stored message, its columns in the order of the upsert's values after accountId and remoteId.
-            let stored = try db.cachedStatement(sql: """
-                SELECT id, threadId, blobId, messageIdHeader, inReplyTo, subject, sortSubject, fromDisplay, fromEmail,
-                    preview, size, receivedAt, sentAt, hasAttachment, isSeen, isFlagged, isAnswered, isDraft,
-                    referencesHeader, sentZone
-                FROM message WHERE accountId = ? AND remoteId = ?
-                """)
-            let storedMailboxes = try db.cachedStatement(sql: "SELECT mailboxId FROM message_mailbox WHERE messageId = ?")
-            let storedKeywords = try db.cachedStatement(sql: "SELECT keyword FROM message_keyword WHERE messageId = ?")
-            let storedAddresses = try db.cachedStatement(
-                sql: "SELECT role, position, name, email FROM address WHERE messageId = ? ORDER BY role, position")
-            let clearMailboxes = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
-            let clearKeywords = try db.cachedStatement(sql: "DELETE FROM message_keyword WHERE messageId = ?")
-            let clearAddresses = try db.cachedStatement(sql: "DELETE FROM address WHERE messageId = ?")
-            let clearFTS = try db.cachedStatement(sql: "DELETE FROM message_fts WHERE rowid = ?")
-            let addMailbox = try db.cachedStatement(
-                sql: "INSERT OR IGNORE INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)")
-            let addKeyword = try db.cachedStatement(
-                sql: "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)")
-            let addAddress = try db.cachedStatement(
-                sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, ?)")
-            let addFTS = try db.cachedStatement(
-                sql: "INSERT INTO message_fts (rowid, subject, addresses, unquoted) VALUES (?, ?, ?, ?)")
-            let storedBody = try db.cachedStatement(sql: "SELECT html, text FROM message_body WHERE messageId = ?")
+                let upsert = try db.cachedStatement(sql: """
+                    INSERT INTO message (accountId, remoteId, threadId, blobId, messageIdHeader, inReplyTo, subject,
+                        sortSubject, fromDisplay, fromEmail, preview, size, receivedAt, sentAt, hasAttachment,
+                        isSeen, isFlagged, isAnswered, isDraft, referencesHeader, sentZone)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (accountId, remoteId) DO UPDATE SET
+                        threadId = excluded.threadId, blobId = excluded.blobId,
+                        messageIdHeader = excluded.messageIdHeader, inReplyTo = excluded.inReplyTo,
+                        referencesHeader = excluded.referencesHeader,
+                        subject = excluded.subject, sortSubject = excluded.sortSubject,
+                        fromDisplay = excluded.fromDisplay, fromEmail = excluded.fromEmail, preview = excluded.preview,
+                        size = excluded.size, receivedAt = excluded.receivedAt, sentAt = excluded.sentAt,
+                        sentZone = coalesce(excluded.sentZone, sentZone),
+                        hasAttachment = excluded.hasAttachment, isSeen = excluded.isSeen,
+                        isFlagged = excluded.isFlagged, isAnswered = excluded.isAnswered, isDraft = excluded.isDraft,
+                        downloadState = CASE WHEN blobId = excluded.blobId THEN downloadState ELSE 0 END
+                    RETURNING id
+                    """)
+                // The stored message, its columns in the order of the upsert's values after accountId and remoteId.
+                let stored = try db.cachedStatement(sql: """
+                    SELECT id, threadId, blobId, messageIdHeader, inReplyTo, subject, sortSubject, fromDisplay, fromEmail,
+                        preview, size, receivedAt, sentAt, hasAttachment, isSeen, isFlagged, isAnswered, isDraft,
+                        referencesHeader, sentZone
+                    FROM message WHERE accountId = ? AND remoteId = ?
+                    """)
+                let storedMailboxes = try db.cachedStatement(sql: "SELECT mailboxId FROM message_mailbox WHERE messageId = ?")
+                let storedKeywords = try db.cachedStatement(sql: "SELECT keyword FROM message_keyword WHERE messageId = ?")
+                let storedAddresses = try db.cachedStatement(
+                    sql: "SELECT role, position, name, email FROM address WHERE messageId = ? ORDER BY role, position")
+                let clearMailboxes = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
+                let clearKeywords = try db.cachedStatement(sql: "DELETE FROM message_keyword WHERE messageId = ?")
+                let clearAddresses = try db.cachedStatement(sql: "DELETE FROM address WHERE messageId = ?")
+                let clearFTS = try db.cachedStatement(sql: "DELETE FROM message_fts WHERE rowid = ?")
+                let addMailbox = try db.cachedStatement(
+                    sql: "INSERT OR IGNORE INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)")
+                let addKeyword = try db.cachedStatement(
+                    sql: "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)")
+                let addAddress = try db.cachedStatement(
+                    sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, ?)")
+                let addFTS = try db.cachedStatement(
+                    sql: "INSERT INTO message_fts (rowid, subject, addresses, unquoted) VALUES (?, ?, ?, ?)")
+                let storedBody = try db.cachedStatement(sql: "SELECT html, text FROM message_body WHERE messageId = ?")
 
-            for m in messages {
-                let keywords = Set(m.keywords.map { $0.lowercased() })
-                let from = m.addresses.first { $0.role == .from }
-                let fromDisplay = from.map { ($0.name?.isEmpty == false ? $0.name! : $0.email) } ?? ""
-                let args: [(any DatabaseValueConvertible)?] = [
-                    accountId, m.remoteId, m.threadId, m.blobId, m.messageIdHeader, m.inReplyTo, m.subject,
-                    Self.sortSubject(m.subject), fromDisplay, from?.email.lowercased() ?? "", m.preview, m.size,
-                    m.receivedAt.timeIntervalSince1970, m.sentAt?.timeIntervalSince1970, m.hasAttachment,
-                    keywords.contains("$seen"), keywords.contains("$flagged"), keywords.contains("$answered"),
-                    keywords.contains("$draft"), m.references.joined(separator: " "), m.sentZone,
-                ]
-                var positions: [AddressRole: Int] = [:]
-                let addresses = m.addresses.map { a -> (role: Int, position: Int, name: String?, email: String) in
-                    let position = positions[a.role, default: 0]
-                    positions[a.role] = position + 1
-                    return (a.role.rawValue, position, a.name, a.email.lowercased())
-                }.sorted { ($0.role, $0.position) < ($1.role, $1.position) }
-                let boxes = Set(m.mailboxRemoteIds.compactMap { mailboxIds[$0] })
+                for m in messages {
+                    let keywords = Set(m.keywords.map { $0.lowercased() })
+                    let from = m.addresses.first { $0.role == .from }
+                    let fromDisplay = from.map { ($0.name?.isEmpty == false ? $0.name! : $0.email) } ?? ""
+                    let args: [(any DatabaseValueConvertible)?] = [
+                        accountId, m.remoteId, m.threadId, m.blobId, m.messageIdHeader, m.inReplyTo, m.subject,
+                        Self.sortSubject(m.subject), fromDisplay, from?.email.lowercased() ?? "", m.preview, m.size,
+                        m.receivedAt.timeIntervalSince1970, m.sentAt?.timeIntervalSince1970, m.hasAttachment,
+                        keywords.contains("$seen"), keywords.contains("$flagged"), keywords.contains("$answered"),
+                        keywords.contains("$draft"), m.references.joined(separator: " "), m.sentZone,
+                    ]
+                    var positions: [AddressRole: Int] = [:]
+                    let addresses = m.addresses.map { a -> (role: Int, position: Int, name: String?, email: String) in
+                        let position = positions[a.role, default: 0]
+                        positions[a.role] = position + 1
+                        return (a.role.rawValue, position, a.name, a.email.lowercased())
+                    }.sorted { ($0.role, $0.position) < ($1.role, $1.position) }
+                    let boxes = Set(m.mailboxRemoteIds.compactMap { mailboxIds[$0] })
 
-                let id: Int64
-                var isNew = false
-                var contentChanged = false
-                if let old = try Row.fetchOne(stored, arguments: [accountId, m.remoteId]) {
-                    id = old["id"]
-                    let values = args.dropFirst(2).map { $0?.databaseValue ?? .null }
-                    // Column by column (a missing time zone keeps the one stored).
-                    let changed = zip(values, old.databaseValues.dropFirst()).enumerated().contains { index, pair in
-                        pair.0 != pair.1 && !(index == values.count - 1 && pair.0.isNull)
+                    let id: Int64
+                    var isNew = false
+                    var contentChanged = false
+                    if let old = try Row.fetchOne(stored, arguments: [accountId, m.remoteId]) {
+                        id = old["id"]
+                        let values = args.dropFirst(2).map { $0?.databaseValue ?? .null }
+                        // Column by column (a missing time zone keeps the one stored).
+                        let changed = zip(values, old.databaseValues.dropFirst()).enumerated().contains { index, pair in
+                            pair.0 != pair.1 && !(index == values.count - 1 && pair.0.isNull)
+                        }
+                        if changed {
+                            _ = try Int64.fetchOne(upsert, arguments: StatementArguments(args))
+                            contentChanged = old["subject"] != m.subject || old["preview"] != m.preview
+                        }
+                    } else {
+                        guard let inserted = try Int64.fetchOne(upsert, arguments: StatementArguments(args)) else { continue }
+                        id = inserted
+                        isNew = true
                     }
-                    if changed {
-                        _ = try Int64.fetchOne(upsert, arguments: StatementArguments(args))
-                        contentChanged = old["subject"] != m.subject || old["preview"] != m.preview
-                    }
-                } else {
-                    guard let inserted = try Int64.fetchOne(upsert, arguments: StatementArguments(args)) else { continue }
-                    id = inserted
-                    isNew = true
-                }
 
-                let storedBoxes = isNew ? [] : Set(try Int64.fetchAll(storedMailboxes, arguments: [id]))
-                if isNew || storedBoxes != boxes {
-                    if !isNew { try clearMailboxes.execute(arguments: [id]) }
-                    for box in boxes { try addMailbox.execute(arguments: [id, box]) }
-                }
-                let storedKeywordSet = isNew ? [] : Set(try String.fetchAll(storedKeywords, arguments: [id]))
-                if isNew || storedKeywordSet != keywords {
-                    if !isNew { try clearKeywords.execute(arguments: [id]) }
-                    for k in keywords { try addKeyword.execute(arguments: [id, k]) }
-                }
-                let storedAddressRows = isNew ? [] : try Row.fetchAll(storedAddresses, arguments: [id])
-                let addressesChanged = isNew || !storedAddressRows.elementsEqual(addresses) {
-                    $0["role"] == $1.role && $0["position"] == $1.position && $0["name"] == $1.name && $0["email"] == $1.email
-                }
-                if addressesChanged {
-                    if !isNew { try clearAddresses.execute(arguments: [id]) }
-                    for a in addresses { try addAddress.execute(arguments: [id, a.role, a.position, a.name, a.email]) }
-                }
-                // The search index, when what it holds changed (a flag or a mailbox doesn't touch it).
-                guard isNew || contentChanged || addressesChanged else { continue }
-                let addressText = m.addresses.map { [$0.name, $0.email].compactMap { $0 }.joined(separator: " ") }
-                    .joined(separator: " ")
-                if !isNew { try clearFTS.execute(arguments: [id]) }
-                // Until its body is here, the preview stands for its text (it's the start: the sender's own).
-                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview])
-                // Its downloaded text stays searchable.
-                if !isNew, let body = try Row.fetchOne(storedBody, arguments: [id]) {
-                    try Self.indexText(
-                        db, messageId: id, text: Self.unpacked(body["text"]), html: Self.unpacked(body["html"]),
-                        headers: (m.subject, addressText))
+                    let storedBoxes = isNew ? [] : Set(try Int64.fetchAll(storedMailboxes, arguments: [id]))
+                    if isNew || storedBoxes != boxes {
+                        if !isNew { try clearMailboxes.execute(arguments: [id]) }
+                        for box in boxes { try addMailbox.execute(arguments: [id, box]) }
+                    }
+                    let storedKeywordSet = isNew ? [] : Set(try String.fetchAll(storedKeywords, arguments: [id]))
+                    if isNew || storedKeywordSet != keywords {
+                        if !isNew { try clearKeywords.execute(arguments: [id]) }
+                        for k in keywords { try addKeyword.execute(arguments: [id, k]) }
+                    }
+                    let storedAddressRows = isNew ? [] : try Row.fetchAll(storedAddresses, arguments: [id])
+                    let addressesChanged = isNew || !storedAddressRows.elementsEqual(addresses) {
+                        $0["role"] == $1.role && $0["position"] == $1.position && $0["name"] == $1.name && $0["email"] == $1.email
+                    }
+                    if addressesChanged {
+                        if !isNew { try clearAddresses.execute(arguments: [id]) }
+                        for a in addresses { try addAddress.execute(arguments: [id, a.role, a.position, a.name, a.email]) }
+                    }
+                    // The search index, when what it holds changed (a flag or a mailbox doesn't touch it).
+                    guard isNew || contentChanged || addressesChanged else { continue }
+                    let addressText = m.addresses.map { [$0.name, $0.email].compactMap { $0 }.joined(separator: " ") }
+                        .joined(separator: " ")
+                    if !isNew { try clearFTS.execute(arguments: [id]) }
+                    // Until its body is here, the preview stands for its text (it's the start: the sender's own).
+                    try addFTS.execute(arguments: [id, m.subject, addressText, m.preview])
+                    // Its downloaded text stays searchable.
+                    if !isNew, let body = try Row.fetchOne(storedBody, arguments: [id]) {
+                        try Self.indexText(
+                            db, messageId: id, text: Self.unpacked(body["text"]), html: Self.unpacked(body["html"]),
+                            headers: (m.subject, addressText))
+                    }
                 }
             }
         }
@@ -468,32 +531,34 @@ public final class MailStore: Sendable {
         accountId: String, _ wanted: [String: (keywords: Set<String>, mailboxes: Set<String>)], among managed: Set<String>
     ) throws {
         guard !wanted.isEmpty else { return }
-        try dbPool.write { db in
-            var mailboxIds: [String: Int64] = [:]
-            for row in try Row.fetchAll(db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId]) {
-                mailboxIds[row["remoteId"]] = row["id"]
-            }
-            let find = try db.cachedStatement(sql: "SELECT id FROM message WHERE accountId = ? AND remoteId = ?")
-            let keywords = try db.cachedStatement(sql: "SELECT keyword FROM message_keyword WHERE messageId = ?")
-            let boxes = try db.cachedStatement(sql: "SELECT mailboxId FROM message_mailbox WHERE messageId = ?")
-            for (remoteId, state) in wanted {
-                guard let id = try Int64.fetchOne(find, arguments: [accountId, remoteId]) else { continue }
-                let have = Set(try String.fetchAll(keywords, arguments: [id]))
-                for keyword in managed where have.contains(keyword) != state.keywords.contains(keyword) {
-                    let on = state.keywords.contains(keyword)
-                    try db.execute(
-                        sql: on ? "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)"
-                            : "DELETE FROM message_keyword WHERE messageId = ? AND keyword = ?",
-                        arguments: [id, keyword])
-                    if let column = Self.keywordColumns[keyword] {
-                        try db.execute(sql: "UPDATE message SET \(column) = ? WHERE id = ?", arguments: [on, id])
-                    }
+        for chunk in Array(wanted).chunked(Self.writeBatch) {  // a batch at a time, as `upsertMessages`
+            try write { db in
+                var mailboxIds: [String: Int64] = [:]
+                for row in try Row.fetchAll(db, sql: "SELECT remoteId, id FROM mailbox WHERE accountId = ?", arguments: [accountId]) {
+                    mailboxIds[row["remoteId"]] = row["id"]
                 }
-                let wantedBoxes = Set(state.mailboxes.compactMap { mailboxIds[$0] })
-                guard Set(try Int64.fetchAll(boxes, arguments: [id])) != wantedBoxes else { continue }
-                try db.execute(sql: "DELETE FROM message_mailbox WHERE messageId = ?", arguments: [id])
-                for box in wantedBoxes {
-                    try db.execute(sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [id, box])
+                let find = try db.cachedStatement(sql: "SELECT id FROM message WHERE accountId = ? AND remoteId = ?")
+                let keywords = try db.cachedStatement(sql: "SELECT keyword FROM message_keyword WHERE messageId = ?")
+                let boxes = try db.cachedStatement(sql: "SELECT mailboxId FROM message_mailbox WHERE messageId = ?")
+                for (remoteId, state) in chunk {
+                    guard let id = try Int64.fetchOne(find, arguments: [accountId, remoteId]) else { continue }
+                    let have = Set(try String.fetchAll(keywords, arguments: [id]))
+                    for keyword in managed where have.contains(keyword) != state.keywords.contains(keyword) {
+                        let on = state.keywords.contains(keyword)
+                        try db.execute(
+                            sql: on ? "INSERT OR IGNORE INTO message_keyword (messageId, keyword) VALUES (?, ?)"
+                                : "DELETE FROM message_keyword WHERE messageId = ? AND keyword = ?",
+                            arguments: [id, keyword])
+                        if let column = Self.keywordColumns[keyword] {
+                            try db.execute(sql: "UPDATE message SET \(column) = ? WHERE id = ?", arguments: [on, id])
+                        }
+                    }
+                    let wantedBoxes = Set(state.mailboxes.compactMap { mailboxIds[$0] })
+                    guard Set(try Int64.fetchAll(boxes, arguments: [id])) != wantedBoxes else { continue }
+                    try db.execute(sql: "DELETE FROM message_mailbox WHERE messageId = ?", arguments: [id])
+                    for box in wantedBoxes {
+                        try db.execute(sql: "INSERT INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)", arguments: [id, box])
+                    }
                 }
             }
         }
@@ -514,9 +579,9 @@ public final class MailStore: Sendable {
     public func deleteMessages(accountId: String, remoteIds: [String]) throws {
         guard !remoteIds.isEmpty else { return }
         let moves = try threadNumberMoves(accountId: accountId, remoteIds: remoteIds)
-        let files: (raw: [String], parts: [String]) = try dbPool.write { db in
-            var raw = Set<String>(), parts = Set<String>()
-            for chunk in remoteIds.chunked(500) {
+        var raw = Set<String>(), parts = Set<String>()
+        for chunk in remoteIds.chunked(Self.writeBatch) {  // a batch at a time, as `upsertMessages`
+            try write { db in
                 let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                 let arguments = StatementArguments([accountId] + chunk)
                 raw.formUnion(try String.fetchAll(
@@ -528,6 +593,8 @@ public final class MailStore: Sendable {
                         """, arguments: arguments))
                 try db.execute(sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))", arguments: arguments)
             }
+        }
+        let files: (raw: [String], parts: [String]) = try write { db in
             if !moves.isEmpty { try Self.renumberThreads(db, moves) }
             // A server can share a blob between messages: what another message still has stays.
             let stillUsed = try Self.blobIds(db, accountId: accountId, among: raw.union(parts))
@@ -603,7 +670,7 @@ public final class MailStore: Sendable {
 
     public func setDownloadState(_ state: Int, messageIds: [Int64]) throws {
         guard !messageIds.isEmpty else { return }
-        try dbPool.write { db in
+        try write { db in
             for chunk in messageIds.chunked(500) {
                 let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                 try db.execute(
@@ -615,7 +682,7 @@ public final class MailStore: Sendable {
 
     /// Lets messages that failed to download in an earlier run be tried again.
     public func retryFailedDownloads() throws {
-        try dbPool.write { db in try db.execute(sql: "UPDATE message SET downloadState = 0 WHERE downloadState = 2") }
+        try write { db in try db.execute(sql: "UPDATE message SET downloadState = 0 WHERE downloadState = 2") }
     }
 
     /// (downloaded, total) messages for an account.
@@ -630,7 +697,7 @@ public final class MailStore: Sendable {
     }
 
     public func saveBody(messageId: Int64, _ body: MessageBody, parts: [MessagePart] = []) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, ?, ?)",
                 arguments: [messageId, Self.packed(body.html), Self.packed(body.text), Date().timeIntervalSince1970])
@@ -768,7 +835,7 @@ public final class MailStore: Sendable {
         // The ids as one JSON array: a statement each, whatever the number of messages.
         let ids = "[" + messageIds.map(String.init).joined(separator: ",") + "]"
         let seen = keyword == "$seen"  // unread counts change with it
-        try dbPool.write { db in
+        try write { db in
             if seen { try Self.countInMailboxes(db, ids, sign: -1) }
             if let column {  // only those it changes (the others would refresh the lists for nothing)
                 try db.execute(
@@ -788,7 +855,7 @@ public final class MailStore: Sendable {
     public func moveMessages(_ messageIds: [Int64], toMailboxId mailboxId: Int64) throws {
         guard !messageIds.isEmpty else { return }
         let ids = "[" + messageIds.map(String.init).joined(separator: ",") + "]"
-        try dbPool.write { db in
+        try write { db in
             try Self.countInMailboxes(db, ids, sign: -1)
             try db.execute(
                 sql: "DELETE FROM message_mailbox WHERE messageId IN (\(Self.placeholders(messageIds.count)))",
@@ -820,7 +887,7 @@ public final class MailStore: Sendable {
     /// Puts a message in exactly these mailboxes.
     /// Renames a mailbox here (its server follows; see `AppModel.renameMailbox`).
     public func renameMailbox(id: Int64, to name: String) throws {
-        try dbPool.write { db in try db.execute(sql: "UPDATE mailbox SET name = ? WHERE id = ?", arguments: [name, id]) }
+        try write { db in try db.execute(sql: "UPDATE mailbox SET name = ? WHERE id = ?", arguments: [name, id]) }
     }
 
     public func setMailboxes(_ mailboxIds: [Int64], messageId: Int64) throws {
@@ -831,7 +898,7 @@ public final class MailStore: Sendable {
     public func setMailboxes(_ assignments: [Int64: [Int64]]) throws {
         guard !assignments.isEmpty else { return }
         let ids = "[" + assignments.keys.map(String.init).joined(separator: ",") + "]"
-        try dbPool.write { db in
+        try write { db in
             try Self.countInMailboxes(db, ids, sign: -1)
             let clear = try db.cachedStatement(sql: "DELETE FROM message_mailbox WHERE messageId = ?")
             let add = try db.cachedStatement(sql: "INSERT OR IGNORE INTO message_mailbox (messageId, mailboxId) VALUES (?, ?)")
@@ -875,7 +942,7 @@ public final class MailStore: Sendable {
 
     /// Keeps a change for the account's server, after any already queued.
     public func enqueueChange(accountId: String, _ change: Data) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: "INSERT INTO change_queue (accountId, change, createdAt) VALUES (?, ?, ?)",
                 arguments: [accountId, change, Date().timeIntervalSince1970])
@@ -898,12 +965,12 @@ public final class MailStore: Sendable {
     }
 
     public func removeQueuedChange(id: Int64) throws {
-        try dbPool.write { db in try db.execute(sql: "DELETE FROM change_queue WHERE id = ?", arguments: [id]) }
+        try write { db in try db.execute(sql: "DELETE FROM change_queue WHERE id = ?", arguments: [id]) }
     }
 
     /// Replaces a queued change in place (what's left of it after part went through).
     public func replaceQueuedChange(id: Int64, with change: Data) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "UPDATE change_queue SET change = ? WHERE id = ?", arguments: [change, id])
         }
     }
@@ -918,7 +985,7 @@ public final class MailStore: Sendable {
     /// The mailboxes' message and unread counts, counted from the stored messages (for servers that
     /// don't keep them per mailbox, as Gmail's labels).
     public func recountMailboxes(accountId: String) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: """
                     UPDATE mailbox SET
@@ -976,7 +1043,7 @@ public final class MailStore: Sendable {
     /// Stores the senders' time zones by remote id (0 where the Date header gives none, so it isn't asked again).
     public func setSentZones(accountId: String, _ zones: [String: Int]) throws {
         guard !zones.isEmpty else { return }
-        try dbPool.write { db in
+        try write { db in
             for (remoteId, zone) in zones {
                 try db.execute(
                     sql: "UPDATE message SET sentZone = ? WHERE accountId = ? AND remoteId = ?", arguments: [zone, accountId, remoteId])
@@ -987,7 +1054,7 @@ public final class MailStore: Sendable {
     /// Adds empty recipient groups' names to messages by remote id, and marks them fetched.
     public func addRecipientGroups(accountId: String, _ groups: [String: [IncomingMessage.Address]]) throws {
         guard !groups.isEmpty else { return }
-        try dbPool.write { db in
+        try write { db in
             for (remoteId, names) in groups {
                 guard let id = try Int64.fetchOne(
                     db, sql: "SELECT id FROM message WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
@@ -1005,7 +1072,7 @@ public final class MailStore: Sendable {
     /// Stores References for messages by remote id ([] for none, so they aren't asked for again).
     public func setReferences(accountId: String, _ references: [String: [String]]) throws {
         guard !references.isEmpty else { return }
-        try dbPool.write { db in
+        try write { db in
             for (remoteId, ids) in references {
                 try db.execute(
                     sql: "UPDATE message SET referencesHeader = ? WHERE accountId = ? AND remoteId = ?",
@@ -1078,7 +1145,7 @@ public final class MailStore: Sendable {
 
     /// Adds `"name@domain"` or `"@domain"` to the allow-list.
     public func allowRemoteContent(_ value: String) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO remote_content_allow (value, addedAt) VALUES (?, ?)",
                 arguments: [value.lowercased(), Date().timeIntervalSince1970])
@@ -1086,7 +1153,7 @@ public final class MailStore: Sendable {
     }
 
     public func disallowRemoteContent(_ value: String) throws {
-        try dbPool.write { db in
+        try write { db in
             try db.execute(sql: "DELETE FROM remote_content_allow WHERE value = ?", arguments: [value.lowercased()])
         }
     }
@@ -1646,8 +1713,10 @@ public final class MailStore: Sendable {
             return (try (Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0) * page, try (Int.fetchOne(db, sql: "PRAGMA page_count") ?? 0) * page)
         }
         guard free > minimum, free * 5 > total else { return false }
-        try dbPool.vacuum()
-        try dbPool.writeWithoutTransaction { db in try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)") }  // the file shrinks
+        try writeWithoutTransaction { db in
+            try db.execute(sql: "VACUUM")
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")  // the file shrinks
+        }
         return true
     }
 
@@ -1844,13 +1913,13 @@ public final class MailStore: Sendable {
             note("\(table)_deleted", "DELETE", table, "OLD.messageId")
         }
         note("mailbox", "UPDATE OF name, role", "mailbox", "-1", when: " WHEN OLD.name IS NOT NEW.name OR OLD.role IS NOT NEW.role")
-        try dbPool.writeWithoutTransaction { db in try db.execute(sql: sql) }
+        try writeWithoutTransaction { db in try db.execute(sql: sql) }
     }
 
     /// The messages written since the last call (since `noteChangedMessages`, the first time), and
     /// whether a mailbox was renamed or changed role (which changes lists without touching messages).
     func takeChangedMessages() throws -> (ids: [Int64], mailboxesChanged: Bool) {
-        try dbPool.write { db in
+        try write { db in
             let ids = try Int64.fetchAll(db, sql: "SELECT id FROM changed_message")
             try db.execute(sql: "DELETE FROM changed_message")
             return (ids.filter { $0 >= 0 }, ids.contains(-1))
