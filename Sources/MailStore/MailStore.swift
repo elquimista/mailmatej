@@ -534,7 +534,7 @@ public final class MailStore: Sendable {
             return (Array(raw.subtracting(stillUsed)), Array(parts.subtracting(stillUsed)))
         }
         // Their raw copies and kept parts go with them.
-        for blobId in files.raw { try? FileManager.default.removeItem(at: blobs.url(accountId: accountId, blobId: blobId)) }
+        for blobId in files.raw { blobs.remove(accountId: accountId, blobId: blobId) }
         for blobId in files.parts { try? FileManager.default.removeItem(at: blobs.partURL(accountId: accountId, blobId: blobId)) }
         if !moves.isEmpty { try refreshSmartCatalog() }
     }

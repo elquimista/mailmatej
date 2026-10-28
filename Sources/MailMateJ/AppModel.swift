@@ -1207,19 +1207,28 @@ final class AppModel {
         }
     }
 
-    /// The message's raw .eml file on disk, downloading it from the server first if needed.
+    /// The message's raw .eml, as a file in a temporary folder (the store keeps it compressed),
+    /// downloading it from the server first if needed.
     func rawMessageURL(messageId: Int64) async throws -> URL {
         guard let detail = try store.detail(id: messageId) else { throw CocoaError(.fileNoSuchFile) }
-        let url = store.blobs.url(accountId: detail.accountId, blobId: detail.blobId)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            let data = try await coordinator.downloadBlob(
-                accountId: detail.accountId, blobId: detail.blobId, type: "message/rfc822", name: "message.eml")
-            try store.blobs.write(data, accountId: detail.accountId, blobId: detail.blobId)
+        let (blobs, accountId, blobId) = (store.blobs, detail.accountId, detail.blobId)
+        var raw = try await Self.offMain { blobs.read(accountId: accountId, blobId: blobId) }
+        if raw == nil {
+            let data = try await coordinator.downloadBlob(accountId: accountId, blobId: blobId, type: "message/rfc822", name: "message.eml")
+            try await Self.offMain { try blobs.write(data, accountId: accountId, blobId: blobId) }
+            raw = data
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Messages", isDirectory: true)
+            .appendingPathComponent("\(messageId).eml")
+        let message = raw ?? Data()
+        try await Self.offMain {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try message.write(to: url, options: .atomic)
         }
         return url
     }
 
-    /// Selects the message's .eml file in Finder.
+    /// Selects the message's .eml file in Finder (a copy: see `rawMessageURL`).
     func showInFinder(messageId: Int64, window: NSWindow?) {
         Task {
             do {

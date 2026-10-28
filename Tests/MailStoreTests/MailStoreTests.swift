@@ -1022,6 +1022,46 @@ import Testing
         #expect(try store.body(messageId: ids["1"]!)?.html == html)
     }
 
+    @Test func rawMessagesAreKeptAsGzipFiles() throws {
+        let blobs = store.blobs
+        let message = Data("From: a@x.com\r\nSubject: Hi\r\n\r\n".utf8 + Array(repeating: UInt8(ascii: "x"), count: 50_000))
+        try blobs.write(message, accountId: "acc", blobId: "m1")
+        let file = blobs.url(accountId: "acc", blobId: "m1")
+        #expect(file.lastPathComponent == "m1.eml.gz")
+        #expect(try Data(contentsOf: file).prefix(2) == Data([0x1f, 0x8b]))
+        #expect(blobs.read(accountId: "acc", blobId: "m1") == message && blobs.contains(accountId: "acc", blobId: "m1"))
+        for data in [Data(), Data((0..<1_000_000).map { _ in UInt8.random(in: 0...255) })] {
+            #expect(try Gzip.decompress(Gzip.compress(data)) == data)
+        }
+
+        // Any gzip tool reads them, and they read what one writes.
+        func gzip(_ arguments: [String], input: Data) throws -> Data {
+            let process = Process(), stdin = Pipe(), stdout = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+            (process.arguments, process.standardInput, process.standardOutput) = (arguments, stdin, stdout)
+            try process.run()
+            stdin.fileHandleForWriting.write(input)
+            try stdin.fileHandleForWriting.close()
+            let output = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return output
+        }
+        #expect(try gzip(["-dc"], input: Data(contentsOf: file)) == message)
+        #expect(try Gzip.decompress(gzip(["-c"], input: message)) == message)
+
+        // One stored before (a store from a backup): read as it is, replaced when written again, removed
+        // either way.
+        let plain = blobs.plainURL(accountId: "acc", blobId: "m2")
+        try FileManager.default.createDirectory(at: plain.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try message.write(to: plain)
+        #expect(blobs.read(accountId: "acc", blobId: "m2") == message && blobs.contains(accountId: "acc", blobId: "m2"))
+        try blobs.write(message, accountId: "acc", blobId: "m2")
+        #expect(!FileManager.default.fileExists(atPath: plain.path) && blobs.read(accountId: "acc", blobId: "m2") == message)
+        try message.write(to: plain)
+        blobs.remove(accountId: "acc", blobId: "m2")
+        #expect(!blobs.contains(accountId: "acc", blobId: "m2"))
+    }
+
     @Test func deletedMessagesTakeTheirFilesAlong() throws {
         var shared = message("3", from: "c@x.com", at: 300)
         shared.blobId = "b1"  // the server shares one blob between two messages

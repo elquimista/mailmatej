@@ -842,8 +842,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             guard let id = messageView.displayedMessageID, let detail = try? model.store.detail(id: id) else {
                 return NSLog("MMJ raw: no message displayed")
             }
-            let path = model.store.blobs.url(accountId: detail.accountId, blobId: detail.blobId)
-            try? FileManager.default.removeItem(at: path)
+            model.store.blobs.remove(accountId: detail.accountId, blobId: detail.blobId)
             do {
                 let url = try await model.rawMessageURL(messageId: id)
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
