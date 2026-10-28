@@ -141,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         let ref = (try? model.store.refs(ids: [messageId]))?.first
                     else { return NSLog("MMJ flags: no message “\(parts[1])”") }
                     for step in parts[2].split(separator: ",").map(String.init) {
+                        let started = ContinuousClock.now
+                        defer { NSLog("MMJ flags step \(step) took \(started.duration(to: .now))") }
                         do {
                             switch step {
                             case "answer", "unanswer", "forward", "unforward":

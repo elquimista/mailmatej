@@ -349,6 +349,7 @@ public actor SyncCoordinator {
         accountId: String, _ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date
     ) async throws {
         try await importInto(accountId, raw, mailboxRemoteId: mailboxRemoteId, keywords: keywords, receivedAt: receivedAt)
+        requestSync(accountId)  // brings it in (one sync for many copied at once)
     }
 
     private func importInto(

@@ -318,11 +318,16 @@ public actor GmailIMAP {
 
     /// "17-Jul-1996 02:44:25 -0700".
     static func internalDate(_ text: String) -> Date? {
+        internalDateFormatter.date(from: text.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// One for every message (a full sync parses tens of thousands): parsing with it is thread-safe.
+    nonisolated(unsafe) private static let internalDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "d-MMM-yyyy HH:mm:ss Z"
-        return formatter.date(from: text.trimmingCharacters(in: .whitespaces))
-    }
+        return formatter
+    }()
 
     /// IMAP's modified UTF-7 (RFC 3501 §5.1.3), as Gmail writes non-ASCII label names: "&AOk-" is "é".
     static func decodeModifiedUTF7(_ text: String) -> String {

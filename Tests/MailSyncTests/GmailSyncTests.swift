@@ -121,6 +121,17 @@ import Testing
         #expect(GmailAccountSync.incoming(m, raw: plain, mailboxLabels: ["INBOX"])?.hasAttachment == false)
     }
 
+    @Test func attachmentSizesComeWithoutDecoding() {
+        for length in [0, 1, 2, 3, 4, 57, 58, 59, 1000, 54_321] {
+            let bytes = Data((0..<length).map { _ in UInt8.random(in: 0...255) })
+            let encoded = bytes.base64EncodedString(options: .lineLength76Characters)  // CRLF every 76, padded
+            let raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nHi\r\n"
+                + "--b\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n\(encoded)\r\n--b--\r\n"
+            let part = MIMEPart.parse(Data(raw.utf8)).children[1]
+            #expect(part.contentSize == bytes.count && part.content == bytes, "\(length) bytes")
+        }
+    }
+
     @Test func parsesAwkwardMIME() throws {
         // LF line ends, a header folded over two lines, no closing delimiter.
         let lf = "Content-Type: multipart/mixed;\n boundary=b\n\n--b\nContent-Type: text/plain\n\nfirst\n--b\nContent-Type: message/rfc822\n\nSubject: inner\n\nhello\n"

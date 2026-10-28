@@ -43,6 +43,21 @@ final class MIMEPart {
 
     var size: Int { encoded.count }
 
+    /// `content`'s size, without decoding it when it's base64 (an attachment's, of tens of megabytes):
+    /// three bytes for every four of its characters.
+    var contentSize: Int {
+        guard MailHeaders.value(of: header("Content-Transfer-Encoding")) == "base64" else { return content.count }
+        let characters = encoded.reduce(0) { count, byte in
+            switch byte {
+            case UInt8(ascii: "A")...UInt8(ascii: "Z"), UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "0")...UInt8(ascii: "9"),
+                UInt8(ascii: "+"), UInt8(ascii: "/"):
+                count + 1
+            default: count
+            }
+        }
+        return characters * 3 / 4
+    }
+
     /// The part with this id, here or below.
     func find(_ id: String) -> MIMEPart? {
         if partId == id { return self }

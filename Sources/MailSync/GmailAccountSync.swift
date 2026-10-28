@@ -20,6 +20,8 @@ public actor GmailAccountSync {
     private var archiveLabel: String?
     /// The user's labels' full names ("Work/Clients"), by id.
     private var labelNames: [String: String] = [:]
+    /// The same, by name (lowercased): what IMAP names them by.
+    private var labelIdsByName: [String: String] = [:]
     /// The labels as last stored, so a check that finds them unchanged writes nothing.
     private var storedLabels: [String]?
 
@@ -49,6 +51,9 @@ public actor GmailAccountSync {
     /// watch has seen a change since.
     private var lastFlagCheck: Date?
     private var flagsDue = true
+    /// The connection the flag work uses (see `withAllMail`), and its turns.
+    private var allMail: GmailIMAP?
+    private let allMailTurn = AsyncLimiter(limit: 1)
 
     /// The headers stored for every message.
     static let headerNames = ["From", "Sender", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
@@ -139,6 +144,7 @@ public actor GmailAccountSync {
         let user = labels.filter { $0.type == "user" }
         archiveLabel = user.first { $0.name.caseInsensitiveCompare(Self.archiveLabelName) == .orderedSame }?.id
         labelNames = Dictionary(user.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        labelIdsByName = Dictionary(user.map { ($0.name.lowercased(), $0.id) }, uniquingKeysWith: { a, _ in a })
         let byName = Dictionary(user.map { ($0.name, $0.id) }, uniquingKeysWith: { a, _ in a })
         var mailboxes: [IncomingMailbox] = []
         func add(_ id: String, name: String, parent: String?, role: String?, order: Int) {
@@ -334,7 +340,6 @@ public actor GmailAccountSync {
     /// ones "\\Inbox" and so on, and the user's by name), Spam and Trash by its folder, Unread and
     /// Starred by its flags.
     private func gmailMessage(_ message: GmailIMAP.Message, folder: String, folders: GmailIMAP.Folders) -> GmailClient.Message {
-        let byName = Dictionary(labelNames.map { ($0.value.lowercased(), $0.key) }, uniquingKeysWith: { a, _ in a })
         var labels = Set(message.labels.compactMap { label -> String? in
             switch label.lowercased() {
             case "\\inbox": "INBOX"
@@ -344,7 +349,7 @@ public actor GmailAccountSync {
             case "\\important": "IMPORTANT"
             case "\\spam": "SPAM"
             case "\\trash": "TRASH"
-            default: byName[label.lowercased()]
+            default: labelIdsByName[label.lowercased()]
             }
         })
         if folder == folders.spam { labels.insert("SPAM") }
@@ -1220,20 +1225,47 @@ extension GmailAccountSync {
         for (keyword, remoteIds) in off { try store.setKeyword(keyword, false, messageIds: remoteIds.compactMap { ids[$0] }) }
     }
 
-    /// Runs `work` on a new IMAP connection with All Mail open (read-write, CONDSTORE), closed after.
+    /// Runs `work` with All Mail open (read-write, CONDSTORE) on the connection kept for it: signing in
+    /// anew took half a second, for every change Gmail announced. One use at a time. A connection Gmail
+    /// closed since is replaced, and the work done again (setting flags and reading them can be).
     private func withAllMail<T: Sendable>(_ work: (GmailIMAP, GmailIMAP.Opened) async throws -> T) async throws -> T {
+        await allMailTurn.acquire()
+        do {
+            let result = try await onAllMail(work)
+            await allMailTurn.release()
+            return result
+        } catch {
+            await allMailTurn.release()
+            throw error
+        }
+    }
+
+    private func onAllMail<T: Sendable>(_ work: (GmailIMAP, GmailIMAP.Opened) async throws -> T) async throws -> T {
+        if let kept = allMail {
+            do {
+                return try await work(kept, try await openAllMail(kept))
+            } catch {
+                allMail = nil  // dropped, or in a state not worth knowing: a new one
+                await kept.close()
+            }
+        }
         let imap = GmailIMAP(email: account.username, tokens: tokens)
         do {
             try await imap.connect()
-            if allMailName == nil { allMailName = try await imap.folders().all }
-            guard let allMail = allMailName else { throw GmailIMAP.IMAPError.malformed("no All Mail") }
-            let result = try await work(imap, try await imap.open(allMail, readOnly: false))
-            await imap.close()
+            let result = try await work(imap, try await openAllMail(imap))
+            allMail = imap
             return result
         } catch {
             await imap.close()
             throw error
         }
+    }
+
+    /// Selects All Mail (anew each use, for its UIDVALIDITY and HIGHESTMODSEQ now).
+    private func openAllMail(_ imap: GmailIMAP) async throws -> GmailIMAP.Opened {
+        if allMailName == nil { allMailName = try await imap.folders().all }
+        guard let allMail = allMailName else { throw GmailIMAP.IMAPError.malformed("no All Mail") }
+        return try await imap.open(allMail, readOnly: false)
     }
 
     /// IMAP search criteria matching any of these: "OR a OR b c".
@@ -1498,7 +1530,7 @@ struct BodyStructure {
         let parts = (embedded + structure.attachments).compactMap { leaf -> MessagePart? in
             guard seen.insert(leaf.part.partId).inserted else { return nil }
             return MessagePart(
-                blobId: "\(blobId).\(leaf.part.partId)", cid: leaf.cid, type: leaf.type, name: leaf.name, size: leaf.part.content.count)
+                blobId: "\(blobId).\(leaf.part.partId)", cid: leaf.cid, type: leaf.type, name: leaf.name, size: leaf.part.contentSize)
         }
         return (MessageBody(html: html, text: text), parts)
     }

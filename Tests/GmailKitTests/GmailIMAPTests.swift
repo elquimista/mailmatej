@@ -54,6 +54,12 @@ struct GmailIMAPTests {
         #expect(flags.compactMap(\.atom) == ["\\Answered", "\\Seen", "$Forwarded"])
     }
 
+    @Test func readsInternalDates() {
+        #expect(GmailIMAP.internalDate("17-Jul-1996 02:44:25 -0700") == Date(timeIntervalSince1970: 837_596_665))
+        #expect(GmailIMAP.internalDate(" 1-Jan-2025 00:00:00 +0000") == Date(timeIntervalSince1970: 1_735_689_600))
+        #expect(GmailIMAP.internalDate("not a date") == nil)
+    }
+
     @Test func writesUIDSetsAsRanges() {
         #expect(GmailIMAP.uidSet([5, 1, 2, 3, 9, 12, 13, 14, 20]) == "1:3,5,9,12:14,20")
         #expect(GmailIMAP.uidSet([7]) == "7")

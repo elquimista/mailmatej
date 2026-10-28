@@ -601,7 +601,7 @@ public actor JMAPAccountSync {
 
     /// Puts a whole message (its raw RFC 5322 bytes) into a mailbox of this account (blob upload, then
     /// Email/import), keeping its keywords and received date: the copy half of a move from another
-    /// account. Returns once the server has confirmed it, then syncs it in.
+    /// account. Returns once the server has confirmed it (a sync brings it in: see `SyncCoordinator`).
     public func importMessage(_ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date) async throws {
         let accountId = try remoteAccountId(try await client.currentSession())
         let blobId = try await client.upload(accountId: accountId, data: raw, type: "message/rfc822")
@@ -620,7 +620,6 @@ public actor JMAPAccountSync {
         guard result["created"]?["m"]?["id"]?.stringValue != nil else {
             throw SendError.rejected(Self.setErrorText(result["notCreated"]?["m"] ?? .null))
         }
-        _ = try await sync()
     }
 
     /// Deletes emails for good (Email/set destroy), here and on the server.
@@ -969,13 +968,16 @@ public actor JMAPAccountSync {
 
     /// Stores the server's current copy of these emails (and forgets ones it no longer has).
     private func refetch(_ remoteIds: [String], _ accountId: String) async throws {
-        var request = JMAPRequest()
-        let get = request.call("Email/get", [
-            "accountId": .string(accountId), "ids": .strings(remoteIds), "properties": .strings(Email.properties),
-        ])
-        let result = try await client.send(request).decode(GetResponse<Email>.self, get)
-        try store.upsertMessages(accountId: account.id, result.list.map(Self.incoming))
-        try store.deleteMessages(accountId: account.id, remoteIds: result.notFound ?? [])
+        let most = try await client.currentSession().maxObjectsInGet  // more in one request: refused
+        for chunk in remoteIds.chunked(most) {
+            var request = JMAPRequest()
+            let get = request.call("Email/get", [
+                "accountId": .string(accountId), "ids": .strings(Array(chunk)), "properties": .strings(Email.properties),
+            ])
+            let result = try await client.send(request).decode(GetResponse<Email>.self, get)
+            try store.upsertMessages(accountId: account.id, result.list.map(Self.incoming))
+            try store.deleteMessages(accountId: account.id, remoteIds: result.notFound ?? [])
+        }
     }
 
     // MARK: Mapping
