@@ -98,10 +98,7 @@ public actor GmailAccountSync {
         }
         // An account synced when mailboxes meant something else (or before that was recorded) has every
         // message fetched again. A first sync still under way records nothing yet: it just carries on.
-        let mapping = try store.syncState(accountId: account.id, type: Self.mappingState)
-        let synced = try store.syncState(accountId: account.id, type: Self.historyState) != nil
-        let refetching = try store.syncState(accountId: account.id, type: Self.refetchState) != nil
-        if !refetching, mapping.map({ $0 != Self.mappingVersion }) ?? synced { try startRefetch() }
+        if try store.syncState(accountId: account.id, type: Self.refetchState) == nil, try remapping() { try startRefetch() }
         if try store.syncState(accountId: account.id, type: Self.refetchState) != nil {
             try await fullSync(refetchKnown: true, into: &result, progress: progress)
         } else if let since = try store.syncState(accountId: account.id, type: Self.historyState) {
@@ -135,6 +132,28 @@ public actor GmailAccountSync {
             flagsDue = false
         }
         return result
+    }
+
+    /// Whether the next sync lists every message (the first, or fetching all again): a full sync, in
+    /// rounds (see `fullSync`).
+    public func listsEverything() throws -> Bool {
+        try store.syncState(accountId: account.id, type: Self.historyState) == nil
+            || store.syncState(accountId: account.id, type: Self.refetchState) != nil || remapping()
+    }
+
+    /// Whether the account was synced when mailboxes meant something else (or before that was
+    /// recorded): every message is fetched again.
+    private func remapping() throws -> Bool {
+        let synced = try store.syncState(accountId: account.id, type: Self.historyState) != nil
+        return try store.syncState(accountId: account.id, type: Self.mappingState).map { $0 != Self.mappingVersion } ?? synced
+    }
+
+    /// How long a full sync's round fetches messages before it stops for others to have a turn.
+    static var fullSyncRound: Duration {
+        #if DEBUG
+            if let seconds = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_ROUND"] ?? "") { return .seconds(seconds) }
+        #endif
+        return .seconds(180)
     }
 
     private func syncLabels() async throws -> Int {
@@ -184,6 +203,10 @@ public actor GmailAccountSync {
     /// of them. Resumes where an interrupted one stopped: messages already stored are skipped (when
     /// fetching all again, those it had done, less a margin: new mail moves the list down), and
     /// Gmail's history from where it started then catches up on what changed meanwhile.
+    ///
+    /// Over IMAP it goes in rounds: one fetches for `fullSyncRound`, then stops with the result
+    /// `unfinished`, so other accounts' full syncs have a turn, and this one's own changes go up
+    /// between rounds. Each round lists again from the newest, so mail that came meanwhile goes first.
     private func fullSync(
         refetchKnown: Bool, into result: inout JMAPAccountSync.Result, progress: @Sendable (Int, Int) async -> Void
     ) async throws {
@@ -199,10 +222,21 @@ public actor GmailAccountSync {
             try store.setSyncState(start, accountId: account.id, type: Self.fullSyncState)
         }
         // Over IMAP when it can (whole messages at the network's speed, not 95 a minute); what it got
-        // stays if it stops, and the API carries on from there.
+        // stays if it stops, and the API carries on from there (to the end: it couldn't resume its
+        // listing without paging through it from the start).
         let listed: Set<String>
         do {
-            listed = try await imapList(refetchKnown: refetchKnown, into: &result, progress: progress)
+            let round = ContinuousClock.now + Self.fullSyncRound
+            guard let all = try await imapList(refetchKnown: refetchKnown, until: round, into: &result, progress: progress) else {
+                #if DEBUG
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil {
+                        NSLog("MMJ gmail full sync round for \(account.name): \(result.created) stored, more to do")
+                    }
+                #endif
+                result.unfinished = true
+                return
+            }
+            listed = all
         } catch {
             syncLog.notice("Gmail IMAP unavailable for \(self.account.name, privacy: .public), using the API: \(ErrorText.technical(error), privacy: .public)")
             listed = try await apiList(refetchKnown: refetchKnown, total: total, into: &result, progress: progress)
@@ -264,10 +298,12 @@ public actor GmailAccountSync {
 
     /// The full sync's listing over IMAP: All Mail, Spam and Trash indexed, then the messages not stored
     /// yet fetched whole in batches, newest first, with their labels and flags (when fetching all again,
-    /// those stored here get only their labels). Returns every message's id.
+    /// those stored here get only their labels). Returns every message's id, or nil when it stopped
+    /// at `deadline` (once the batches under way were in) with more to fetch.
     private func imapList(
-        refetchKnown: Bool, into result: inout JMAPAccountSync.Result, progress: @Sendable (Int, Int) async -> Void
-    ) async throws -> Set<String> {
+        refetchKnown: Bool, until deadline: ContinuousClock.Instant, into result: inout JMAPAccountSync.Result,
+        progress: @Sendable (Int, Int) async -> Void
+    ) async throws -> Set<String>? {
         let pool = try await connectIMAP(Self.imapConnections)
         let imap = pool[0]
         do {
@@ -302,7 +338,7 @@ public actor GmailAccountSync {
                 // Whole messages, up to 50 or about 4 MB a batch, several batches at once.
                 var created = 0
                 let batches = Self.batches(whole, size: \.size, maxCount: 50, maxBytes: 4_000_000)
-                try await fetchWhole(batches.map { $0.map(\.uid) }, in: folder, over: pool) { batch, fetched in
+                let finished = try await fetchWhole(batches.map { $0.map(\.uid) }, in: folder, over: pool, until: deadline) { batch, fetched in
                     created += try self.storeWhole(fetched.compactMap { message in
                         message.raw.map { (self.gmailMessage(message, folder: folder, folders: folders), $0) }
                     })
@@ -311,6 +347,10 @@ public actor GmailAccountSync {
                     try self.recountIfDue()
                 }
                 result.created += created
+                if !finished {
+                    for connection in pool { await connection.close() }
+                    return nil
+                }
             }
             await progress(entries.count, entries.count)
             for connection in pool { await connection.close() }
@@ -1055,26 +1095,31 @@ public actor GmailAccountSync {
 
     /// Fetches batches of a folder's messages whole over several connections at once, each connection
     /// taking the next batch when it's done, and hands each batch (its UIDs and messages) to `handle`
-    /// as it arrives.
+    /// as it arrives. After the first on each connection, none starts after `deadline` (those under way
+    /// finish). Returns whether all did.
+    @discardableResult
     private func fetchWhole(
-        _ batches: [[UInt32]], in folder: String, over connections: [GmailIMAP],
+        _ batches: [[UInt32]], in folder: String, over connections: [GmailIMAP], until deadline: ContinuousClock.Instant? = nil,
         handle: ([UInt32], [GmailIMAP.Message]) async throws -> Void
-    ) async throws {
-        guard !batches.isEmpty else { return }
+    ) async throws -> Bool {
+        guard !batches.isEmpty else { return true }
         for imap in connections { try await imap.examine(folder) }
-        try await withThrowingTaskGroup(of: (Int, [UInt32], [GmailIMAP.Message]).self) { group in
+        return try await withThrowingTaskGroup(of: (Int, [UInt32], [GmailIMAP.Message]).self) { group in
             var free = Array(connections.indices)
             var next = 0
+            func more() -> Bool { next < batches.count && deadline.map { ContinuousClock.now < $0 } ?? true }
             func start(on connection: Int) {
                 let imap = connections[connection], uids = batches[next]
                 next += 1
                 group.addTask { (connection, uids, try await imap.fetch(uids, bodies: true)) }
             }
+            // The first on each connection starts whatever the time, so every round gets some done.
             while next < batches.count, let connection = free.popLast() { start(on: connection) }
             while let (connection, uids, messages) = try await group.next() {
                 try await handle(uids, messages)
-                if next < batches.count { start(on: connection) }
+                if more() { start(on: connection) }
             }
+            return next == batches.count
         }
     }
 

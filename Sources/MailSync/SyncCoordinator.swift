@@ -91,6 +91,9 @@ public actor SyncCoordinator {
     private let downloadLimiter = AsyncLimiter(limit: 3)
     /// Gmail's quota is per account (and each paces itself), so more of them download at once.
     private let gmailDownloadLimiter = AsyncLimiter(limit: 10)
+    /// Gmail full syncs (every message fetched whole: hours for an old account) take their rounds a few
+    /// accounts at a time, apart from the slots other syncs use.
+    private let gmailFullSyncLimiter = AsyncLimiter(limit: 3)
     private var pollTask: Task<Void, Never>?
 
     public init(
@@ -611,7 +614,11 @@ public actor SyncCoordinator {
             pending.remove(accountId)
             if statuses[accountId]?.isOffline == true { break }
             if let gmail = gmailEngines[accountId] {
-                await limiter.acquire()
+                // A full sync goes in rounds (see `GmailAccountSync.fullSync`), taking turns with other
+                // accounts' full syncs, never holding a slot that checks for new mail and sending changes
+                // wait for.
+                let slots = (try? await gmail.listsEverything()) == true ? gmailFullSyncLimiter : limiter
+                await slots.acquire()
                 lastGmailCheck[accountId] = .now
                 let spinner = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(1.5))
@@ -621,19 +628,23 @@ public actor SyncCoordinator {
                 do {
                     try await flushQueue(accountId)
                     // Rules run on new mail as each message is stored (it can take a while for many).
-                    try await gmail.sync(
+                    let result = try await gmail.sync(
                         progress: { [weak self] downloaded, total in
                             await self?.reportHeaders(accountId, downloaded: downloaded, total: total, whole: true)
                         },
                         arrived: { [onArrived] remoteIds in onArrived(accountId, remoteIds) })
-                    endHeaders(accountId)
-                    update(accountId, .idle, success: true)
-                    startDownloads(accountId)
+                    if result.unfinished {
+                        pending.insert(accountId)  // the next round, after those waiting for theirs
+                    } else {
+                        endHeaders(accountId)
+                        update(accountId, .idle, success: true)
+                        startDownloads(accountId)
+                    }
                 } catch {
                     endHeaders(accountId)
                     update(accountId, failure: error)
                 }
-                await limiter.release()
+                await slots.release()
                 continue
             }
             guard let engine = engines[accountId] else { break }

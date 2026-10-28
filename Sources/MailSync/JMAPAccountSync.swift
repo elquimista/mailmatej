@@ -28,6 +28,9 @@ public actor JMAPAccountSync {
         /// Messages that arrived since the last sync (from `/changes`, never the first full sync): what
         /// rules run on.
         public var arrived: [String] = []
+        /// A Gmail full sync's round ended with more to do (see `GmailAccountSync.fullSync`): the next
+        /// round carries on.
+        public var unfinished = false
     }
 
     /// One full sync round: mailboxes, identities, then emails. `progress` hears how many message
