@@ -376,6 +376,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ attachment rows: \(windowController?.debugAttachmentRows ?? [])")
                     if badges { NSLog("MMJ badges settled: \(windowController?.debugSidebarBadges ?? "")") }
                 }
+                // MMJ_DEBUG_ATTACHMENT_KEYS="click:1,down,up,space,return": clicks an attachment's row in the
+                // message shown, or presses ↓ ↑ Space Return in the attachments, logging the rows after each.
+                for step in ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENT_KEYS"]?.split(separator: ",") ?? [] {
+                    let keys: [Substring: UInt16] = ["down": 125, "up": 126, "space": 49, "return": 36]
+                    if step.hasPrefix("click:"), let index = Int(step.dropFirst(6)) {
+                        windowController?.debugAttachment(click: index)
+                    } else if let key = keys[step] {
+                        windowController?.debugAttachment(click: nil, key: key)
+                    }
+                    try? await Task.sleep(for: .milliseconds(300))
+                    NSLog("MMJ attachments after \(step): \(windowController?.debugAttachmentRows ?? [])")
+                }
                 if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_SWATCHES"] {
                     // The Color menu's swatches at 1x on the dark menu background, side by side.
                     let images = [

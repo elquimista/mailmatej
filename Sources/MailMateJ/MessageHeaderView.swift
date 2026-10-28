@@ -10,7 +10,8 @@ import MailSync
 /// with attachments or the bar under it, 8 pt below it, else the body follows 2 pt after it.
 /// Attachments: a darker block with 5 pt above and below, 23 pt rows, every second row in a lighter box
 /// with 4 pt corners inset 4 pt; 20 pt icon 15 pt in, name, size, then 20 pt round buttons 6 pt apart,
-/// 18 pt from the right. The bar: 29 pt, text 14 pt in, buttons 8 pt apart, 10 pt from the right.
+/// 18 pt from the right. A selected row fills that box with the selection color, its text and buttons
+/// white. The bar: 29 pt, text 14 pt in, buttons 8 pt apart, 10 pt from the right.
 @MainActor
 final class MessageHeaderView: NSView {
     struct Field {
@@ -26,6 +27,8 @@ final class MessageHeaderView: NSView {
 
     var onOpen: (Int) -> Void = { _ in }
     var onQuickLook: (Int) -> Void = { _ in }
+    /// The selection moved to this attachment with ↑ or ↓ (Quick Look, if open, follows it).
+    var onSelectAttachment: (Int) -> Void = { _ in }
     /// Save to Downloads, or with ⌥ Save As….
     var onSave: (Int, _ option: Bool) -> Void = { _, _ in }
     var menuForAttachment: (Int) -> NSMenu? = { _ in nil }
@@ -35,6 +38,8 @@ final class MessageHeaderView: NSView {
 
     private var fieldViews: [(label: NSTextField, value: NSTextField)] = []
     private var rows: [AttachmentRow] = []
+    /// The attachments shown, to keep the selection when the same message is shown again.
+    private var attachmentKeys: [String] = []
     private var bar: RemoteBar?
     private let attachmentsBox = AttachmentsBox()
     private var line = FadingLine()
@@ -75,7 +80,8 @@ final class MessageHeaderView: NSView {
 
     /// Shows these fields (empty values left out), attachments and remote-content bar.
     func update(fields: [Field], attachments: [Attachment], bar: MessagePage.Bar?) {
-        subviews.forEach { $0.removeFromSuperview() }
+        // The attachments block stays, so it keeps the focus while the same message is shown again.
+        subviews.filter { $0 !== attachmentsBox }.forEach { $0.removeFromSuperview() }
         fieldViews = fields.filter { !$0.value.isEmpty }.map { field in
             let label = NSTextField(labelWithString: field.label)
             label.font = Self.font
@@ -101,9 +107,18 @@ final class MessageHeaderView: NSView {
             row.header = self
             return row
         }
+        let keys = attachments.map { $0.name + "\t" + $0.size }
+        let kept = keys == attachmentKeys ? attachmentsBox.selected : nil
+        attachmentKeys = keys
         // The box is kept from message to message, so the previous message's rows go with this.
+        attachmentsBox.header = self
         attachmentsBox.subviews = rows
-        if !rows.isEmpty { addSubview(attachmentsBox) }
+        attachmentsBox.selected = kept
+        if rows.isEmpty {
+            attachmentsBox.removeFromSuperview()
+        } else if attachmentsBox.superview == nil {
+            addSubview(attachmentsBox)
+        }
         self.bar = bar.map { RemoteBar(bar: $0) }
         if let barView = self.bar {
             barView.onAction = { [weak self] action, view in self?.onBarAction(action, view) }
@@ -193,6 +208,7 @@ final class MessageHeaderView: NSView {
 
     fileprivate func open(_ index: Int) { onOpen(index) }
     fileprivate func quickLook(_ index: Int) { onQuickLook(index) }
+    fileprivate func selectionMoved(_ index: Int) { onSelectAttachment(index) }
     fileprivate func save(_ index: Int, option: Bool) { onSave(index, option) }
     fileprivate func menu(_ index: Int) -> NSMenu? { menuForAttachment(index) }
     fileprivate func drag(_ index: Int) -> NSDraggingItem? { dragItem(index) }
@@ -200,6 +216,17 @@ final class MessageHeaderView: NSView {
     #if DEBUG
         /// Every row in the attachments block, current or left over, as name, size and top.
         var debugAttachmentRows: [String] { attachmentsBox.subviews.compactMap { ($0 as? AttachmentRow)?.debugText } }
+
+        /// Clicks attachment `index`, as a click on its row does; nil presses the keys instead (↓ ↑ Space Return).
+        func debugAttachment(click index: Int?, key: UInt16? = nil) {
+            if let index { return attachmentsBox.select(index) }
+            guard let key, let window,
+                let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                    context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: key)
+            else { return }
+            attachmentsBox.keyDown(with: event)
+        }
     #endif
 }
 
@@ -211,8 +238,93 @@ private final class FadingLine: NSView {
     }
 }
 
+/// The attachments block, whose rows select as MailMate's do: a click selects a row, shown in the
+/// selection color while the block has the focus (grey otherwise); ↑ and ↓ move the selection, Space
+/// shows the attachment in Quick Look and Return opens it.
 private final class AttachmentsBox: NSView {
+    weak var header: MessageHeaderView?
+    var selected: Int? {
+        didSet { updateHighlight() }
+    }
+    private var hasFocus = false {
+        didSet { updateHighlight() }
+    }
+
+    #if DEBUG
+        /// Draws the selection as while the window is in front (MMJ_DEBUG_EMPHASIZED), for checking it
+        /// from scripts that leave the app behind.
+        static let debugEmphasized = ProcessInfo.processInfo.environment["MMJ_DEBUG_EMPHASIZED"] != nil
+    #endif
+
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { false }  // not in the Tab loop
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        focusRingType = .none
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private var rows: [AttachmentRow] { subviews.compactMap { $0 as? AttachmentRow } }
+
+    /// A click on a row: selects it, and takes the focus for the keys.
+    func select(_ index: Int) {
+        selected = index
+        window?.makeFirstResponder(self)
+    }
+
+    private func updateHighlight() {
+        var emphasized = hasFocus && window?.isKeyWindow == true
+        #if DEBUG
+            emphasized = emphasized || (hasFocus && Self.debugEmphasized)
+        #endif
+        for row in rows {
+            row.highlight = row.index != selected ? .none : emphasized ? .emphasized : .unemphasized
+        }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        hasFocus = true
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        hasFocus = false
+        return true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        NotificationCenter.default.removeObserver(self)
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowKeyChanged), name: name, object: newWindow)
+        }
+    }
+
+    @objc private func windowKeyChanged() { updateHighlight() }
+
+    override func keyDown(with event: NSEvent) {
+        let count = rows.count
+        guard count > 0, event.modifierFlags.intersection([.command, .option, .control]).isEmpty else {
+            return super.keyDown(with: event)
+        }
+        switch event.keyCode {
+        case 125, 126:  // ↓, ↑
+            let down = event.keyCode == 125
+            let next = min(max((selected ?? (down ? -1 : count)) + (down ? 1 : -1), 0), count - 1)
+            guard next != selected else { return }
+            selected = next
+            header?.selectionMoved(next)
+        case 49:  // Space
+            if let selected { header?.quickLook(selected) }
+        case 36, 76:  // Return, Enter
+            if let selected { header?.open(selected) }
+        default:
+            super.keyDown(with: event)
+        }
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         MessageHeaderView.attachmentsBackground.setFill()
@@ -223,8 +335,21 @@ private final class AttachmentsBox: NSView {
 /// An attachment: icon, name and size, and its Quick Look and Save buttons. Double-click opens it,
 /// the context menu offers the rest, and it drags out as a file.
 private final class AttachmentRow: NSView, NSDraggingSource {
+    enum Highlight { case none, emphasized, unemphasized }
+
     let index: Int
     weak var header: MessageHeaderView?
+    /// Selected, and whether the selection shows in the selection color (the block has the focus).
+    var highlight = Highlight.none {
+        didSet {
+            guard highlight != oldValue else { return }
+            let white = highlight == .emphasized
+            for label in [name, size] { label.textColor = white ? .alternateSelectedControlTextColor : MessageHeaderView.attachmentText }
+            quickLook.isOnSelection = white
+            save.isOnSelection = white
+            needsDisplay = true
+        }
+    }
     private let even: Bool
     private let icon = NSImageView()
     private let name: NSTextField
@@ -266,7 +391,7 @@ private final class AttachmentRow: NSView, NSDraggingSource {
     func showOptionVariant(_ on: Bool) { save.showsOption = on }
 
     #if DEBUG
-        var debugText: String { "\(name.stringValue) \(size.stringValue) y=\(frame.minY)" }
+        var debugText: String { "\(name.stringValue) \(size.stringValue) y=\(frame.minY)\(highlight == .none ? "" : " selected (\(highlight))")" }
     #endif
 
     override func layout() {
@@ -282,13 +407,20 @@ private final class AttachmentRow: NSView, NSDraggingSource {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard even else { return }
-        MessageHeaderView.evenRow.setFill()
+        // The selection fills the same box as every second row (measured on MailMate's: identical).
+        switch highlight {
+        case .emphasized: NSColor.selectedContentBackgroundColor.setFill()
+        case .unemphasized: NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+        case .none:
+            guard even else { return }
+            MessageHeaderView.evenRow.setFill()
+        }
         NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
     }
 
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) { return showMenu(event) }
+        (superview as? AttachmentsBox)?.select(index)
         pressLocation = event.locationInWindow
         dragged = false
         if event.clickCount >= 2 { header?.open(index) }
@@ -319,7 +451,8 @@ private final class AttachmentRow: NSView, NSDraggingSource {
 }
 
 /// MailMate's round attachment buttons: a 20 pt grey circle with the symbol cut out, lighter while the
-/// pointer is on it and darker while pressed; with an ⌥ variant, that shows while ⌥ is held.
+/// pointer is on it and darker while pressed; with an ⌥ variant, that shows while ⌥ is held. White on
+/// a selected row, as MailMate's.
 private final class CircleButton: NSView {
     var onClick: (_ option: Bool) -> Void = { _ in }
     var showsOption = false {
@@ -328,9 +461,11 @@ private final class CircleButton: NSView {
             needsDisplay = true
         }
     }
+    var isOnSelection = false {
+        didSet { if isOnSelection != oldValue { needsDisplay = true } }
+    }
 
-    private let images: [NSImage]
-    private let optionImages: [NSImage]?
+    private let symbol: String
     private let title: String
     private let option: (symbol: String, title: String)?
     private var hovered = false {
@@ -341,8 +476,7 @@ private final class CircleButton: NSView {
     }
 
     init(symbol: String, title: String, option: (symbol: String, title: String)? = nil) {
-        images = Self.variants(symbol)
-        optionImages = option.map { Self.variants($0.symbol) }
+        self.symbol = symbol
         self.title = title
         self.option = option
         super.init(frame: .zero)
@@ -352,12 +486,22 @@ private final class CircleButton: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     /// Normal, hovered (brightened by a quarter) and pressed (darkened by a fifth), from the grey that
-    /// shows as MailMate's (171, 172, 172).
-    private static func variants(_ symbol: String) -> [NSImage] {
-        [157, 196, 126].map { circle(symbol, gray: CGFloat($0) / 255) }
+    /// shows as MailMate's (171, 172, 172); on a selected row white, pressed darkened by a sixth.
+    private static let grays = [157, 196, 126]
+    private static let whites = [255, 255, 214]
+
+    /// Each circle made once (finding a symbol's ink renders it), shared by every row.
+    private static var circles: [String: NSImage] = [:]
+
+    private static func circle(_ symbolName: String, gray: Int) -> NSImage {
+        let key = "\(symbolName) \(gray)"
+        if let image = circles[key] { return image }
+        let image = makeCircle(symbolName, gray: CGFloat(gray) / 255)
+        circles[key] = image
+        return image
     }
 
-    private static func circle(_ symbolName: String, gray: CGFloat) -> NSImage {
+    private static func makeCircle(_ symbolName: String, gray: CGFloat) -> NSImage {
         guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 32, weight: .regular))
         else { return NSImage() }
@@ -374,8 +518,9 @@ private final class CircleButton: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let set = showsOption ? optionImages ?? images : images
-        set[pressed ? 2 : hovered ? 1 : 0].draw(in: bounds)
+        let levels = isOnSelection ? Self.whites : Self.grays
+        let name = showsOption ? option?.symbol ?? symbol : symbol
+        Self.circle(name, gray: levels[pressed ? 2 : hovered ? 1 : 0]).draw(in: bounds)
     }
 
     override func updateTrackingAreas() {

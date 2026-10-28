@@ -75,6 +75,11 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
         header.onOpen = { [weak self] in self?.openAttachment($0) }
         header.onQuickLook = { [weak self] in self?.quickLookAttachment($0) }
+        header.onSelectAttachment = { [weak self] index in
+            // Quick Look, while open, shows the attachment the selection moved to.
+            guard QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true else { return }
+            self?.quickLookAttachment(index)
+        }
         // As MailMate's download button: saves to Downloads; with ⌥, asks where to save.
         header.onSave = { [weak self] index, option in option ? self?.saveAttachment(index) : self?.saveAttachmentToDownloads(index) }
         header.menuForAttachment = { [weak self] in self?.attachmentMenu($0) }
@@ -465,7 +470,11 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     private func showQuickLook(_ urls: [URL], panel: QLPreviewPanel) {
         previewURLs = urls
-        view.window?.makeFirstResponder(webView)
+        // The panel asks the responder chain for its controller: this view's, unless the focus is in it
+        // already (a selected attachment keeps it).
+        if !((view.window?.firstResponder as? NSView)?.isDescendant(of: view) ?? false) {
+            view.window?.makeFirstResponder(webView)
+        }
         if panel.isVisible { panel.reloadData() } else { panel.makeKeyAndOrderFront(nil) }
     }
 
@@ -705,6 +714,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         var debugShowing: String { placeholder.isHidden ? "message \(currentID ?? -1)" : "“\(placeholder.stringValue)”" }
 
         var debugAttachmentRows: [String] { header.debugAttachmentRows }
+        func debugAttachment(click index: Int?, key: UInt16? = nil) { header.debugAttachment(click: index, key: key) }
 
         /// Logs the attachments, Quick Looks the second with MMJ_DEBUG_QUICKLOOK, and fetches the first to a
         /// file (without opening it), logging its path and quarantine flag.
