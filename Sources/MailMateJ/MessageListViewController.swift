@@ -207,6 +207,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipMoved(_:)), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         let container = NSView()
         for v in [resultBar, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -292,20 +295,53 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case toMessage(Int64?)
     }
 
+    /// Whether the list keeps the end new mail arrives at (the top, or the bottom when oldest first) in
+    /// view: until the user scrolls that end out of view, and again once they scroll back to it. The
+    /// list's own scrolling (a reload, a position restored) leaves it as it is.
+    var followsNewest = true
+    /// Above 0 while the list scrolls itself, not the user.
+    private var scrollingItself = 0
+    private var lastClipOrigin: NSPoint?
+
+    /// Whether the end new mail arrives at is in view (with no rows, it is).
+    var showsNewestEnd: Bool { ids.isEmpty || isFullyVisible(sort.ascending ? ids.last : ids.first) }
+
+    /// How a reload that brought new mail scrolls: to the end it arrives at while following it (sorted by
+    /// date), otherwise keeping the user's position.
+    func followingScroll(to newIDs: [Int64]) -> Scroll {
+        guard sort.key == .receivedAt, followsNewest else { return .keepPosition }
+        return .toMessage(sort.ascending ? newIDs.last : newIDs.first)
+    }
+
+    /// The user scrolled (the wheel, the scroller, keys, the selection moving off screen): following new
+    /// mail stops if the end it arrives at went out of view, and starts again once it's back.
+    @objc private func clipMoved(_ notification: Notification) {
+        guard let clip = tableView.enclosingScrollView?.contentView else { return }
+        // A resize alone moves no rows (with the newest at the bottom, it may leave view unscrolled).
+        defer { lastClipOrigin = clip.bounds.origin }
+        guard scrollingItself == 0, clip.bounds.origin != lastClipOrigin, view.window?.isVisible == true else { return }
+        let follows = showsNewestEnd
+        #if DEBUG
+            if follows != followsNewest, ProcessInfo.processInfo.environment["MMJ_DEBUG_FOLLOW"] != nil {
+                NSLog("MMJ follow: user scrolled to y \(clip.bounds.minY), following \(follows)")
+            }
+        #endif
+        followsNewest = follows
+    }
+
     /// Whether the message's row is entirely in view (not cut off or under the column header).
     func isFullyVisible(_ id: Int64?) -> Bool {
         guard let id, let row = ids.firstIndex(of: id), let clip = tableView.enclosingScrollView?.contentView else {
             return false
         }
-        var visible = tableView.convert(clip.documentVisibleRect, from: clip)
-        let header = tableView.headerView?.frame.height ?? 0
-        if clip.contentInsets.top < header {  // The header floats over the content.
-            visible.origin.y += header - clip.contentInsets.top
-            visible.size.height -= header - clip.contentInsets.top
-        }
+        let visible = tableView.convert(clip.bounds, from: clip)
+        // The list runs under the toolbar and the column header: the insets cover both, or the header
+        // alone floats over the content.
+        let top = visible.minY + max(clip.contentInsets.top, tableView.headerView?.frame.height ?? 0)
+        let bottom = visible.maxY - clip.contentInsets.bottom
         // Vertically only: rows can be a little wider than the visible area (column widths).
         let rect = tableView.rect(ofRow: row)
-        return rect.minY + 1 >= visible.minY && rect.maxY - 1 <= visible.maxY
+        return rect.minY + 1 >= top && rect.maxY - 1 <= bottom
     }
 
     var scrollAnchor: ScrollAnchor? {
@@ -329,6 +365,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         #if DEBUG
             NSLog("MMJ animateBranch: \(delta > 0 ? "insert" : "remove") \(count) row(s) after row \(row)")
         #endif
+        scrollingItself += 1
+        defer { scrollingItself -= 1 }
         suppressSelection = true
         ids = newIDs
         NSAnimationContext.runAnimationGroup { context in
@@ -349,6 +387,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     func setIDs(_ newIDs: [Int64], selecting: [Int64]? = nil, scroll: Scroll = .keepPosition) {
         let wanted = selecting ?? selectedIDs
         let anchor = scrollAnchor
+        scrollingItself += 1
+        defer { scrollingItself -= 1 }
 
         ids = newIDs
         cache.removeAll(keepingCapacity: true)
@@ -376,6 +416,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         guard let edge, let row = ids.firstIndex(of: edge), !isFullyVisible(edge) else { return }
         let selected = selectedIDs
         guard selected.allSatisfy(isFullyVisible), let anchor = scrollAnchor else { return }
+        scrollingItself += 1
+        defer { scrollingItself -= 1 }
         tableView.scrollRowToVisible(row)
         if !selected.allSatisfy(isFullyVisible) { restore(anchor) }
     }

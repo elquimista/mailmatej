@@ -18,8 +18,6 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var scopeTitle = "Inbox"
     private var search = ""
     private var loadGeneration = 0
-    /// The newest message as of the last load, to tell whether the user is "following" new mail.
-    private var lastNewestID: Int64?
     /// The message to select once moved messages have left the list (Archive, Junk, Delete).
     /// Waits until the moved messages have left the list (at once for a move within an account; after
     /// the copy for one to another account), then selects `next`. Dropped on a new selection or mailbox.
@@ -38,6 +36,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private struct SavedView {
         var selection: [Int64]
         var anchor: MessageListViewController.ScrollAnchor?
+        /// The list followed new mail: the user hadn't scrolled away from it.
+        var following: Bool
         var correspondenceSelection: [Int64]
         var correspondenceAnchor: MessageListViewController.ScrollAnchor?
         var displayed: Int64?
@@ -405,17 +405,30 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case .scopeChanged where pendingHistorySelection.map(listed.contains) == true:
                 list.setIDs(ids, selecting: [pendingHistorySelection!], scroll: .toSelection)
                 pendingHistorySelection = nil
+                // Gone back to that message: following new mail if the end it arrives at is still in view.
+                list.followsNewest = list.showsNewestEnd
             case .scopeChanged:
                 if let saved = remembered[scope], saved.selection.contains(where: listed.contains) {
-                    list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
-                    // Mail that arrived while away shows at once, unless that scrolls the selection away.
-                    list.scrollToEdge(newestEnd)
+                    // Mail that arrived while away shows at once, unless the user had scrolled away from it.
+                    // (Sorted otherwise, the newest message shows if the selection stays in view.)
+                    let byDate = sort.key == .receivedAt
+                    list.setIDs(
+                        ids, selecting: saved.selection,
+                        scroll: byDate && saved.following ? .toMessage(newestEnd) : .restore(saved.anchor))
+                    list.followsNewest = saved.following
+                    if !byDate { list.scrollToEdge(newestEnd) }
+                    #if DEBUG
+                        if ProcessInfo.processInfo.environment["MMJ_DEBUG_FOLLOW"] != nil {
+                            NSLog("MMJ follow: back in the mailbox, following=\(saved.following), newest end in view \(list.showsNewestEnd)")
+                        }
+                    #endif
                     if let main = list.selectedID, !saved.correspondenceSelection.isEmpty {
                         pendingCorrespondence = (main, saved)
                         restoredDisplay = saved.displayed
                     }
                 } else {
                     list.setIDs(ids, selecting: [], scroll: .toMessage(newestEnd))
+                    list.followsNewest = true
                 }
             case .threadsChanged:
                 let wanted = (selectAfterThreads ?? before).filter(listed.contains)
@@ -433,27 +446,24 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 // After Archive/Junk/Delete/Move, once the messages have left the list: the next one.
                 let next = selectAfterMove!.next
                 selectAfterMove = nil
-                list.setIDs(ids, selecting: listed.contains(next) ? [next] : nil, scroll: .keepPosition)
+                list.setIDs(ids, selecting: listed.contains(next) ? [next] : nil, scroll: list.followingScroll(to: ids))
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
-                // When sorted by date and the end new mail arrives at (the top, or the bottom when oldest
-                // first) is in view, it stays in view as mail arrives; if the user scrolled away, their
+                // When sorted by date, the end new mail arrives at (the top, or the bottom when oldest
+                // first) stays in view as mail arrives, unless the user scrolled away from it: then their
                 // position is kept. (The end, not the newest message: with threads that can be a reply
                 // listed under its thread's first message, far from where the user is reading.)
                 let wasEmpty = list.ids.isEmpty
-                let edge = sort.ascending ? list.ids.last : list.ids.first
-                let following = sort.key == .receivedAt && list.isFullyVisible(edge)
-                let newEdge = sort.ascending ? ids.last : ids.first
+                #if DEBUG
+                    let endShown = list.showsNewestEnd
+                #endif
+                list.setIDs(ids, scroll: wasEmpty ? .toMessage(newestEnd) : list.followingScroll(to: ids))
                 #if DEBUG
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_FOLLOW"] != nil {
-                        NSLog("MMJ follow: following=\(following) edge \(edge ?? -1) -> \(newEdge ?? -1) rows \(list.ids.count) -> \(ids.count)")
+                        NSLog("MMJ follow: following=\(list.followsNewest), rows \(ids.count), newest end in view \(endShown) -> \(list.showsNewestEnd)")
                     }
                 #endif
-                list.setIDs(
-                    ids,
-                    scroll: wasEmpty ? .toMessage(newestEnd) : following && newEdge != edge ? .toMessage(newEdge) : .keepPosition)
             }
-            lastNewestID = newest
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: list shown (\(reason), \(ids.count) rows) after \(Int(Date().timeIntervalSince(started) * 1000)) ms") }
             #endif
@@ -1493,7 +1503,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Remembers the list's selection and position in the current mailbox, for coming back to it.
     private func saveView() {
         remembered[scope] = SavedView(
-            selection: list.selectedIDs, anchor: list.scrollAnchor,
+            selection: list.selectedIDs, anchor: list.scrollAnchor, following: list.followsNewest,
             correspondenceSelection: correspondence.selectedIDs, correspondenceAnchor: correspondence.scrollAnchor,
             displayed: messageView.displayedMessageID)
     }
@@ -1863,7 +1873,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         // message moved away from outside it, say).
         let kept = before.filter { !leaving.contains($0) }
         let selecting = next.map { [$0] } ?? kept
-        list.setIDs(list.ids.filter { !leaving.contains($0) }, selecting: selecting, scroll: .keepPosition)
+        let remaining = list.ids.filter { !leaving.contains($0) }
+        list.setIDs(remaining, selecting: selecting, scroll: list.followingScroll(to: remaining))
         if list.selectedIDs != before {  // the message pane follows the selection, as after a reload
             messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
             scheduleCorrespondenceUpdate(for: list.selectedID)
