@@ -9,7 +9,7 @@ enum ListColumns {
     /// The menu's "Use as Default Columns", until it is used.
     private static let builtInDefault: Set<Column> = [.unread, .flag, .from, .subject, .date, .source, .attachment]
     private static let defaultKey = "ListColumnsDefault"
-    private static let mailboxesKey = "ListColumns"
+    static let mailboxesKey = "ListColumns"
 
     private static func columns(_ stored: Any?) -> Set<Column>? {
         (stored as? [String]).map { Set($0.compactMap(Column.init(rawValue:))) }

@@ -18,7 +18,7 @@ struct SubmailboxSettings: Codable, Equatable {
     /// "Submailbox for the messages of each account".
     var byAccount = false
 
-    private static let defaultsKey = "SubmailboxSettings"
+    static let defaultsKey = "SubmailboxSettings"
 
     init(bySource: Bool = false, field: SmartField = .account, unlessOnlyOne: Bool = true, byAccount: Bool = false) {
         self.bySource = bySource

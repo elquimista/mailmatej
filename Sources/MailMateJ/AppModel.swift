@@ -894,6 +894,7 @@ final class AppModel {
         }
         definition.split.unlessOnlyOne = old.unlessOnlyOne
         guard let id = try? store.createSmartMailbox(name: "Flagged", parentId: nil) else { return }
+        MailboxSettings.forgetSmartMailbox(id)
         try? store.updateSmartMailbox(id: id, definition: definition)
         try? store.moveSmartMailboxFirst(id: id)
         UserDefaults.standard.set(Int(id), forKey: Self.flaggedDefaultsKey)
@@ -907,6 +908,7 @@ final class AppModel {
     func createSmartMailbox(name: String, parentId: Int64?, parentKey: String? = nil, sources: [String]? = nil) -> Int64? {
         do {
             let id = try store.createSmartMailbox(name: name, parentId: parentId, parentKey: parentKey, sources: sources)
+            MailboxSettings.forgetSmartMailbox(id)  // one deleted earlier may have had its id
             refreshNow(countsUnchanged: true)
             return id
         } catch {
@@ -926,7 +928,16 @@ final class AppModel {
 
     func deleteSmartMailbox(id: Int64) {
         do {
+            // The smart mailboxes inside it go too, and so do their settings.
+            let all = try store.smartMailboxes()
+            var gone = [id]
+            var next = 0
+            while next < gone.count {
+                gone += all.filter { $0.parentId == gone[next] }.map(\.id)
+                next += 1
+            }
             try store.deleteSmartMailbox(id: id)
+            gone.forEach(MailboxSettings.forgetSmartMailbox)
             refreshNow()
         } catch {
             present(error)

@@ -20,8 +20,8 @@ enum DisplayedCounts {
         }
     }
 
-    private static let kindsKey = "MailboxDisplayedCounts"
-    private static let includesKey = "MailboxCountsIncludeSubmailboxes"
+    static let kindsKey = "MailboxDisplayedCounts"
+    static let includesKey = "MailboxCountsIncludeSubmailboxes"
 
     /// The count chosen for a mailbox; nil: Inherit.
     static func kind(for key: String) -> Kind? {

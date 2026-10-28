@@ -89,12 +89,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var suppressSelection = false
     /// Set while `reload()` re-expands rows, so expansion callbacks don't refresh statuses per row.
     private var isReloading = false
-    private static let expandedDefaultsKey = "SidebarExpandedKeys"
+    static let expandedDefaultsKey = "SidebarExpandedKeys"
 
     init(model: AppModel) {
         self.model = model
         expandedKeys = Set(UserDefaults.standard.stringArray(forKey: Self.expandedDefaultsKey) ?? [])
         super.init(nibName: nil, bundle: nil)
+        // Posted on the main thread; at once, before the sidebar shows the new mailbox.
+        NotificationCenter.default.addObserver(forName: MailboxSettings.didForget, object: nil, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.expandedKeys = Set(UserDefaults.standard.stringArray(forKey: Self.expandedDefaultsKey) ?? [])
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: .submailboxSettingsDidChange, object: nil, queue: .main
         ) { [weak self] _ in
@@ -674,7 +680,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     // MARK: Order
 
     /// The Mailboxes section's order, as dragged: special and smart mailboxes mixed, by key.
-    private static let orderDefaultsKey = "SidebarMailboxOrder"
+    static let orderDefaultsKey = "SidebarMailboxOrder"
 
     /// `nodes` in the saved order; ones not in it (new smart mailboxes) keep their place after the
     /// one before them.
@@ -1569,6 +1575,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func duplicate(_ node: SidebarNode) {
         guard case .smart(let id)? = node.scope, let copy = try? model.store.duplicateSmartMailbox(id: id) else { return }
+        MailboxSettings.forgetSmartMailbox(copy)  // one deleted earlier may have had its id
         let key = "smart.\(copy)"
         // Looks and counts as the original does: color, symbol, displayed count.
         if let color = MailboxColors.color(for: node.key) { MailboxColors.set(color, for: key) }

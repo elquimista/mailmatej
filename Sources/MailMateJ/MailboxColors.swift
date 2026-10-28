@@ -78,7 +78,7 @@ enum MailboxColor: Equatable {
 /// Mailbox colors by sidebar key, kept in the app's preferences.
 enum MailboxColors {
     static let didChange = Notification.Name("MailboxColorsDidChange")
-    private static let defaultsKey = "MailboxColors"
+    static let defaultsKey = "MailboxColors"
 
     /// The color chosen for a mailbox or source, or nil for its default (accent, as in MailMate).
     static func color(for key: String) -> MailboxColor? {
@@ -87,7 +87,7 @@ enum MailboxColors {
 
     // MARK: Use Color in Message List
 
-    private static let listDefaultsKey = "MailboxColorsInList"
+    static let listDefaultsKey = "MailboxColorsInList"
 
     /// Mailboxes whose messages show their text in the mailbox's color, in the order they were set.
     static var listColoredKeys: [String] { UserDefaults.standard.stringArray(forKey: listDefaultsKey) ?? [] }
@@ -244,7 +244,7 @@ enum MailboxColors {
 
 /// Mailbox symbols chosen with MailMate's Symbol menu, by sidebar key, kept in the app's preferences.
 enum MailboxSymbols {
-    private static let defaultsKey = "MailboxSymbols"
+    static let defaultsKey = "MailboxSymbols"
 
     /// MailMate's Symbol menu choices, in its order: the menu title and the SF Symbol.
     static let presets: [(title: String, symbol: String)] = [
