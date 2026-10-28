@@ -1067,20 +1067,8 @@ public actor JMAPAccountSync {
         return MessageBody(html: html, text: text)
     }
 
-    /// Readable text from HTML, for the search index: drops style/script/head and tags,
-    /// decodes common entities and collapses whitespace.
-    static func plainText(fromHTML html: String) -> String {
-        var s = html.replacingOccurrences(
-            of: #"(?is)<(style|script|head|title)\b.*?</\1>"#, with: " ", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"(?i)<(br|/p|/div|/tr|/li|/h\d)\b[^>]*>"#, with: "\n", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
-        for (entity, char) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
-            s = s.replacingOccurrences(of: entity, with: char)
-        }
-        s = s.replacingOccurrences(of: #"[ \t\r\f]+"#, with: " ", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"\s*\n\s*"#, with: "\n", options: .regularExpression)
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    /// Readable text from HTML, for the search index (see `HTMLText`).
+    static func plainText(fromHTML html: String) -> String { HTMLText.plainText(html) }
 
     static func escapeHTML(_ s: String) -> String {
         s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
