@@ -639,6 +639,8 @@ import Testing
         #expect(flagged(MailStore.thread(rows, expanded: [keys[1]!], opened: [2])) == [1])
         let unflagged = rows.map { var row = $0; row.flagged = row.id == 3; return row }
         #expect(flagged(MailStore.thread(unflagged, expanded: [keys[1]!])) == [1, 2])  // c, under b
+        // And how many replies each stands for: b, c and d under a; c under b.
+        #expect(MailStore.thread(rows, expanded: [keys[1]!]).map(\.replyCount) == [3, 1, 0, 1])
     }
 
     @Test func threadsSortedByDateGoWhereTheirNewestMessageIs() {

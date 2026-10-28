@@ -635,7 +635,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
     }
 
-    /// "Subject — Mailbox (N messages)", as MailMate titles its window.
+    /// "Subject — Mailbox (N messages)", as MailMate titles its window; "(2 of N messages)" while the
+    /// selection stands for more than one (a folded thread, say).
     private func updateTitle() {
         guard hasMailbox else {
             window?.title = "No mailbox selected"  // MailMate's
@@ -643,7 +644,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         // Messages, as MailMate counts them, not rows: a collapsed thread is one row.
         let count = messageCount
-        let mailbox = "\(scopeTitle) (\(count.formatted()) message\(count == 1 ? "" : "s"))"
+        let selected = list.selectedMessageCount
+        let of = selected > 1 ? "\(selected.formatted()) of " : ""
+        let mailbox = "\(scopeTitle) (\(of)\(count.formatted()) message\(count == 1 ? "" : "s"))"
         let subject = list.selectedID.flatMap { try? model.store.detail(id: $0)?.subject }
         window?.title = subject.map { ($0.isEmpty ? "(no subject)" : $0) + " — " + mailbox } ?? mailbox
     }

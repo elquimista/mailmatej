@@ -1067,6 +1067,8 @@ public final class MailStore: Sendable {
         /// Whether a reply under this message, at any depth, is flagged: a folded row shows a hollow flag
         /// for it, as MailMate does.
         public var flaggedReply: Bool
+        /// How many replies are under this message, at any depth: a folded row stands for them too.
+        public var replyCount: Int
         /// Whether replies hang under this message (it gets a chevron).
         public var hasReplies: Bool
         /// When the thread's newest message arrived (on its first row; the row's own date elsewhere): a
@@ -1075,7 +1077,7 @@ public final class MailStore: Sendable {
 
         public init(
             id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, flaggedReply: Bool = false,
-            hasReplies: Bool = false, newestAt: Double = 0
+            replyCount: Int = 0, hasReplies: Bool = false, newestAt: Double = 0
         ) {
             self.id = id
             self.thread = thread
@@ -1083,6 +1085,7 @@ public final class MailStore: Sendable {
             self.size = size
             self.anyUnread = anyUnread
             self.flaggedReply = flaggedReply
+            self.replyCount = replyCount
             self.hasReplies = hasReplies
             self.newestAt = newestAt
         }
@@ -1295,27 +1298,30 @@ public final class MailStore: Sendable {
             // Every other message of the thread is under its first.
             result.append(ThreadedRow(
                 id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread,
-                flaggedReply: messages.contains { $0.flagged && $0.id != topID }, hasReplies: true, newestAt: messages.last!.at))
+                flaggedReply: messages.contains { $0.flagged && $0.id != topID }, replyCount: size - 1, hasReplies: true,
+                newestAt: messages.last!.at))
             guard expanded.contains(thread) else { continue }
             var placed: Set<Int64> = [topID]
-            // Whether a reply anywhere under `id` is flagged.
-            func flaggedUnder(_ id: Int64) -> Bool {
+            // The replies anywhere under `id`: how many, and whether one is flagged.
+            func replies(under id: Int64) -> (count: Int, flagged: Bool) {
                 var seen: Set<Int64> = [id]
                 var queue = [id]
+                var flagged = false
                 while let next = queue.popLast() {
                     for child in children[next] ?? [] where seen.insert(child.id).inserted {
-                        if child.flagged { return true }
+                        flagged = flagged || child.flagged
                         queue.append(child.id)
                     }
                 }
-                return false
+                return (seen.count - 1, flagged)
             }
             func walk(_ id: Int64, depth: Int) {
                 for child in children[id] ?? [] where placed.insert(child.id).inserted {
-                    let replies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
+                    let hasReplies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
+                    let under = hasReplies ? replies(under: child.id) : (count: 0, flagged: false)
                     result.append(ThreadedRow(
-                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false,
-                        flaggedReply: replies && flaggedUnder(child.id), hasReplies: replies, newestAt: child.at))
+                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, flaggedReply: under.flagged,
+                        replyCount: under.count, hasReplies: hasReplies, newestAt: child.at))
                     if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
                 }
             }

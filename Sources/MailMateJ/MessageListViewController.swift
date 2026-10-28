@@ -266,6 +266,14 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     var selectedID: Int64? { selectedIDs.count == 1 ? selectedIDs[0] : nil }
 
+    /// How many messages the selection stands for, as MailMate counts them: a folded row its replies too.
+    var selectedMessageCount: Int {
+        selectedIDs.reduce(0) { count, id in
+            guard let thread = threadRows[id], thread.hasReplies, isFolded(thread) else { return count + 1 }
+            return count + 1 + thread.replyCount
+        }
+    }
+
     /// Where the list is scrolled, as "message X's top edge is `offset` points below the top of the view",
     /// so it survives rows being inserted or removed above it.
     struct ScrollAnchor {
