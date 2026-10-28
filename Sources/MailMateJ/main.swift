@@ -46,6 +46,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] else { return }
             Task {
                 try? await Task.sleep(for: .seconds(Double(ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_DELAY"] ?? "4") ?? 4))
+                // MMJ_DEBUG_COUNT_CHOICE="key=kind,key=inherit": Displayed Count choices, timed (see debugChooseCount).
+                for (index, choice) in (ProcessInfo.processInfo.environment["MMJ_DEBUG_COUNT_CHOICE"]?.split(separator: ",") ?? []).enumerated() {
+                    let parts = choice.split(separator: "=").map(String.init)
+                    guard parts.count == 2 else { continue }
+                    await windowController?.debugChooseCount(key: parts[0], kind: parts[1], full: index == 0)
+                }
                 if let key = ProcessInfo.processInfo.environment["MMJ_DEBUG_DUPLICATE"] {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))

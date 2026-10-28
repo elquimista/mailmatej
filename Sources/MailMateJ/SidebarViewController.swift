@@ -107,7 +107,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         NotificationCenter.default.addObserver(
             forName: .submailboxSettingsDidChange, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reload() }
+            MainActor.assumeIsolated { self?.rebuild() }
         }
         NotificationCenter.default.addObserver(forName: MailboxColors.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.restyleVisibleRows() }
@@ -322,6 +322,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             Self.buildTree(store: model.store, counts: showsStatus, reuse: reuse)
         }
         apply(fresh)
+    }
+
+    /// After a change made here (a count chosen, a smart mailbox added, submailboxes changed): the rows at
+    /// once, keeping the counts shown, and everything counted again off the main thread, so the click
+    /// doesn't wait for dozens of queries (`reload()` counts them all where it's called).
+    func rebuild() {
+        reload(keepingCounts: true)
+        reloadInBackground()
     }
 
     /// Smart mailboxes' counts, kept from build to build (the main sidebar's background builds).
@@ -548,6 +556,24 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         /// Selects the item with `key` as a click would (fires `onSelect`).
         func debugExpand(key: String) {
             if let node = find(key, in: roots) { outline.expandItem(node) }
+        }
+
+        /// Chooses a Displayed Count for `key` ("inherit" for none) as its menu does, logging how long the
+        /// main thread took and the row's badge 80 ms and 1 s after; with `full`, a whole reload's time first.
+        func debugChooseCount(key: String, kind: String, full: Bool) async {
+            if full {
+                let start = ContinuousClock.now
+                reload()
+                NSLog("MMJ count choice: a full reload takes \(start.duration(to: .now))")
+            }
+            let start = ContinuousClock.now
+            DisplayedCounts.set(DisplayedCounts.Kind(rawValue: kind), for: key)
+            rebuild()
+            NSLog("MMJ count choice \(key)=\(kind): main thread \(start.duration(to: .now)), badge \(find(key, in: roots)?.badge ?? -1)")
+            try? await Task.sleep(for: .milliseconds(80))
+            NSLog("MMJ count choice \(key)=\(kind): badge 80 ms after \(find(key, in: roots)?.badge ?? -1)")
+            try? await Task.sleep(for: .seconds(1))
+            NSLog("MMJ count choice \(key)=\(kind): badge settled \(find(key, in: roots)?.badge ?? -1)")
         }
 
         var debugInboxBadge: Int { find("unified.inbox", in: roots)?.badge ?? -1 }
@@ -1542,13 +1568,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @objc private func countChosen(_ sender: NSMenuItem) {
         guard let choice = sender.representedObject as? CountChoice else { return }
         DisplayedCounts.set(choice.kind, for: choice.key)
-        reload()
+        rebuild()
     }
 
     @objc private func toggleIncludeSubmailboxes(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, let node = Self.node(withKey: key, in: roots) else { return }
         DisplayedCounts.setIncludesSubmailboxes(!includesSubmailboxes(node), for: key)
-        reload()
+        rebuild()
     }
 
     // MARK: Color
@@ -1800,7 +1826,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             order.insert(key, at: at + 1)
             UserDefaults.standard.set(order, forKey: Self.orderDefaultsKey)
         }
-        reload()
+        rebuild()
         if select(key: key) { beginRename(key: key, thenEdit: false) }
     }
 
@@ -1849,7 +1875,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         defer {
             if reloadAfterRename {
                 reloadAfterRename = false
-                reload()
+                rebuild()
             }
         }
         field.isEditable = false

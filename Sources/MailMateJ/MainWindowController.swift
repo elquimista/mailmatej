@@ -741,6 +741,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             list.tableView.sortDescriptors = [prototype]
         }
         func debugDuplicateSidebar(_ key: String) { sidebar.debugDuplicate(key: key) }
+        func debugChooseCount(key: String, kind: String, full: Bool) async {
+            await sidebar.debugChooseCount(key: key, kind: kind, full: full)
+        }
         var debugSidebarTitleColors: String { sidebar.debugTitleColors }
         func debugRefreshSidebarStatuses() { sidebar.debugRefreshStatuses() }
         func debugScrollSidebarToTop() { sidebar.debugScrollToTop() }
@@ -1189,7 +1192,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             model.updateSmartMailbox(id: id, definition: SmartDefinition(sources: sources, condition: root))
             searchBack = nil
             if result != nil { endResult() } else { clearSearch() }
-            sidebar.reload()
+            sidebar.rebuild()
             let key = "smart.\(id)"
             guard sidebar.select(key: key) else { return }
             if edit { MailboxEditorWindowController.show(key: key, model: model, over: window, tab: .conditions) }
