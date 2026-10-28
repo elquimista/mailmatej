@@ -1460,31 +1460,42 @@ final class AppModel {
     #endif
 
     #if DEBUG
-        /// Adds a test message to a Gmail account's Inbox directly (as mail arriving would, not through
-        /// this app), logs how long it takes to show here, then deletes it for good.
-        func debugRemoteArrival(accountId: String) async {
+        /// Adds test messages to a Gmail account's Inbox directly (as mail arriving would, not through
+        /// this app), logs how long they take to show here, then deletes them for good. More than one
+        /// arrive together, as after a night's sleep: added while the account is offline, then taken online.
+        func debugRemoteArrival(accountId: String, count: Int = 1) async {
             guard let account = try? store.account(id: accountId), let tokens = try? Self.googleTokens(for: account) else {
                 return NSLog("MMJ remote arrival: no account")
             }
             let gmail = GmailClient(tokens: tokens)
-            let subject = "MailMateJ arrival test \(Int(Date().timeIntervalSince1970))"
-            let raw = "From: Test <test@example.com>\r\nTo: \(account.username)\r\nSubject: \(subject)\r\nDate: \(Date().formatted(.dateTime))\r\nMessage-ID: <\(UUID().uuidString)@mailmatej.test>\r\n\r\nArrival test.\r\n"
+            let stamp = Int(Date().timeIntervalSince1970)
+            let subjects = (1...max(1, count)).map { "MailMateJ arrival test \(stamp) #\($0)" }
+            if count > 1 { await coordinator.takeOffline(accountId) }
             do {
-                try await gmail.importMessage(Data(raw.utf8), labels: ["INBOX", "UNREAD"])
+                for subject in subjects {
+                    let raw = "From: Test <test@example.com>\r\nTo: \(account.username)\r\nSubject: \(subject)\r\nDate: \(Date().formatted(.dateTime))\r\nMessage-ID: <\(UUID().uuidString)@mailmatej.test>\r\n\r\nArrival test.\r\n"
+                    try await gmail.importMessage(Data(raw.utf8), labels: ["INBOX", "UNREAD"])
+                }
             } catch {
-                return NSLog("MMJ remote arrival: \(error)")
+                NSLog("MMJ remote arrival: \(error)")
             }
+            if count > 1 { await coordinator.takeOnline(account) }
             let started = Date()
-            NSLog("MMJ remote arrival: added in Gmail now")
-            var found: (id: Int64, remoteId: String)?
-            while Date().timeIntervalSince(started) < 90, found == nil {
+            NSLog("MMJ remote arrival: \(subjects.count) added in Gmail now")
+            var found: [String: String] = [:]  // subject: remote id
+            while Date().timeIntervalSince(started) < 120, found.count < subjects.count {
                 try? await Task.sleep(for: .milliseconds(200))
-                found = ((try? store.messageIDs(scope: .account(accountId))) ?? []).lazy.compactMap { id in
-                    (try? self.store.detail(id: id)).flatMap { $0.subject == subject ? (id, $0.remoteId) : nil }
-                }.first
+                let shown = ((try? store.messageIDs(scope: .account(accountId))) ?? []).prefix(500).compactMap { id in
+                    (try? self.store.detail(id: id)).flatMap { subjects.contains($0.subject) ? ($0.subject, $0.remoteId) : nil }
+                }
+                let before = found.count
+                for (subject, remoteId) in shown { found[subject] = remoteId }
+                if found.count > before {
+                    NSLog("MMJ remote arrival: \(found.count) of \(subjects.count) shown here after \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
+                }
             }
-            NSLog("MMJ remote arrival: shown here after \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
-            if let found { try? await gmail.delete([found.remoteId]) }  // tidy up
+            if found.count < subjects.count { NSLog("MMJ remote arrival: only \(found.count) of \(subjects.count) shown") }
+            try? await gmail.delete(Array(found.values))  // tidy up
         }
     #endif
 

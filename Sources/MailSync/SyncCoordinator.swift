@@ -589,11 +589,13 @@ public actor SyncCoordinator {
                 defer { spinner.cancel() }
                 do {
                     try await flushQueue(accountId)
-                    let result = try await gmail.sync { [weak self] downloaded, total in
-                        await self?.reportHeaders(accountId, downloaded: downloaded, total: total, whole: true)
-                    }
+                    // Rules run on new mail as each message is stored (it can take a while for many).
+                    try await gmail.sync(
+                        progress: { [weak self] downloaded, total in
+                            await self?.reportHeaders(accountId, downloaded: downloaded, total: total, whole: true)
+                        },
+                        arrived: { [onArrived] remoteIds in onArrived(accountId, remoteIds) })
                     endHeaders(accountId)
-                    if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                     update(accountId, .idle, success: true)
                     startDownloads(accountId)
                 } catch {

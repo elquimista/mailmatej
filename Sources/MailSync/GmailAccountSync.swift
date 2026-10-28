@@ -75,11 +75,13 @@ public actor GmailAccountSync {
     // MARK: Sync
 
     /// One round: labels, then the changes since the last round (everything, the first time).
-    /// `progress` hears how many message headers a full sync has downloaded, and of how many.
+    /// `progress` hears how many message headers a full sync has downloaded, and of how many; `arrived`
+    /// of new mail as it's stored (not a full sync's): what rules run on.
     @discardableResult
-    public func sync(progress: @escaping @Sendable (_ downloaded: Int, _ total: Int) async -> Void = { _, _ in }) async throws
-        -> JMAPAccountSync.Result
-    {
+    public func sync(
+        progress: @escaping @Sendable (_ downloaded: Int, _ total: Int) async -> Void = { _, _ in },
+        arrived: @escaping @Sendable (_ remoteIds: [String]) async -> Void = { _ in }
+    ) async throws -> JMAPAccountSync.Result {
         var result = JMAPAccountSync.Result()
         imapUnavailable = false  // try IMAP again
         result.mailboxes = try await syncLabels()
@@ -100,7 +102,7 @@ public actor GmailAccountSync {
             try await fullSync(refetchKnown: true, into: &result, progress: progress)
         } else if let since = try store.syncState(accountId: account.id, type: Self.historyState) {
             do {
-                try await syncHistory(since: since, into: &result)
+                try await syncHistory(since: since, into: &result, arrived: arrived)
             } catch GmailClient.GmailError.historyExpired {
                 // Too long since the last check: list everything again, refreshing the messages known.
                 try startRefetch()
@@ -375,8 +377,10 @@ public actor GmailAccountSync {
     }
 
     /// Applies Gmail's history since `since`: new and changed messages are fetched again, deleted ones
-    /// removed. New ones are what rules run on.
-    private func syncHistory(since: String, into result: inout JMAPAccountSync.Result) async throws {
+    /// removed. New ones are what rules run on: each is told to `arrived` once it's stored.
+    private func syncHistory(
+        since: String, into result: inout JMAPAccountSync.Result, arrived: (@Sendable ([String]) async -> Void)? = nil
+    ) async throws {
         var token: String?
         var added: [String] = []
         var changed = Set<String>()
@@ -430,12 +434,9 @@ public actor GmailAccountSync {
             let (metadata, missingMetadata) = try await fetch(headersOnly, format: .metadata)
             let messages = metadata.compactMap(incoming)
             try upsert(messages)
-            let (whole, missingWhole) = try await fetch(new, format: .raw)
-            let stored = try storeWhole(whole)
+            let (stored, missingWhole) = try await arrive(new, rulesFor: newlyAdded, arrived: arrived)
             deleted.formUnion(gone + missingMetadata + missingWhole)
             result.updated += refreshed.count + messages.count + stored
-            let arrived = Set(whole.map(\.id))
-            result.arrived = added.filter { arrived.contains($0) && !known.contains($0) }
         }
         let gone = deleted.intersection(known)
         if !gone.isEmpty {
@@ -443,6 +444,99 @@ public actor GmailAccountSync {
             result.destroyed += gone.count
         }
         if let latest, latest != since { try store.setSyncState(latest, accountId: account.id, type: Self.historyState) }
+    }
+
+    /// More new messages than this at once come over IMAP, at the network's speed: through the API each
+    /// costs 60 quota units, about 1.6 messages a second once the first ten are in (a minute for 100).
+    static let imapArrivals = 20
+
+    /// Stores new messages whole, each as it comes (over IMAP in small batches when there are many), so
+    /// the first don't wait for the last, nor for a big one; those in `rulesFor` (Gmail's history says they
+    /// arrived) are told to `arrived` once stored. Returns how many were stored, and the ids Gmail no
+    /// longer has.
+    private func arrive(
+        _ ids: [String], rulesFor added: Set<String>, arrived: (@Sendable ([String]) async -> Void)?
+    ) async throws -> (stored: Int, missing: [String]) {
+        arrival = Arrival()
+        // Many over IMAP: found among what All Mail, Spam and Trash have past the index (brought up to
+        // date), fetched whole in small batches over several connections. Any it doesn't find are left
+        // to the API.
+        if ids.count > Self.imapArrivals, !imapUnavailable {
+            var pool: [GmailIMAP] = []
+            do {
+                pool = try await connectIMAP(Self.imapConnections)
+                let (folders, entries) = try await indexNewest(pool[0])
+                let wanted = Set(ids)
+                for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
+                    let here = entries.filter { $0.folder == folder && wanted.contains($0.id) }.sorted { $0.uid > $1.uid }  // newest first
+                    let batches = Self.batches(here, size: \.size, maxCount: 10, maxBytes: 1_000_000)
+                    try await fetchWhole(batches.map { $0.map(\.uid) }, in: folder, over: pool) { _, fetched in
+                        try await self.keep(fetched.compactMap { message in
+                            message.raw.map { (self.gmailMessage(message, folder: folder, folders: folders), $0) }
+                        }, rulesFor: added, arrived: arrived)
+                    }
+                }
+            } catch {
+                syncLog.notice("Gmail IMAP unavailable for \(self.account.name, privacy: .public)'s new mail, using the API: \(ErrorText.technical(error), privacy: .public)")
+                imapUnavailable = true
+            }
+            for connection in pool { await connection.close() }
+        }
+        // The rest (all of them, usually) through the API.
+        let client = self.client
+        let rest = ids.filter { !arrival.kept.contains($0) }
+        try await concurrently(rest, limit: 4, { id in try await client.message(id, format: .raw) }) { id, message in
+            guard let message else { return self.arrival.missing.append(id) }
+            guard let raw = message.raw.flatMap(Data.init(base64URL:)) else { return }
+            try await self.keep([(message, raw)], rulesFor: added, arrived: arrived)
+        }
+        return (arrival.stored, arrival.missing)
+    }
+
+    /// What `arrive` has done so far.
+    private struct Arrival {
+        var stored = 0
+        var kept = Set<String>()
+        var missing: [String] = []
+        var recounted = ContinuousClock.now
+    }
+
+    private var arrival = Arrival()
+
+    /// Stores new messages that came (see `arrive`).
+    private func keep(
+        _ messages: [(message: GmailClient.Message, raw: Data)], rulesFor added: Set<String>,
+        arrived: (@Sendable ([String]) async -> Void)?
+    ) async throws {
+        arrival.stored += try storeWhole(messages)
+        arrival.kept.formUnion(messages.map(\.message.id))
+        // Mailboxes' counts along with them (at most every second: a recount reads the whole account).
+        if arrival.recounted.duration(to: .now) > .seconds(1) {
+            try store.recountMailboxes(accountId: account.id)
+            arrival.recounted = .now
+        }
+        let new = messages.map(\.message.id).filter(added.contains)
+        if !new.isEmpty { await arrived?(new) }
+    }
+
+    /// The index (see `index`) brought up to date: when there is one, only what each folder has past the
+    /// highest UID it knows there is listed (new mail), else everything. Returns what was listed.
+    private func indexNewest(_ imap: GmailIMAP) async throws -> (GmailIMAP.Folders, [IndexEntry]) {
+        guard let known = imapIndex else { return try await index(imap) }
+        let folders = try await imap.folders()
+        let highest = Self.highestUIDs(known)
+        var entries: [IndexEntry] = []
+        for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
+            try await imap.examine(folder)
+            entries += try await imap.index(from: (highest[folder] ?? 0) + 1).map { (folder, $0.uid, $0.gmailId, $0.size) }
+        }
+        for entry in entries { imapIndex?[entry.id] = (entry.folder, entry.uid) }
+        return (folders, entries)
+    }
+
+    /// The highest UID an index has in each folder.
+    static func highestUIDs(_ index: [String: (folder: String, uid: UInt32)]) -> [String: UInt32] {
+        index.values.reduce(into: [:]) { highest, place in highest[place.folder] = max(highest[place.folder] ?? 0, place.uid) }
     }
 
     /// A label change in Gmail's history: labels added to a message, or taken off it.
@@ -1424,6 +1518,28 @@ func concurrently<Item: Sendable, Output: Sendable>(
             start()
         }
         return results.map { $0! }
+    }
+}
+
+/// `concurrently`, handing each item's output to `handle` as it comes (in the order they finish), on the
+/// caller's actor: what's done is used while the rest are under way.
+func concurrently<Item: Sendable, Output: Sendable>(
+    _ items: [Item], limit: Int, isolation: isolated (any Actor)? = #isolation,
+    _ work: @escaping @Sendable (Item) async throws -> Output, each handle: (Item, Output) async throws -> Void
+) async throws {
+    try await withThrowingTaskGroup(of: (Item, Output).self) { group in
+        var next = 0
+        func start() {
+            guard next < items.count else { return }
+            let item = items[next]
+            next += 1
+            group.addTask { (item, try await work(item)) }
+        }
+        for _ in 0..<min(limit, items.count) { start() }
+        while let (item, output) = try await group.next() {
+            try await handle(item, output)
+            start()
+        }
     }
 }
 

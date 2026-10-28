@@ -168,4 +168,35 @@ import Testing
         // In Archive and given a mailbox: whether it also has the archive label, only Gmail knows.
         #expect(apply([Change(added: true, labels: ["INBOX"])], [], ["ARCHIVE"], archiveLabel: "Label_9") == nil)
     }
+
+    @Test func newMailIsListedFromPastTheHighestUIDIndexed() {
+        let index: [String: (folder: String, uid: UInt32)] = [
+            "a": ("[Gmail]/All Mail", 7), "b": ("[Gmail]/All Mail", 42), "c": ("[Gmail]/Spam", 3), "d": ("[Gmail]/All Mail", 9),
+        ]
+        #expect(GmailAccountSync.highestUIDs(index) == ["[Gmail]/All Mail": 42, "[Gmail]/Spam": 3])
+        #expect(GmailAccountSync.highestUIDs([:]).isEmpty)
+    }
+
+    /// An actor using `concurrently` as the Gmail sync does: what's done is handled as it comes.
+    actor Handled {
+        var order: [Int] = []
+        func run(_ delays: [Int]) async throws {
+            try await concurrently(Array(delays.indices), limit: 4, { index in
+                try await Task.sleep(for: .milliseconds(delays[index]))
+                return index * 10
+            }) { index, output in
+                #expect(output == index * 10)
+                order.append(index)  // on the actor, without awaiting it
+            }
+        }
+    }
+
+    @Test func concurrentWorkIsHandledAsItFinishes() async throws {
+        let handled = Handled()
+        try await handled.run([450, 0, 300, 150])
+        #expect(await handled.order == [1, 3, 2, 0])  // fastest first, each once
+        let none = Handled()
+        try await none.run([])
+        #expect(await none.order.isEmpty)
+    }
 }

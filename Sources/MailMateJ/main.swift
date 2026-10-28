@@ -591,9 +591,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(10))
                     await AppModel.shared.debugRemoteReadChange(accountId: parts[0], subject: parts[1])
                 }
-                if let accountId = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_ARRIVAL"] {
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_ARRIVAL"] {
+                    // "accountId" or "accountId|count": test mail added in Gmail, timed until it shows here.
+                    let parts = spec.split(separator: "|").map(String.init)
                     try? await Task.sleep(for: .seconds(10))  // the watch connects first
-                    await AppModel.shared.debugRemoteArrival(accountId: accountId)
+                    await AppModel.shared.debugRemoteArrival(accountId: parts[0], count: parts.count > 1 ? Int(parts[1]) ?? 1 : 1)
                 }
                 if let accountId = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_IMAP"] {
                     await AppModel.shared.debugGmailIMAP(accountId: accountId)
