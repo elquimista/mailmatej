@@ -288,6 +288,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private func reconfigureVisibleRows() {
+        #if DEBUG
+            let started = ContinuousClock.now
+            defer {
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_STATUS_TIMING"] != nil {
+                    NSLog("MMJ visible rows configured in \(started.duration(to: .now))")
+                }
+            }
+        #endif
         let rows = outline.rows(in: outline.visibleRect)
         for row in rows.location..<(rows.location + rows.length) {
             guard let node = outline.item(atRow: row) as? SidebarNode, node.kind != .header,
@@ -2119,8 +2127,8 @@ final class SidebarCell: NSTableCellView {
             (hasIcon ? titleAfterIcon : titleInIconsPlace).isActive = true
         }
         badge.count = plain ? 0 : node.badge
+        badge.isHidden = badge.count == 0 || (node.isBusy && !plain)  // a busy row shows its spinner instead
         if node.isBusy, !plain {
-            badge.isHidden = true
             spinner.startAnimation(nil)
         } else {
             spinner.stopAnimation(nil)
@@ -2134,6 +2142,7 @@ final class SidebarCell: NSTableCellView {
 final class BadgeView: NSView {
     var count = 0 {
         didSet {
+            guard count != oldValue else { return }  // rows are configured again on every status tick
             isHidden = count == 0
             invalidateIntrinsicContentSize()
             needsDisplay = true
