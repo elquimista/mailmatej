@@ -5,6 +5,8 @@ import GRDB
 public final class MailStore: Sendable {
     public let dbPool: DatabasePool
     public let blobs: BlobStore
+    /// The folder the store keeps its files in.
+    public let directory: URL
 
     public static var defaultDirectory: URL {
         URL.applicationSupportDirectory.appendingPathComponent("MailMateJ", isDirectory: true)
@@ -13,6 +15,7 @@ public final class MailStore: Sendable {
     let smartCatalog = SmartCatalog()
 
     public init(directory: URL = MailStore.defaultDirectory) throws {
+        self.directory = directory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var config = Configuration()
         config.label = "MailStore"

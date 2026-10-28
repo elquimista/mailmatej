@@ -300,15 +300,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Rebuilds the tree from the store, keeping expansion and selection. With `keepingCounts` (only the
     /// mailbox list changed: a new smart mailbox), the rows already here keep their counts and generated
     /// submailboxes, so only new rows are queried.
-    func reload(keepingCounts: Bool = false) {
-        if !keepingCounts {
+    func reload(keepingCounts: Bool = false) { reload(keepingCounts: keepingCounts, reusing: nil) }
+
+    /// `reload`, reusing `saved` rows (those of the last launch) as `keepingCounts` reuses the rows shown.
+    private func reload(keepingCounts: Bool, reusing saved: [String: SidebarNode]?) {
+        if !keepingCounts, saved == nil {
             builtGeneration += 1  // a tree being built in the background has older counts
             // Counted now, changes made so far included.
             buildSerial += 1
             appliedSerial = buildSerial
             adjustments = []
         }
-        var reuse: [String: SidebarNode]?
+        var reuse = saved
         if keepingCounts {
             var old: [String: SidebarNode] = [:]
             func index(_ nodes: [SidebarNode]) { for n in nodes { old[n.key] = n; index(n.children) } }
@@ -373,6 +376,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 builtGeneration += 1
                 apply(built.roots)
                 onRebuilt?()
+                saveForNextLaunch()
             }
             if buildAgain {
                 buildAgain = false
@@ -688,11 +692,47 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     var selectedKey: String? { selectedNode?.key }
 
-    /// Selects the default item and notifies `onSelect`.
+    /// Selects the default item and notifies `onSelect`. The main sidebar shows its rows as the app last
+    /// had them (`SavedSidebar`) at once, and counts them again off the main thread.
     func selectInitial() {
-        reload()
+        #if DEBUG
+            let start = ContinuousClock.now
+            defer {
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_LAUNCH"] != nil {
+                    NSLog("MMJ launch sidebar: \(start.duration(to: .now)) on the main thread; rows \(debugBadges)")
+                }
+            }
+        #endif
+        if Self.main === self, showsStatus, let saved = SavedSidebar.load(from: model.store.directory) {
+            reload(keepingCounts: true, reusing: saved.nodes())
+            reloadInBackground()
+        } else {
+            reload()
+        }
         if let node = selectedNode { onSelect?(node) }
+        if Self.main === self {
+            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) {
+                [weak self] _ in MainActor.assumeIsolated { self?.saveForNextLaunch(now: true) }
+            }
+        }
     }
+
+    /// Keeps the rows and counts for the next launch (`SavedSidebar`): at most every minute as they
+    /// change, and as the app quits.
+    private func saveForNextLaunch(now: Bool = false) {
+        guard Self.main === self, showsStatus, !roots.isEmpty,
+            now || lastSaved.map({ $0.duration(to: .now) > .seconds(60) }) ?? true
+        else { return }
+        lastSaved = .now
+        let (saved, directory) = (SavedSidebar(roots), model.store.directory)
+        if now {
+            try? saved.save(to: directory)  // before the app is gone
+        } else {
+            Task.detached(priority: .utility) { try? saved.save(to: directory) }
+        }
+    }
+
+    private var lastSaved: ContinuousClock.Instant?
 
     /// Opens the rows above a node to show it, without remembering them as opened: rows stay as the
     /// user left them, so a mailbox the app selects itself (Inbox when the last one is gone, Go to Mailbox,
@@ -939,7 +979,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func wrap(_ nodes: [SidebarNode]) {
             for child in nodes {
                 child.countedFromMailboxes = false
-                if let scope = child.scope {
+                if let scope = child.scope?.base {  // once: a row kept from before is wrapped already
                     child.scope = .within(key, scope)
                     if let n = count(child.key, .within(key, scope)) { child.badge = n }
                 }
