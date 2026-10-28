@@ -327,6 +327,16 @@ enum Schema {
             try db.execute(sql: "CREATE INDEX message_flagged_account ON message(accountId) WHERE isFlagged")
         }
 
+        m.registerMigration("v21-backfills") { db in
+            // What each JMAP sync round looks for (messages stored before a column was), nearly always
+            // nothing: without these, every message of the account, every round.
+            try db.execute(sql: """
+                CREATE INDEX message_missing_references ON message(accountId) WHERE referencesHeader IS NULL;
+                CREATE INDEX message_missing_groups ON message(accountId) WHERE recipientGroupsFetched = 0;
+                CREATE INDEX message_missing_zone ON message(accountId) WHERE sentAt IS NOT NULL AND sentZone IS NULL;
+                """)
+        }
+
         return m
     }
 }

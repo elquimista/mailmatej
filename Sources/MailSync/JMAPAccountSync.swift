@@ -9,6 +9,7 @@ public actor JMAPAccountSync {
     private let client: JMAPClient
     private let store: MailStore
     private var lastIdentitySync: Date?
+    private var lastStrandedCheck: Date?
 
     public init(account: AccountRecord, credentials: Credentials, store: MailStore, urlSession: URLSession = .shared)
         throws
@@ -47,9 +48,13 @@ public actor JMAPAccountSync {
         try await fillInReferences(accountId)
         try await fillInRecipientGroups(accountId)
         try await fillInSentZones(accountId)
-        // Messages a local change left without a mailbox go back to the server's state.
-        let stranded = try store.remoteIDsWithoutMailbox(accountId: account.id)
-        if !stranded.isEmpty { try await refetch(stranded, accountId) }
+        // Messages a local change left without a mailbox go back to the server's state: what a crash
+        // leaves, so at the first sync and then now and then (it reads every message of the account).
+        if lastStrandedCheck.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+            let stranded = try store.remoteIDsWithoutMailbox(accountId: account.id)
+            if !stranded.isEmpty { try await refetch(stranded, accountId) }
+            lastStrandedCheck = Date()
+        }
         return result
     }
 

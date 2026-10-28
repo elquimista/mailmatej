@@ -76,6 +76,9 @@ public actor SyncCoordinator {
     private var inUse = false
     private var leftAt: ContinuousClock.Instant?
     private var lastGmailCheck: [String: ContinuousClock.Instant] = [:]
+    /// JMAP accounts: when push last delivered anything (pings too), and when a sync last succeeded.
+    private var lastPushSignal: [String: ContinuousClock.Instant] = [:]
+    private var lastSynced: [String: ContinuousClock.Instant] = [:]
     private var statuses: [String: AccountSyncStatus] = [:]
     private var running: Set<String> = []
     private var pending: Set<String> = []
@@ -122,10 +125,9 @@ public actor SyncCoordinator {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: pollInterval)
-                await self?.syncAll()
+                await self?.checkAll()
             }
         }
-        // Back online: sync now, which first makes the changes queued meanwhile.
         pathMonitor?.cancel()
         let monitor = NWPathMonitor()
         nonisolated(unsafe) var wasSatisfied = true
@@ -133,7 +135,7 @@ public actor SyncCoordinator {
             let satisfied = path.status == .satisfied
             defer { wasSatisfied = satisfied }
             guard satisfied, !wasSatisfied else { return }
-            Task { await self?.syncAll() }
+            Task { await self?.networkReturned() }
         }
         monitor.start(queue: DispatchQueue(label: "app.mailmatej.path"))
         pathMonitor = monitor
@@ -178,6 +180,32 @@ public actor SyncCoordinator {
 
     public func syncAll() {
         for id in Array(engines.keys) + Array(gmailEngines.keys) { requestSync(id) }
+    }
+
+    /// The timed check: an account whose push is delivering (a signal, even a ping, within the last
+    /// `pushHealthy`) is left to it, but for a sync every `pushedCheckInterval` in case it missed
+    /// something; Gmail accounts have checks of their own (`checkGmailIfDue`).
+    private func checkAll() {
+        let now = ContinuousClock.now
+        for id in engines.keys where !Self.leftToPush(lastSignal: lastPushSignal[id], lastSynced: lastSynced[id], now: now) {
+            requestSync(id)
+        }
+    }
+
+    static func leftToPush(lastSignal: ContinuousClock.Instant?, lastSynced: ContinuousClock.Instant?, now: ContinuousClock.Instant) -> Bool {
+        guard let lastSignal, let lastSynced else { return false }
+        return now - lastSignal < pushHealthy && now - lastSynced < pushedCheckInterval
+    }
+
+    static let pushHealthy: Duration = .seconds(90)  // push pings every 30 s
+    static let pushedCheckInterval: Duration = .seconds(1800)
+
+    /// Back online: everything syncs, which first makes the changes queued meanwhile, and push and
+    /// Gmail's watches waiting to try again (longer after each failure, up to 5 minutes) connect now.
+    private func networkReturned() {
+        for (id, engine) in engines where pushTasks[id] != nil && fastPollTasks[id] != nil { startPush(id, engine: engine) }
+        for (id, engine) in gmailEngines where gmailWatchTasks[id] != nil { watchGmail(id, engine: engine) }
+        syncAll()
     }
 
     public func requestSync(_ accountId: String) {
@@ -533,16 +561,20 @@ public actor SyncCoordinator {
             return update(account.id, failure: error)
         }
         guard !staysOffline(account.id), poll else { return }
-        gmailWatchTasks[account.id]?.cancel()
-        gmailWatchTasks[account.id] = Task { [weak self] in
-            await engine.watch { [weak self] in Task { [weak self] in await self?.requestSync(account.id) } }
-        }
+        watchGmail(account.id, engine: engine)
         gmailPollTasks[account.id]?.cancel()
         gmailPollTasks[account.id] = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 await self?.checkGmailIfDue(account.id)
             }
+        }
+    }
+
+    private func watchGmail(_ accountId: String, engine: GmailAccountSync) {
+        gmailWatchTasks[accountId]?.cancel()
+        gmailWatchTasks[accountId] = Task { [weak self] in
+            await engine.watch { [weak self] in Task { [weak self] in await self?.requestSync(accountId) } }
         }
     }
 
@@ -615,6 +647,7 @@ public actor SyncCoordinator {
                 }
                 endHeaders(accountId)
                 if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
+                lastSynced[accountId] = .now
                 update(accountId, .idle, success: true)
                 startDownloads(accountId)
             } catch {
@@ -748,6 +781,7 @@ public actor SyncCoordinator {
                     if reconnecting { await self?.requestSync(accountId) }
                     for try await signal in stream {
                         signals += 1
+                        await self?.pushSignalled(accountId)
                         if signals == 1 {
                             syncLog.notice("Push working over \(transport.rawValue, privacy: .public) for \(name, privacy: .public)")
                             await self?.setPushWorking(accountId, true, name: name)
@@ -778,6 +812,8 @@ public actor SyncCoordinator {
             }
         }
     }
+
+    private func pushSignalled(_ accountId: String) { lastPushSignal[accountId] = .now }
 
     /// Fast polling covers an account while its push doesn't work.
     private func setPushWorking(_ accountId: String, _ working: Bool, name: String) {

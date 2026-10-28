@@ -252,7 +252,7 @@ public actor GmailAccountSync {
                 await progress(read, max(total, read))
             }
             if todo.isEmpty { await progress(read, max(total, read)) }
-            try store.recountMailboxes(accountId: account.id)
+            try recountIfDue()
         } while token != nil
         return listed
     }
@@ -303,7 +303,7 @@ public actor GmailAccountSync {
                     })
                     done += batch.count
                     await progress(done, entries.count)
-                    try self.store.recountMailboxes(accountId: self.account.id)
+                    try self.recountIfDue()
                 }
                 result.created += created
             }
@@ -458,6 +458,7 @@ public actor GmailAccountSync {
         _ ids: [String], rulesFor added: Set<String>, arrived: (@Sendable ([String]) async -> Void)?
     ) async throws -> (stored: Int, missing: [String]) {
         arrival = Arrival()
+        lastRecount = .now  // the sync recounts once it's done: one new message needs no more
         // Many over IMAP: found among what All Mail, Spam and Trash have past the index (brought up to
         // date), fetched whole in small batches over several connections. Any it doesn't find are left
         // to the API.
@@ -498,7 +499,6 @@ public actor GmailAccountSync {
         var stored = 0
         var kept = Set<String>()
         var missing: [String] = []
-        var recounted = ContinuousClock.now
     }
 
     private var arrival = Arrival()
@@ -510,14 +510,20 @@ public actor GmailAccountSync {
     ) async throws {
         arrival.stored += try storeWhole(messages)
         arrival.kept.formUnion(messages.map(\.message.id))
-        // Mailboxes' counts along with them (at most every second: a recount reads the whole account).
-        if arrival.recounted.duration(to: .now) > .seconds(1) {
-            try store.recountMailboxes(accountId: account.id)
-            arrival.recounted = .now
-        }
+        try recountIfDue()  // the mailboxes' counts along with them
         let new = messages.map(\.message.id).filter(added.contains)
         if !new.isEmpty { await arrived?(new) }
     }
+
+    /// Recounts the account's mailboxes (their badges) while many messages are being stored, at most
+    /// every second: a recount reads the whole account, and each refreshes the lists.
+    private func recountIfDue() throws {
+        guard lastRecount.map({ $0.duration(to: .now) >= .seconds(1) }) ?? true else { return }
+        try store.recountMailboxes(accountId: account.id)
+        lastRecount = .now
+    }
+
+    private var lastRecount: ContinuousClock.Instant?
 
     /// The index (see `index`) brought up to date: when there is one, only what each folder has past the
     /// highest UID it knows there is listed (new mail), else everything. Returns what was listed.

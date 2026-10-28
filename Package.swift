@@ -35,7 +35,7 @@ let package = Package(
         .executableTarget(name: "mmj-sync", dependencies: ["MailSync", "MailStore", "JMAPKit"]),
         .testTarget(name: "JMAPKitTests", dependencies: ["JMAPKit"]),
         .testTarget(name: "GmailKitTests", dependencies: ["GmailKit"]),
-        .testTarget(name: "MailStoreTests", dependencies: ["MailStore"]),
+        .testTarget(name: "MailStoreTests", dependencies: ["MailStore", .product(name: "GRDB", package: "GRDB.swift")]),
         .testTarget(name: "MailSyncTests", dependencies: ["MailSync", "JMAPKit", "MailStore"]),
     ]
 )

@@ -100,7 +100,11 @@ final class AppModel {
             addDevAccountsIfRequested()
             if ProcessInfo.processInfo.environment["MMJ_KEYCHAIN_SELFTEST"] != nil { keychainSelfTest() }
         #endif
-        Task { try? await coordinator.start() }
+        var pollInterval: Duration = .seconds(300)
+        #if DEBUG
+            if let seconds = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_POLL_SECONDS"] ?? "") { pollInterval = .seconds(seconds) }
+        #endif
+        Task { [pollInterval] in try? await coordinator.start(pollInterval: pollInterval) }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in

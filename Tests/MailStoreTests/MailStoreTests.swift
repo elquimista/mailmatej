@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import MailStore
@@ -962,6 +963,23 @@ import Testing
                 condition: .compound(.all, [.rule(.fromDomain, .is, "x.com")]), split: byAccount))
         }
         try expectCounted { try store.deleteSmartMailbox(id: money) }
+    }
+
+    @Test func backfillChecksUseTheirIndexes() throws {
+        // What each JMAP round looks for: found from what's missing, not by reading every message.
+        let checks = [
+            ("referencesHeader IS NULL", "message_missing_references"), ("recipientGroupsFetched = 0", "message_missing_groups"),
+            ("sentAt IS NOT NULL AND sentZone IS NULL", "message_missing_zone"),
+        ]
+        for (condition, index) in checks {
+            let plan = try store.dbPool.read { db in
+                try Row.fetchAll(
+                    db, sql: "EXPLAIN QUERY PLAN SELECT remoteId FROM message WHERE accountId = ? AND \(condition) LIMIT ?",
+                    arguments: ["acc", 500]
+                ).map { $0["detail"] as String }.joined()
+            }
+            #expect(plan.contains(index), "\(condition): \(plan)")
+        }
     }
 
     @Test func keywordsAndMailboxesByRemoteID() throws {
