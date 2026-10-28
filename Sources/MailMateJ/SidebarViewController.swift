@@ -1401,7 +1401,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func add(_ title: String, _ symbol: String, _ choice: String?, on: Bool) {
             let item = menu.addItem(withTitle: title, action: #selector(symbolChosen(_:)), keyEquivalent: "")
             item.target = self
-            item.image = MailboxSymbols.image(symbol)
+            item.image = MailboxSymbols.menuImage(symbol)
             item.representedObject = SymbolChoice(node: node, symbol: choice)
             item.state = on ? .on : .off
         }
@@ -1410,7 +1410,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         custom.target = self
         // A symbol chosen in the Symbols panel shows (and is checked) here, as in MailMate.
         let isCustom = chosen.map { symbol in !MailboxSymbols.presets.contains { $0.symbol == symbol } } ?? false
-        custom.image = NSImage(systemSymbolName: isCustom ? showing : "questionmark.square.dashed", accessibilityDescription: nil)
+        custom.image = MailboxSymbols.menuImage(isCustom ? showing : "questionmark.square.dashed")
         custom.state = isCustom ? .on : .off
         custom.representedObject = node
         menu.addItem(.separator())
@@ -1507,8 +1507,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         /// by side, to `path`.
         /// Opens the mailbox's Color menu, captures its window as the screen shows it, then closes it.
         func debugCaptureColorMenu(key: String, path: String) {
-            guard let node = find(key, in: roots), let window = view.window else { return NSLog("MMJ color menu: no \(key)") }
-            let menu = colorMenu(for: node)
+            guard let node = find(key, in: roots) else { return NSLog("MMJ color menu: no \(key)") }
+            debugCapture(colorMenu(for: node), path: path)
+        }
+
+        /// Opens `menu` in the window and captures it, as it shows on screen, to `path`.
+        private func debugCapture(_ menu: NSMenu, path: String) {
+            guard let window = view.window else { return }
             let timer = Timer(timeInterval: 0.8, repeats: false) { _ in
                 let pid = ProcessInfo.processInfo.processIdentifier
                 let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -1531,16 +1536,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         func debugSymbolMenu(key: String, path: String) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ symbol menu: no \(key)") }
-            let items = symbolMenu(for: node).items.filter { !$0.isSeparatorItem }
+            let menu = symbolMenu(for: node)
+            let items = menu.items.filter { !$0.isSeparatorItem }
             NSLog("MMJ symbol menu: " + items.map { ($0.state == .on ? "[x] " : "") + $0.title }.joined(separator: ", "))
-            let strip = NSImage(size: NSSize(width: 4 * 24, height: 20), flipped: false) { _ in
-                NSColor.white.set()
-                for (i, item) in items.prefix(4).enumerated() { item.image?.draw(in: NSRect(x: i * 24 + 2, y: 2, width: 16, height: 16)) }
-                return true
-            }
-            if let tiff = strip.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-            }
+            debugCapture(menu, path: path)
         }
     #endif
 

@@ -171,7 +171,7 @@ enum MailboxColors {
     /// A mailbox's icon for menus: its chosen symbol in black and white (a template, so it turns white
     /// on a highlighted row), as MailMate's menus show it; only the sidebar shows colors.
     static func menuImage(key: String, symbol: String) -> NSImage? {
-        MailboxSymbols.symbol(for: key).flatMap { MailboxSymbols.image($0) } ?? MailboxSymbols.image(symbol)
+        MailboxSymbols.symbol(for: key).flatMap { MailboxSymbols.menuImage($0) } ?? MailboxSymbols.menuImage(symbol)
     }
 
     /// A symbol filled with a color, as a plain (non-template) image the selection doesn't recolor.
@@ -259,7 +259,11 @@ enum MailboxSymbols {
     static let gmail = "mailmatej.gmail"
     static let fastmail = "mailmatej.fastmail"
     static let network = "mailmatej.network"
-    static let drawn: Set<String> = [gmail, fastmail, network]
+    /// Each one's size in the sidebar, in points square (see `sourceImage`), and how it's drawn.
+    private static let drawings: [String: (size: CGFloat, draw: @Sendable (CGFloat) -> Void)] = [
+        gmail: (12, drawG), fastmail: (13, drawFastmail), network: (13, drawNetwork),
+    ]
+    static var drawn: Set<String> { Set(drawings.keys) }
 
     /// A source's symbol: Gmail's G, Fastmail's mark for an account on its servers (fastmail.com or
     /// messagingengine.com, as MailMate tells them), else the network globe.
@@ -273,12 +277,14 @@ enum MailboxSymbols {
     /// A symbol by name: an SF Symbol, or one drawn here at `scale` times its sidebar size (`sidebar`:
     /// placed as the sidebar wants it, see `sourceImage`; else alone in its square).
     static func image(_ name: String, scale: CGFloat = 1, sidebar: Bool = true) -> NSImage? {
-        switch name {
-        case gmail: sourceImage(12, scale, sidebar, drawG)
-        case fastmail: sourceImage(13, scale, sidebar, drawFastmail)
-        case network: sourceImage(13, scale, sidebar, drawNetwork)
-        default: NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        }
+        guard let drawing = drawings[name] else { return NSImage(systemSymbolName: name, accessibilityDescription: nil) }
+        return sourceImage(drawing.size, scale, sidebar, drawing.draw)
+    }
+
+    /// A symbol for a menu item. A menu shows at most 12 pt of an image's height (the 13 pt ones lost
+    /// an edge), so drawn ones are that tall at most, centred.
+    static func menuImage(_ name: String) -> NSImage? {
+        image(name, scale: drawings[name].map { 12 / $0.size } ?? 1, sidebar: false)
     }
 
     /// A source's symbol, `size` points square in the sidebar. MailMate's G is 12 pt beside the 13 pt
