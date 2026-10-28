@@ -659,7 +659,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         AppModel.shared.dockCounters?.isPreviewing = true
                     }
                     AppModel.shared.dockCounters?.update()
-                    AppModel.shared.dockCounters?.debugRender(to: path)
+                    // MMJ_DOCK_VALUES="148,1578[,7,99]": these counts, clockwise from the top left, instead.
+                    let corners: [Corner] = [.topLeft, .topRight, .bottomRight, .bottomLeft]
+                    let values = ProcessInfo.processInfo.environment["MMJ_DOCK_VALUES"].map {
+                        Dictionary(uniqueKeysWithValues: zip(corners, $0.split(separator: ",").compactMap { Int($0) }))
+                    }
+                    AppModel.shared.dockCounters?.debugRender(to: path, values: values)
                     AppModel.shared.dockCounters?.debugRender(
                         to: path.replacingOccurrences(of: ".png", with: "-long.png"),
                         values: [.topLeft: 12_345, .topRight: 123_456, .bottomLeft: 7, .bottomRight: 2_345_678])

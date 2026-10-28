@@ -100,17 +100,9 @@ final class DockTileView: NSView {
         #endif
         NSApp.applicationIconImage?.draw(in: bounds)
         let shown = values.filter { $0.value > 0 || showsZeros }  // Zero counts aren't shown.
-        var badges: [Corner: Badge] = [:]
-        for (left, right) in [(Corner.topLeft, Corner.topRight), (.bottomLeft, .bottomRight)] {
-            // Each badge is sized by its own count alone, so it looks the same whatever its neighbor
-            // shows. Only if two badges on a row would collide does each get about half the width.
-            var pair = [left, right].compactMap { corner in shown[corner].map { (corner, $0) } }
-                .map { ($0.0, $0.1, badge(for: $0.1, maxWidth: bounds.width * 0.62)) }
-            if pair.count == 2 && pair[0].2.width + pair[1].2.width > bounds.width {
-                pair = pair.map { ($0.0, $0.1, badge(for: $0.1, maxWidth: bounds.width * 0.52)) }
-            }
-            for (corner, _, badge) in pair { badges[corner] = badge }
-        }
+        // Each badge is sized by its own count alone, so it looks the same whatever its neighbor shows:
+        // two too wide for the row overlap at full size, as in MailMate (a shrunk "1862" looked smaller).
+        let badges = shown.mapValues { badge(for: $0, maxWidth: bounds.width * 0.62) }
         // Bottom row first, then top-left, then top-right on top (as MailMate overlaps them).
         for corner in [Corner.bottomLeft, .bottomRight, .topLeft, .topRight] {
             if let badge = badges[corner] { draw(badge, at: corner) }
