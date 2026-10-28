@@ -2,7 +2,8 @@
 # Builds the app into ./build without Xcode.
 #   scripts/bundle.sh            # release → build/MailMateJ.app
 #   scripts/bundle.sh debug      # debug   → build/MailMateJ Dev.app (own bundle id, data folder and icon)
-#   MMJ_VERSION=1.2.0 scripts/bundle.sh   # stamps that version (the release workflow passes the tag)
+#   MMJ_VERSION=1.2.0 scripts/bundle.sh   # stamps that version (the release workflow passes the tag;
+#                                         # without it, the latest v-tag's)
 # Signing: uses the "MailMateJ Signing" certificate if it is in your keychain (see README), so
 # keychain "Always Allow" survives rebuilds; otherwise ad-hoc. MMJ_SIGN_IDENTITY overrides the name.
 set -euo pipefail
@@ -26,11 +27,13 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy \
   -c "Set :CFBundleName $NAME" -c "Set :CFBundleDisplayName $NAME" -c "Set :CFBundleIdentifier $BUNDLE_ID" \
   "$APP/Contents/Info.plist"
-# MMJ_VERSION (e.g. from a release tag, "1.2.0") stamps the version; the build number counts commits.
-if [ -n "${MMJ_VERSION:-}" ]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MMJ_VERSION" \
-    -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" "$APP/Contents/Info.plist"
+# MMJ_VERSION (e.g. from a release tag, "1.2.0") stamps the version, else the latest v-tag does; the
+# build number counts commits, so builds after a tag still tell apart.
+VERSION="${MMJ_VERSION:-$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || true)}"
+if [ -n "$VERSION" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" "$APP/Contents/Info.plist"
 # The Google OAuth client for Gmail accounts: the JSON file Google Cloud downloads for a "Desktop app"
 # client, at google-oauth-client.json (not in git) or MMJ_GOOGLE_OAUTH_JSON. Without it, adding a Gmail
 # account says so.
