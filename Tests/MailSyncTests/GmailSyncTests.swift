@@ -180,12 +180,20 @@ import Testing
         #expect(apply([Change(added: true, labels: ["INBOX"])], [], ["ARCHIVE"], archiveLabel: "Label_9") == nil)
     }
 
-    @Test func newMailIsListedFromPastTheHighestUIDIndexed() {
-        let index: [String: (folder: String, uid: UInt32)] = [
-            "a": ("[Gmail]/All Mail", 7), "b": ("[Gmail]/All Mail", 42), "c": ("[Gmail]/Spam", 3), "d": ("[Gmail]/All Mail", 9),
-        ]
-        #expect(GmailAccountSync.highestUIDs(index) == ["[Gmail]/All Mail": 42, "[Gmail]/Spam": 3])
-        #expect(GmailAccountSync.highestUIDs([:]).isEmpty)
+    @Test func messagesAreFoundOverIMAPByTheirIds() {
+        // Gmail's ids in decimal (X-GM-MSGID), a few to a search; one that isn't Gmail's is left out.
+        #expect(GmailAccountSync.idSearches(["1f", "draft", "a", "ff"], each: 2) == ["OR X-GM-MSGID 31 X-GM-MSGID 10", "X-GM-MSGID 255"])
+        #expect(GmailAccountSync.idSearches([]).isEmpty)
+    }
+
+    @Test func previewsAreTheTextsFirstWordsOnOneLine() {
+        #expect(GmailAccountSync.preview("  Hello,\n\n  world\t again ") == "Hello, world again")
+        let long = String(repeating: "word ", count: 100)
+        #expect(GmailAccountSync.preview(long) == String(long.prefix(200)))
+        // A space and a zero-width character after it are one character, as they show.
+        let zeroWidth = "a\n\u{200C} " + String(repeating: "b", count: 300)
+        #expect(GmailAccountSync.preview(zeroWidth) == "a \u{200C} " + String(repeating: "b", count: 197))
+        #expect(GmailAccountSync.preview(zeroWidth).count == 200)
     }
 
     /// An actor using `concurrently` as the Gmail sync does: what's done is handled as it comes.

@@ -33,12 +33,11 @@ public actor GmailAccountSync {
     }
 
     private let tokens: GoogleTokenSource
-    /// The IMAP connections downloads use while they run, and where each message is in them.
+    /// The IMAP connections downloads use while they run.
     private var imapPool: [GmailIMAP] = []
     /// How many IMAP connections fetch at once: one alone is held to about 1 MB/s, and Gmail allows
     /// 15 an account (other apps' included).
     static let imapConnections = 4
-    private var imapIndex: [String: (folder: String, uid: UInt32)]?
     /// IMAP failed (turned off for the account, say): downloads use the API until the next sync.
     private var imapUnavailable = false
     /// When the addresses it sends as were last asked for (see `syncIdentities`).
@@ -322,8 +321,7 @@ public actor GmailAccountSync {
         }
     }
 
-    /// All Mail, Spam and Trash indexed: each message's folder, UID, Gmail id and size (also kept for
-    /// the downloads).
+    /// All Mail, Spam and Trash indexed: each message's folder, UID, Gmail id and size.
     private func index(_ imap: GmailIMAP) async throws -> (GmailIMAP.Folders, [(folder: String, uid: UInt32, id: String, size: Int)]) {
         let folders = try await imap.folders()
         guard let all = folders.all else { throw GmailIMAP.IMAPError.malformed("no All Mail") }
@@ -332,7 +330,6 @@ public actor GmailAccountSync {
             try await imap.examine(folder)
             entries += try await imap.index().map { (folder, $0.uid, $0.gmailId, $0.size) }
         }
-        imapIndex = Dictionary(entries.map { ($0.id, ($0.folder, $0.uid)) }, uniquingKeysWith: { a, _ in a })
         return (folders, entries)
     }
 
@@ -464,17 +461,15 @@ public actor GmailAccountSync {
     ) async throws -> (stored: Int, missing: [String]) {
         arrival = Arrival()
         lastRecount = .now  // the sync recounts once it's done: one new message needs no more
-        // Many over IMAP: found among what All Mail, Spam and Trash have past the index (brought up to
-        // date), fetched whole in small batches over several connections. Any it doesn't find are left
-        // to the API.
+        // Many over IMAP: found in All Mail, Spam and Trash by their ids, fetched whole in small batches
+        // over several connections. Any it doesn't find are left to the API.
         if ids.count > Self.imapArrivals, !imapUnavailable {
             var pool: [GmailIMAP] = []
             do {
                 pool = try await connectIMAP(Self.imapConnections)
-                let (folders, entries) = try await indexNewest(pool[0])
-                let wanted = Set(ids)
+                let (folders, entries) = try await locate(ids, on: pool[0])
                 for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
-                    let here = entries.filter { $0.folder == folder && wanted.contains($0.id) }.sorted { $0.uid > $1.uid }  // newest first
+                    let here = entries.filter { $0.folder == folder }.sorted { $0.uid > $1.uid }  // newest first
                     let batches = Self.batches(here, size: \.size, maxCount: 10, maxBytes: 1_000_000)
                     try await fetchWhole(batches.map { $0.map(\.uid) }, in: folder, over: pool) { _, fetched in
                         try await self.keep(fetched.compactMap { message in
@@ -530,24 +525,42 @@ public actor GmailAccountSync {
 
     private var lastRecount: ContinuousClock.Instant?
 
-    /// The index (see `index`) brought up to date: when there is one, only what each folder has past the
-    /// highest UID it knows there is listed (new mail), else everything. Returns what was listed.
-    private func indexNewest(_ imap: GmailIMAP) async throws -> (GmailIMAP.Folders, [IndexEntry]) {
-        guard let known = imapIndex else { return try await index(imap) }
+    /// Where these messages are over IMAP, found by their Gmail ids: in All Mail, or else in Spam or Trash
+    /// (their folders, UIDs and sizes); those Gmail doesn't have are left out. Only they are looked up:
+    /// listing an old account's every message (hundreds of thousands) for a few took seconds, and
+    /// keeping that list took memory for as long as the app ran.
+    private func locate(_ ids: [String], on imap: GmailIMAP) async throws -> (GmailIMAP.Folders, [IndexEntry]) {
+        #if DEBUG
+            let started = Date()
+            defer {
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil {
+                    NSLog("MMJ imap located \(ids.count) messages by id in \(String(format: "%.2f", Date().timeIntervalSince(started))) s")
+                }
+            }
+        #endif
         let folders = try await imap.folders()
-        let highest = Self.highestUIDs(known)
-        var entries: [IndexEntry] = []
-        for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
+        var left = Set(ids)
+        var found: [IndexEntry] = []
+        for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) where !left.isEmpty {
             try await imap.examine(folder)
-            entries += try await imap.index(from: (highest[folder] ?? 0) + 1).map { (folder, $0.uid, $0.gmailId, $0.size) }
+            let here = try await imap.index(uids: try await search(Array(left), on: imap)).filter { left.contains($0.gmailId) }
+            found += here.map { (folder, $0.uid, $0.gmailId, $0.size) }
+            left.subtract(here.map(\.gmailId))
         }
-        for entry in entries { imapIndex?[entry.id] = (entry.folder, entry.uid) }
-        return (folders, entries)
+        return (folders, found)
     }
 
-    /// The highest UID an index has in each folder.
-    static func highestUIDs(_ index: [String: (folder: String, uid: UInt32)]) -> [String: UInt32] {
-        index.values.reduce(into: [:]) { highest, place in highest[place.folder] = max(highest[place.folder] ?? 0, place.uid) }
+    /// UIDs of the open mailbox's messages with these Gmail ids.
+    private func search(_ ids: [String], on imap: GmailIMAP) async throws -> [UInt32] {
+        var uids: [UInt32] = []
+        for criteria in Self.idSearches(ids) { uids += try await imap.search(criteria) }
+        return uids
+    }
+
+    /// The IMAP searches for messages by their Gmail ids (X-GM-MSGID, the ids in decimal), 50 at a time:
+    /// Gmail takes 100 in one search, but can't parse 150.
+    static func idSearches(_ ids: [String], each: Int = 50) -> [String] {
+        ids.compactMap { UInt64($0, radix: 16) }.chunked(each).map { anyOf($0.map { "X-GM-MSGID \($0)" }) }
     }
 
     /// A label change in Gmail's history: labels added to a message, or taken off it.
@@ -643,10 +656,15 @@ public actor GmailAccountSync {
         var copies: [(id: String, data: Data, body: MessageBody, parts: [MessagePart])] = []
         for (original, data) in messages {
             let mime = MIMEPart.parse(data)
-            let (body, parts) = BodyStructure.render(mime, blobId: original.id)
+            let structure = BodyStructure(mime)
+            let (body, parts) = structure.render(blobId: original.id)
             var message = original
             if message.snippet == nil { message.snippet = Self.preview(body.text ?? "") }
-            guard let stored = Self.incoming(message, raw: mime, mailboxLabels: mailboxLabels, archiveLabel: archiveLabel) else { continue }
+            guard
+                let stored = Self.incoming(
+                    message, headers: mime.headers, hasAttachment: structure.hasAttachment, mailboxLabels: mailboxLabels,
+                    archiveLabel: archiveLabel)
+            else { continue }
             incoming.append(stored)
             copies.append((message.id, data, body, parts))
         }
@@ -661,9 +679,24 @@ public actor GmailAccountSync {
         return incoming.count
     }
 
-    /// A list's preview line from a message's text, as Gmail's snippet is: its start, on one line.
+    /// A list's preview line from a message's text, as Gmail's snippet is: its words with a space
+    /// between, the first 200 characters. Only as much of the text as that takes is read.
     static func preview(_ text: String) -> String {
-        String(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(200))
+        var line = ""
+        var letters = 0  // other than spaces (a space and a zero-width character after it make one)
+        var space = false
+        for character in text {
+            if character.isWhitespace {
+                space = !line.isEmpty
+                continue
+            }
+            if space { line.append(" ") }
+            space = false
+            line.append(character)
+            letters += 1
+            if letters == 200 { break }
+        }
+        return String(line.prefix(200))
     }
 
     /// Messages stored here with a raw copy, updated with their labels as Gmail has them now (the
@@ -861,7 +894,7 @@ public actor GmailAccountSync {
         _ message: GmailClient.Message, raw: MIMEPart, mailboxLabels: Set<String>, archiveLabel: String? = nil
     ) -> IncomingMessage? {
         incoming(
-            message, headers: raw.headers, hasAttachment: BodyStructure.hasAttachment(raw), mailboxLabels: mailboxLabels,
+            message, headers: raw.headers, hasAttachment: BodyStructure(raw).hasAttachment, mailboxLabels: mailboxLabels,
             archiveLabel: archiveLabel)
     }
 
@@ -973,24 +1006,16 @@ public actor GmailAccountSync {
         return .init(processed: done.count + pending.count, failed: failed.count)
     }
 
-    /// Downloads messages over IMAP (the connection stays open while downloads go on): finds each in the
-    /// index, fetches them whole by folder in batches, and stores their copies, bodies and parts.
-    /// Returns those downloaded (the others aren't in the index: new since, or gone).
+    /// Downloads messages over IMAP (the connections stay open while downloads go on): finds them by
+    /// their ids, fetches them whole by folder in batches, and stores their copies, bodies and parts.
+    /// Returns those downloaded (the others Gmail doesn't have over IMAP).
     private func imapDownload(_ pending: [MailStore.PendingDownload]) async throws -> [Int64] {
         let pool = try await openIMAP()
-        let imap = pool[0]
-        if imapIndex == nil { _ = try await index(imap) }
+        let (_, found) = try await locate(pending.map(\.remoteId), on: pool[0])
+        let places = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var located: [String: [(item: MailStore.PendingDownload, uid: UInt32)]] = [:]
-        func locate() {
-            located = [:]
-            for item in pending {
-                if let place = imapIndex?[item.remoteId] { located[place.folder, default: []].append((item, place.uid)) }
-            }
-        }
-        locate()
-        if located.isEmpty {  // all newer than the index: index again, once
-            _ = try await index(imap)
-            locate()
+        for item in pending {
+            if let place = places[item.remoteId] { located[place.folder, default: []].append((item, place.uid)) }
         }
         var done: [Int64] = []
         #if DEBUG
@@ -1171,11 +1196,7 @@ extension GmailAccountSync {
     func storeFlags(_ remoteIds: [String], on: Set<String>, off: Set<String>) async throws {
         do {
             try await withAllMail { imap, _ in
-                var uids: [UInt32] = []
-                for chunk in remoteIds.chunked(20) {
-                    let ids = chunk.compactMap { UInt64($0, radix: 16) }.map { "X-GM-MSGID \($0)" }
-                    if !ids.isEmpty { uids += try await imap.search(Self.anyOf(ids)) }
-                }
+                let uids = try await self.search(remoteIds, on: imap)
                 try await imap.store(uids, flags: Array(on), add: true)
                 try await imap.store(uids, flags: Array(off), add: false)
             }
@@ -1364,7 +1385,7 @@ extension GmailAccountSync {
         func addresses(_ name: String) -> [EmailAddress] {
             raw.headers(name).flatMap { MailHeaders.addresses($0).addresses }.map { EmailAddress(name: $0.name, email: $0.email) }
         }
-        let (body, parts) = BodyStructure.render(raw, blobId: remoteId)
+        let (body, parts) = BodyStructure(raw).render(blobId: remoteId)
         var draft = SavedDraft()
         draft.from = addresses("From").first?.email?.lowercased()
         draft.to = addresses("To")
@@ -1505,29 +1526,34 @@ struct BodyStructure {
         }
     }
 
+    /// Whether a message has attachments: parts other than pictures its HTML shows.
+    var hasAttachment: Bool { attachments.contains { $0.cid == nil || $0.disposition == "attachment" } }
+
     /// The body to show and search, and the parts to keep (as JMAP's: embedded media from the HTML body
     /// and every attachment, named or not), their blob ids "<message blob id>.<part id>".
-    static func render(raw: Data, blobId: String) -> (MessageBody, [MessagePart]) { render(MIMEPart.parse(raw), blobId: blobId) }
+    static func render(raw: Data, blobId: String) -> (MessageBody, [MessagePart]) { BodyStructure(MIMEPart.parse(raw)).render(blobId: blobId) }
 
-    /// Whether a message has attachments: parts other than pictures its HTML shows.
-    static func hasAttachment(_ root: MIMEPart) -> Bool {
-        BodyStructure(root).attachments.contains { $0.cid == nil || $0.disposition == "attachment" }
-    }
-
-    static func render(_ root: MIMEPart, blobId: String) -> (MessageBody, [MessagePart]) {
-        let structure = BodyStructure(root)
-        let text = structure.textBody.filter { $0.type.hasPrefix("text/") }.map { leaf in
-            leaf.type == "text/html" ? JMAPAccountSync.plainText(fromHTML: leaf.text) : leaf.text
+    func render(blobId: String) -> (MessageBody, [MessagePart]) {
+        // A part in both bodies (an HTML-only message's HTML) is decoded once.
+        var decoded: [String: String] = [:]
+        func decode(_ leaf: Leaf) -> String {
+            if let text = decoded[leaf.part.partId] { return text }
+            let text = leaf.text
+            decoded[leaf.part.partId] = text
+            return text
+        }
+        let text = textBody.filter { $0.type.hasPrefix("text/") }.map { leaf in
+            leaf.type == "text/html" ? JMAPAccountSync.plainText(fromHTML: decode(leaf)) : decode(leaf)
         }.joined(separator: "\n\n")
         var html: String?
-        if structure.htmlBody.contains(where: { $0.type == "text/html" }) {
-            html = structure.htmlBody.filter { $0.type.hasPrefix("text/") }.map { leaf in
-                leaf.type == "text/html" ? leaf.text : "<pre style=\"white-space: pre-wrap\">" + JMAPAccountSync.escapeHTML(leaf.text) + "</pre>"
+        if htmlBody.contains(where: { $0.type == "text/html" }) {
+            html = htmlBody.filter { $0.type.hasPrefix("text/") }.map { leaf in
+                leaf.type == "text/html" ? decode(leaf) : "<pre style=\"white-space: pre-wrap\">" + JMAPAccountSync.escapeHTML(decode(leaf)) + "</pre>"
             }.joined()
         }
         var seen = Set<String>()
-        let embedded = structure.htmlBody.filter { $0.cid != nil && !$0.type.hasPrefix("text/") }
-        let parts = (embedded + structure.attachments).compactMap { leaf -> MessagePart? in
+        let embedded = htmlBody.filter { $0.cid != nil && !$0.type.hasPrefix("text/") }
+        let parts = (embedded + attachments).compactMap { leaf -> MessagePart? in
             guard seen.insert(leaf.part.partId).inserted else { return nil }
             return MessagePart(
                 blobId: "\(blobId).\(leaf.part.partId)", cid: leaf.cid, type: leaf.type, name: leaf.name, size: leaf.part.contentSize)

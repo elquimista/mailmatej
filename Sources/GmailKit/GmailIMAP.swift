@@ -109,7 +109,16 @@ public actor GmailIMAP {
     /// Every message in the open mailbox: its UID, Gmail id and size; from `first`, those with that UID
     /// or a higher one (or, with none, the newest: IMAP takes "n:*" either way round).
     public func index(from first: UInt32 = 1) async throws -> [(uid: UInt32, gmailId: String, size: Int)] {
-        try await command("UID FETCH \(first):* (UID X-GM-MSGID RFC822.SIZE)").compactMap { response in
+        try await index("\(first):*")
+    }
+
+    /// These messages of the open mailbox (by UID): their UIDs, Gmail ids and sizes.
+    public func index(uids: [UInt32]) async throws -> [(uid: UInt32, gmailId: String, size: Int)] {
+        uids.isEmpty ? [] : try await index(Self.uidSet(uids))
+    }
+
+    private func index(_ uidSet: String) async throws -> [(uid: UInt32, gmailId: String, size: Int)] {
+        try await command("UID FETCH \(uidSet) (UID X-GM-MSGID RFC822.SIZE)").compactMap { response in
             guard let fields = Self.fetchFields(response), let uid = fields["UID"]?.atom.flatMap({ UInt32($0) }),
                 let id = fields["X-GM-MSGID"]?.atom.flatMap({ UInt64($0) })
             else { return nil }
