@@ -1270,6 +1270,9 @@ public final class MailStore: Sendable {
                 sql: """
                     SELECT m.id, m.accountId, m.fromDisplay, m.fromEmail, m.subject, m.receivedAt, m.isSeen,
                            m.isFlagged, m.isAnswered, m.hasAttachment, m.size, a.name AS accountName,
+                           (SELECT group_concat(shown, ', ') FROM (
+                              SELECT coalesce(nullif(t.name, ''), t.email) AS shown FROM address t
+                              WHERE t.messageId = m.id AND t.role = \(AddressRole.to.rawValue) ORDER BY t.position)) AS toDisplay,
                            (SELECT group_concat(name, ', ') FROM (
                               SELECT b.name FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailboxId
                               WHERE mm.messageId = m.id ORDER BY b.role IS NULL, b.name)) AS mailboxName
@@ -1486,6 +1489,12 @@ public final class MailStore: Sendable {
         return switch sort.key {
         case .receivedAt: "m.receivedAt \(direction), m.id \(direction)"
         case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
+        case .to:  // by the first recipient, as the column shows it
+            """
+            (SELECT coalesce(nullif(t.name, ''), t.email) FROM address t
+             WHERE t.messageId = m.id AND t.role = \(AddressRole.to.rawValue) ORDER BY t.position LIMIT 1)
+             COLLATE NOCASE \(direction), m.receivedAt DESC
+            """
         case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
         case .size: "m.size \(direction), m.receivedAt DESC"
         case .unread: "NOT m.isSeen \(direction), m.receivedAt DESC"  // descending: unread first

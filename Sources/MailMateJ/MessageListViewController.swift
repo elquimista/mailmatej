@@ -6,21 +6,33 @@ import MailStore
 @MainActor
 final class MessageListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     enum Column: String {
-        case unread, flag, attachment, from, subject, date, source
+        case unread, flag, attachment, from, to, subject, date, source
 
         var title: String {
             switch self {
             case .unread, .flag, .attachment: ""
             case .from: "From"
+            case .to: "To"
             case .subject: "Subject"
             case .date: "Date Received"
             case .source: "Source Mailbox"
             }
         }
 
+        /// The header menu's name for it, as MailMate's.
+        var menuTitle: String {
+            switch self {
+            case .unread: "Read"
+            case .flag: "Flag"
+            case .attachment: "Attachments"
+            default: title
+            }
+        }
+
         var sortKey: MessageSort.Key? {
             switch self {
             case .from: .from
+            case .to: .to
             case .subject: .subject
             case .date: .receivedAt
             case .unread: .unread
@@ -55,7 +67,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     /// Thread layout of the rows, when the list shows threads (see `MailStore.threadedMessages`).
     var threadRows: [Int64: MailStore.ThreadedRow] = [:]
     var showsThreads = false {
-        didSet { if showsThreads != oldValue { updateFromHeader() } }
+        didSet { if showsThreads != oldValue { updateThreadHeader() } }
     }
     /// Threads whose replies show; the others are collapsed (threads start collapsed, as in MailMate).
     var expandedThreads: Set<String> = []
@@ -77,6 +89,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     ) {
         self.store = store
         self.columns = columns
+        threadColumn = columns.contains(.from) ? .from : .subject
         self.autosaveName = autosaveName
         self.widths = widths
         self.relativeDates = relativeDates
@@ -117,9 +130,12 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.gridStyleMask = []
 
+        // A column added since the layout was saved starts hidden (before the table sizes its columns).
+        let saved = Self.savedColumnIDs(autosaveName)
         for column in columns {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
             c.title = column.title
+            c.isHidden = saved?.contains(column.rawValue) == false
             switch column {
             case .unread, .flag, .attachment:
                 c.width = 16
@@ -146,7 +162,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
                     cell.attributedStringValue = title
                     c.headerCell = cell
                 }
-            case .from:
+            case .from, .to:
                 c.width = 220
                 c.minWidth = 80
                 c.resizingMask = [.userResizingMask, .autoresizingMask]
@@ -171,10 +187,18 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         }
         table.autosaveName = autosaveName
         table.autosaveTableColumns = true
+        // The saved layout puts a column it doesn't know last; it goes after the one it follows here.
+        for (index, column) in columns.enumerated() where index > 0 && saved?.contains(column.rawValue) == false {
+            let after = table.column(withIdentifier: NSUserInterfaceItemIdentifier(columns[index - 1].rawValue))
+            let at = table.column(withIdentifier: NSUserInterfaceItemIdentifier(column.rawValue))
+            if after >= 0, at >= 0, at != after + 1 { table.moveColumn(at, toColumn: at > after ? after + 1 : after) }
+        }
         table.sortDescriptors = [NSSortDescriptor(key: sort.key.rawValue, ascending: sort.ascending)]
         let menu = NSMenu()
         menu.delegate = self
         table.menu = menu
+        headerMenu.delegate = self
+        applyColumns()
         table.dataSource = self
         table.delegate = self
 
@@ -406,6 +430,139 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     /// The sidebar mailbox this list shows, whose colored submailboxes color its rows (nil: none).
     var colorKey: String?
 
+    // MARK: Columns
+
+    /// The mailbox whose columns the list shows (see `ListColumns`), and whether it holds sent mail,
+    /// which shows To in place of From. Nil: the list keeps its columns (Correspondence).
+    var columnsMailbox: (key: String, sent: Bool)? {
+        didSet { applyColumns() }
+    }
+
+    private let headerMenu = NSMenu()
+
+    /// From, To or Subject: the one that holds the threads, as MailMate's outline column.
+    private static let textColumns: [Column] = [.from, .to, .subject]
+
+    private func applyColumns() {
+        guard isViewLoaded, let columnsMailbox else { return }
+        tableView.headerView?.menu = headerMenu
+        var shown = ListColumns.columns(for: columnsMailbox.key, sent: columnsMailbox.sent)
+        if shown.isDisjoint(with: Self.textColumns) { shown.insert(.subject) }
+        let before = tableView.tableColumns.filter { !$0.isHidden }
+        let total = before.reduce(0) { $0 + $1.width + tableView.intercellSpacing.width }
+        let style = tableView.columnAutoresizingStyle
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing  // widths are set here, not spread by the table
+        for c in tableView.tableColumns {
+            guard let column = Column(rawValue: c.identifier.rawValue) else { continue }
+            c.isHidden = !shown.contains(column)
+        }
+        let after = tableView.tableColumns.filter { !$0.isHidden }
+        if before != after { layOut(leaving: before, for: after, total: total) }
+        tableView.columnAutoresizingStyle = style
+        let threads = Self.textColumns.first { shown.contains($0) && columns.contains($0) } ?? .subject
+        if threads != threadColumn {
+            threadColumn = threads
+            updateThreadHeader()
+            tableView.reloadData()
+        }
+    }
+
+    private var widthsKey: String { "\(autosaveName).Widths" }
+
+    /// Each set of columns keeps its widths (Inbox's with From, Sent's with To), fitted to the list's
+    /// width, which the text columns share as they do when it's resized. A set shown for the first time
+    /// starts from the widths the columns last had.
+    private func layOut(leaving before: [NSTableColumn], for after: [NSTableColumn], total: CGFloat) {
+        func id(_ set: [NSTableColumn]) -> String { set.map(\.identifier.rawValue).sorted().joined(separator: ",") }
+        var stored = UserDefaults.standard.dictionary(forKey: widthsKey) as? [String: [String: Double]] ?? [:]
+        stored[id(before)] = Dictionary(uniqueKeysWithValues: before.map { ($0.identifier.rawValue, Double($0.width)) })
+        UserDefaults.standard.set(stored, forKey: widthsKey)
+        if let widths = stored[id(after)] {
+            for c in after { if let width = widths[c.identifier.rawValue] { c.width = width } }
+        }
+        let flexible = after.filter { $0.resizingMask.contains(.autoresizingMask) }
+        let room = total - after.reduce(0) { $0 + tableView.intercellSpacing.width + (flexible.contains($1) ? 0 : $1.width) }
+        let current = flexible.reduce(0) { $0 + $1.width }
+        guard current > 0, room > 0, abs(room - current) >= 0.5 else { return }
+        var left = room
+        for c in flexible.dropLast() {
+            c.width = max(c.minWidth, (c.width * room / current).rounded())
+            left -= c.width
+        }
+        flexible.last.map { $0.width = max($0.minWidth, left) }
+    }
+
+    private func isShown(_ column: Column) -> Bool {
+        tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.rawValue))?.isHidden == false
+    }
+
+    /// MailMate's column menu: every column by name, checked when shown, then the defaults. The last of
+    /// From, To and Subject stays, holding the threads.
+    private func fillHeaderMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let columnsMailbox else { return }
+        let lastText = Self.textColumns.filter(isShown).count == 1
+        for column in columns.sorted(by: { $0.menuTitle < $1.menuTitle }) {
+            let item = menu.addItem(withTitle: column.menuTitle, action: #selector(toggleColumn(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = column.rawValue
+            item.state = isShown(column) ? .on : .off
+            item.isEnabled = !(lastText && isShown(column) && Self.textColumns.contains(column))
+        }
+        menu.addItem(.separator())
+        let customized = ListColumns.isCustomized(columnsMailbox.key)
+        for (title, action) in [
+            ("Use as Default Columns", #selector(useAsDefaultColumns(_:))),
+            ("Revert to Default Columns", #selector(revertToDefaultColumns(_:))),
+        ] {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = customized
+        }
+    }
+
+    @objc private func toggleColumn(_ sender: NSMenuItem) {
+        guard let columnsMailbox, let column = (sender.representedObject as? String).flatMap(Column.init) else { return }
+        var shown = Set(columns.filter(isShown))
+        if shown.contains(column) { shown.remove(column) } else { shown.insert(column) }
+        ListColumns.set(shown, for: columnsMailbox.key, sent: columnsMailbox.sent)
+        applyColumns()
+    }
+
+    @objc private func useAsDefaultColumns(_ sender: Any?) {
+        guard let columnsMailbox else { return }
+        ListColumns.useAsDefault(columnsMailbox.key, sent: columnsMailbox.sent)
+        applyColumns()
+    }
+
+    @objc private func revertToDefaultColumns(_ sender: Any?) {
+        guard let columnsMailbox else { return }
+        ListColumns.revert(columnsMailbox.key)
+        applyColumns()
+    }
+
+    #if DEBUG
+        /// The header menu as a right-click builds it, running the item titled `run` first, if any.
+        func debugHeaderMenu(run: String?) -> [String] {
+            let menu = NSMenu()
+            fillHeaderMenu(menu)
+            if let item = menu.items.first(where: { $0.title == run }), let action = item.action, item.isEnabled {
+                NSApp.sendAction(action, to: item.target, from: item)
+                fillHeaderMenu(menu)
+            }
+            return menu.items.map { item in
+                item.isSeparatorItem ? "—" : (item.state == .on ? "✓ " : "") + item.title + (item.isEnabled ? "" : " (off)")
+            }
+        }
+
+        /// The shown columns, left to right, the one holding threads marked.
+        var debugColumns: String {
+            tableView.tableColumns.filter { !$0.isHidden }.map { c in
+                c.identifier.rawValue + (c.identifier.rawValue == threadColumn.rawValue ? "*" : "") + " \(Int(c.width))"
+            }.joined(separator: " ")
+        }
+    #endif
+
     // MARK: NSTableViewDataSource / Delegate
 
     #if DEBUG
@@ -465,7 +622,11 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     private func textColumnCell(_ tableView: NSTableView, _ column: Column, _ row: MessageRow, bold unread: Bool) -> NSView {
         switch column {
         case threadColumn where showsThreads:
-            let text = column == .from ? row.fromDisplay : (row.subject.isEmpty ? "(no subject)" : row.subject)
+            let text = switch column {
+            case .from: row.fromDisplay
+            case .to: row.toDisplay
+            default: row.subject.isEmpty ? "(no subject)" : row.subject
+            }
             return threadCell(tableView, row, text: text, thread: threadRows[row.id], bold: unread)
         case .date:
             let date = shownDate(row)
@@ -475,6 +636,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             return textCell(tableView, column, "\(row.mailboxName) – \(row.accountName)", bold: unread)
         case .subject:
             return textCell(tableView, column, row.subject.isEmpty ? "(no subject)" : row.subject, bold: unread)
+        case .to:
+            return textCell(tableView, column, row.toDisplay, bold: unread)
         default:
             return textCell(tableView, column, row.fromDisplay, bold: unread)
         }
@@ -530,6 +693,16 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     private static func sortDefaultsKey(_ name: String) -> String { "\(name).Sort" }
 
+    /// The columns of the layout the table saved under this name (AppKit's own record), if any.
+    private static func savedColumnIDs(_ name: String) -> Set<String>? {
+        guard let data = UserDefaults.standard.data(forKey: "NSTableView Columns v3 \(name)"),
+            let archive = try? NSKeyedUnarchiver(forReadingFrom: data),
+            let saved = archive.decodeObject(
+                of: [NSArray.self, NSDictionary.self, NSString.self, NSNumber.self], forKey: "Array") as? [[String: Any]]
+        else { return nil }
+        return Set(saved.compactMap { $0["Identifier"] as? String })
+    }
+
     private static func savedSort(_ name: String) -> MessageSort? {
         guard let saved = UserDefaults.standard.dictionary(forKey: sortDefaultsKey(name)),
             let key = (saved["key"] as? String).flatMap(MessageSort.Key.init),
@@ -544,6 +717,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     var addContextItems: ((NSMenu, [Int64]) -> Void)?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === headerMenu { return fillHeaderMenu(menu) }
         fillContextMenu(menu, row: tableView.clickedRow)
     }
 
@@ -711,20 +885,21 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     // MARK: Threads
 
-    /// The column with the chevrons and indents: From, or Subject in a list without From (Correspondence).
-    private var threadColumn: Column { columns.contains(.from) ? .from : .subject }
+    /// The column with the chevrons and indents: the first shown of From, To and Subject (Subject in the
+    /// Correspondence pane, which has neither of the others).
+    private var threadColumn: Column
 
     /// In a threaded list MailMate lines the From header up with the senders, past the chevrons.
-    private func updateFromHeader() {
-        guard let column = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(threadColumn.rawValue)) else {
-            return
+    private func updateThreadHeader() {
+        for column in Self.textColumns {
+            guard let c = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(column.rawValue)) else { continue }
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = column == threadColumn && showsThreads ? 12 : 0
+            style.lineBreakMode = .byTruncatingTail
+            c.headerCell.attributedStringValue = NSAttributedString(string: column.title, attributes: [
+                .paragraphStyle: style, .font: c.headerCell.font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            ])
         }
-        let style = NSMutableParagraphStyle()
-        style.firstLineHeadIndent = showsThreads ? 12 : 0
-        style.lineBreakMode = .byTruncatingTail
-        column.headerCell.attributedStringValue = NSAttributedString(string: threadColumn.title, attributes: [
-            .paragraphStyle: style, .font: column.headerCell.font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
-        ])
         tableView.headerView?.needsDisplay = true
     }
 

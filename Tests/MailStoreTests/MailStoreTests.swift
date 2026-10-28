@@ -37,6 +37,23 @@ import Testing
         #expect(try store.otherSide(of: "Support@Vendor.com", in: ids[0]) == "alias@gmail.com")
     }
 
+    @Test func toShowsAndSortsByTheRecipients() throws {
+        var several = message("1", from: "me@example.com", box: "se", at: 100, subject: "Several")
+        several.addresses = [
+            .init(role: .from, name: nil, email: "me@example.com"), .init(role: .to, name: "Zoe", email: "zoe@x.com"),
+            .init(role: .to, name: nil, email: "ann@x.com"), .init(role: .cc, name: "Cy", email: "cy@x.com"),
+        ]
+        var none = message("3", from: "me@example.com", box: "se", at: 300, subject: "None")
+        none.addresses = [.init(role: .from, name: nil, email: "me@example.com"), .init(role: .bcc, name: nil, email: "b@x.com")]
+        try store.upsertMessages(accountId: "acc", [
+            several, message("2", from: "me@example.com", to: "Bob@X.com", box: "se", at: 200, subject: "One"), none,
+        ])
+        let byTo = try store.messageIDs(scope: .role("sent"), sort: MessageSort(key: .to, ascending: true))
+        // No recipient first, then by the first recipient as shown, whatever its case.
+        #expect(try byTo.map { try store.rows(ids: [$0]).first?.subject } == ["None", "One", "Several"])
+        #expect(try store.rows(ids: byTo).map(\.toDisplay).sorted() == ["", "Zoe, ann@x.com", "bob@x.com"])
+    }
+
     @Test func threadIdConditionFindsTheThreadAsItIsNow() throws {
         func reply(_ id: String, _ header: String, to parent: String?, at: Double) -> IncomingMessage {
             var m = message(id, from: "a@x.com", at: at, subject: "Re: plan")

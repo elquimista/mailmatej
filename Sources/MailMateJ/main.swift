@@ -287,6 +287,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectSidebar(key: key)  // e.g. account.dev-carol
                     try? await Task.sleep(for: .seconds(1))
                 }
+                // MMJ_DEBUG_COLUMNS="@unified.sent;To;@unified.inbox;…": selects a mailbox (@key) or runs a
+                // header menu item, logging the shown columns and the menu after each step.
+                for step in ProcessInfo.processInfo.environment["MMJ_DEBUG_COLUMNS"]?.split(separator: ";") ?? [] {
+                    var menu: [String] = []
+                    if step.hasPrefix("@") {
+                        windowController?.debugSelectSidebar(key: String(step.dropFirst()))
+                        try? await Task.sleep(for: .milliseconds(500))
+                        menu = windowController?.debugHeaderMenu(run: nil) ?? []
+                    } else {
+                        menu = windowController?.debugHeaderMenu(run: String(step)) ?? []
+                    }
+                    NSLog("MMJ columns after \(step): \(windowController?.debugColumns ?? "")")
+                    NSLog("MMJ column menu: \(menu.joined(separator: " | "))")
+                }
                 if let id = Int64(ProcessInfo.processInfo.environment["MMJ_DEBUG_DELETE_SMART"] ?? "") {
                     try? await Task.sleep(for: .seconds(1))
                     AppModel.shared.deleteSmartMailbox(id: id)  // as Delete Mailbox does

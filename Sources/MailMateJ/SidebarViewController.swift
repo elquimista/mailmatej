@@ -499,6 +499,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func node(forKey key: String) -> SidebarNode? { find(key, in: roots) }
 
+    /// Whether the mailbox is Sent or Drafts (unified or an account's), or sits inside one: mail sent,
+    /// whose list shows To in place of From.
+    func holdsSentMail(_ key: String) -> Bool {
+        var current: String? = key
+        var steps = 0
+        while let key = current, steps < 64 {
+            if let node = node(forKey: key) {
+                var role = node.role
+                if case .role(let unified)? = node.scope { role = unified }
+                if role == "sent" || role == "drafts" { return true }
+            }
+            current = MailboxColors.parents[key]
+            steps += 1
+        }
+        return false
+    }
+
     private func find(_ key: String, in nodes: [SidebarNode]) -> SidebarNode? {
         for node in nodes {
             if node.key == key { return node }

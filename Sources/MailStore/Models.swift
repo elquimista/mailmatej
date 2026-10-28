@@ -203,6 +203,8 @@ public struct MessageRow: FetchableRecord, Sendable {
     public var accountId: String
     public var fromDisplay: String
     public var fromEmail: String
+    /// The To recipients, each by name or else address, comma separated.
+    public var toDisplay: String
     public var subject: String
     public var receivedAt: Date
     public var isSeen: Bool
@@ -218,6 +220,7 @@ public struct MessageRow: FetchableRecord, Sendable {
         accountId = row["accountId"]
         fromDisplay = row["fromDisplay"]
         fromEmail = row["fromEmail"]
+        toDisplay = row["toDisplay"] ?? ""
         subject = row["subject"]
         receivedAt = Date(timeIntervalSince1970: row["receivedAt"])
         isSeen = row["isSeen"]
@@ -407,7 +410,7 @@ public enum MessageCount: Hashable, Sendable {
 
 public struct MessageSort: Hashable, Sendable {
     public enum Key: String, Sendable {
-        case receivedAt, from, subject, size, unread, flagged
+        case receivedAt, from, to, subject, size, unread, flagged
 
         /// Newest, unread or flagged first on the first click, as in MailMate; the rest A to Z.
         public var startsDescending: Bool { self == .receivedAt || self == .unread || self == .flagged }

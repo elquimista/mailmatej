@@ -70,7 +70,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         SidebarViewController.main = sidebar
         sidebar.remembersSelection = true
         list = MessageListViewController(
-            store: model.store, columns: [.unread, .flag, .from, .subject, .date, .source, .attachment],
+            store: model.store, columns: [.unread, .flag, .from, .to, .subject, .date, .source, .attachment],
             autosaveName: "MainMessageList")
         // As MailMate's Correspondence pane (measured at 1x): no unread column, flag last, relative dates,
         // oldest first.
@@ -247,6 +247,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             self.scope = scope
             self.scopeTitle = node.title
             list.colorKey = node.key
+            showColumns()
             selectAfterMove = nil
             self.reloadList(.scopeChanged)
             updateProgress()
@@ -637,6 +638,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         func debugSelectSidebar(key: String) { sidebar.debugSelect(key: key) }
+        func debugHeaderMenu(run: String?) -> [String] { list.debugHeaderMenu(run: run) }
+        var debugColumns: String { list.debugColumns }
         func debugSidebarContextMenu(key: String) -> [String] { sidebar.debugContextMenu(key: key) }
         func debugMoveSidebar(_ spec: String) { sidebar.debugMove(spec) }
         var debugSidebarBadges: String { sidebar.debugBadges }
@@ -1344,6 +1347,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         hasMailbox = true
         scopeTitle = "All Messages"
         list.colorKey = nil
+        showColumns()
         selectAfterMove = nil
         pendingHistorySelection = anchor  // selected once the result has loaded
         list.showResultBar(kind.title(email), symbol: kind.symbol, buttons: [
@@ -1416,8 +1420,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         scope = back.scope
         scopeTitle = back.title
         list.colorKey = back.colorKey
+        showColumns()
         hasMailbox = back.hasMailbox
         reloadList(.scopeChanged)
+    }
+
+    /// The list takes the columns of the mailbox on show; a result (no mailbox) has its own.
+    private func showColumns() {
+        let key = list.colorKey ?? "result"
+        list.columnsMailbox = (key, sidebar.holdsSentMail(key))
     }
 
     /// Remembers the list's selection and position in the current mailbox, for coming back to it.
