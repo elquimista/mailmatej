@@ -936,13 +936,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     target = windowController?.accountSettings?.window
                 }
                 // MMJ_DEBUG_SYMBOL_PANEL=<sidebar key>: Symbol ▸ Custom… on it (=key|list: with its list open,
-                // captured with the list as <snapshot>-list.png).
+                // captured with the list as <snapshot>-list.png; =key|pick: picks the row the list opens on,
+                // then Apply, logged).
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SYMBOL_PANEL"] {
                     let parts = spec.split(separator: "|").map(String.init)
                     SymbolPanel.show(key: parts[0], defaultSymbol: "folder")
                     try? await Task.sleep(for: .seconds(1))
                     target = NSApp.windows.first { $0 is SymbolPanel } ?? target
-                    if parts.count > 1, let frame = target?.frame, let screen = NSScreen.screens.first {
+                    if parts.count > 1, parts[1] == "pick" {
+                        await SymbolPanel.debugPickSelectedRow()
+                    } else if parts.count > 1, let frame = target?.frame, let screen = NSScreen.screens.first {
                         NSApp.activate()
                         SymbolPanel.debugOpenList()
                         try? await Task.sleep(for: .seconds(1))

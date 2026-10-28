@@ -80,26 +80,76 @@ final class SymbolPanel: NSPanel, NSComboBoxDataSource, NSComboBoxDelegate {
         showSymbol(name)
     }
 
+    /// The name in the field. Choosing a row from the list puts the whole row there, its symbol and a tab
+    /// before the name; picking the row already selected (clicking it, or Return after the arrows) does
+    /// so without a selection change to tidy it after.
+    private var name: String {
+        (combo.stringValue.components(separatedBy: "\t").last ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The field shows the plain name, not the list row with its symbol.
+    private func tidyField() {
+        let name = name
+        if combo.stringValue != name { combo.stringValue = name }
+    }
+
     @objc private func applyClicked(_ sender: Any?) {
-        let name = combo.stringValue.trimmingCharacters(in: .whitespaces)
+        let name = name
         guard NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil else { return NSSound.beep() }
+        tidyField()
         showSymbol(name)
         MailboxSymbols.set(name, for: key)
     }
 
-    func controlTextDidChange(_ obj: Notification) { preview(combo.stringValue) }
+    func controlTextDidChange(_ obj: Notification) { preview(name) }
 
     func comboBoxSelectionDidChange(_ notification: Notification) {
         let index = combo.indexOfSelectedItem
         guard MailboxSymbols.allNames.indices.contains(index) else { return }
         let name = MailboxSymbols.allNames[index]
         preview(name)
-        // The field shows the plain name, not the list row with its symbol.
+        // The field follows the row moved to, by its plain name.
         DispatchQueue.main.async { [weak self] in self?.combo.stringValue = name }
+    }
+
+    /// The row chosen goes into the field after this, so it's tidied on the next turn.
+    func comboBoxWillDismiss(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.tidyField() }
     }
 
     #if DEBUG
         static func debugOpenList() { shared?.combo.cell?.setAccessibilityExpanded(true) }
+
+        /// Opens the list, clicks the row it opens on (with posted events, the app left inactive), then
+        /// Apply; logs the field after each.
+        static func debugPickSelectedRow() async {
+            guard let panel = shared else { return }
+            debugOpenList()
+            try? await Task.sleep(for: .milliseconds(400))
+            let list = NSApp.windows.first { $0.className.contains("ComboBox") && $0.isVisible }
+            var views = list?.contentView.map { [$0] } ?? []
+            var table: NSTableView?
+            while table == nil, let view = views.popLast() {
+                table = view as? NSTableView
+                views += view.subviews
+            }
+            guard let list, let table, table.selectedRow >= 0 else { return NSLog("MMJ symbol pick: no list") }
+            let rect = table.rect(ofRow: table.selectedRow)
+            let point = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: list.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0)
+                if let event { NSApp.postEvent(event, atStart: false) }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+            let field = { panel.combo.stringValue.replacingOccurrences(of: "\u{FFFC}", with: "<attachment>").replacingOccurrences(of: "\t", with: "<tab>") }
+            NSLog("MMJ symbol pick: clicked row \(table.selectedRow), field \(field())")
+            panel.applyButton.performClick(nil)
+            NSLog("MMJ symbol pick: applied \(MailboxSymbols.symbol(for: panel.key) ?? "nothing"), field \(field())")
+        }
     #endif
 
     // MARK: NSComboBoxDataSource
