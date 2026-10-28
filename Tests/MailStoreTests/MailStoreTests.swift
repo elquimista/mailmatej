@@ -965,6 +965,39 @@ import Testing
         try expectCounted { try store.deleteSmartMailbox(id: money) }
     }
 
+    @Test func deletedMessagesTakeTheirFilesAlong() throws {
+        var shared = message("3", from: "c@x.com", at: 300)
+        shared.blobId = "b1"  // the server shares one blob between two messages
+        try upsert([message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200), shared])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3"])
+        for blob in ["b1", "b2"] { try store.blobs.write(Data("raw".utf8), accountId: "acc", blobId: blob) }
+        try store.saveBody(messageId: ids["2"]!, MessageBody(html: nil, text: "Hi"), parts: [
+            MessagePart(blobId: "p2", cid: nil, type: "image/png", name: "a.png", size: 3),
+        ])
+        try store.blobs.writePart(Data("png".utf8), accountId: "acc", blobId: "p2")
+        func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+
+        try store.deleteMessages(accountId: "acc", remoteIds: ["1", "2"])
+        #expect(!exists(store.blobs.url(accountId: "acc", blobId: "b2")))
+        #expect(!exists(store.blobs.partURL(accountId: "acc", blobId: "p2")))
+        #expect(exists(store.blobs.url(accountId: "acc", blobId: "b1")))  // message 3 still has it
+
+        // Files a deletion left before they went along: removed once, unless written lately.
+        for blob in ["old", "new"] { try store.blobs.write(Data("raw".utf8), accountId: "acc", blobId: blob) }
+        try store.blobs.writePart(Data("png".utf8), accountId: "acc", blobId: "oldpart")
+        for url in [store.blobs.url(accountId: "acc", blobId: "old"), store.blobs.partURL(accountId: "acc", blobId: "oldpart"),
+                    store.blobs.url(accountId: "acc", blobId: "b1")] {
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -7200)], ofItemAtPath: url.path)
+        }
+        #expect(try store.removeUnusedFilesOnce() == 2)
+        #expect(!exists(store.blobs.url(accountId: "acc", blobId: "old")))
+        #expect(!exists(store.blobs.partURL(accountId: "acc", blobId: "oldpart")))
+        #expect(exists(store.blobs.url(accountId: "acc", blobId: "new")) && exists(store.blobs.url(accountId: "acc", blobId: "b1")))
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -7200)], ofItemAtPath: store.blobs.url(accountId: "acc", blobId: "new").path)
+        #expect(try store.removeUnusedFilesOnce() == 0)  // once
+    }
+
     @Test func backfillChecksUseTheirIndexes() throws {
         // What each JMAP round looks for: found from what's missing, not by reading every message.
         let checks = [

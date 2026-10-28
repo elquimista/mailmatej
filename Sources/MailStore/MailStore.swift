@@ -512,16 +512,85 @@ public final class MailStore: Sendable {
     public func deleteMessages(accountId: String, remoteIds: [String]) throws {
         guard !remoteIds.isEmpty else { return }
         let moves = try threadNumberMoves(accountId: accountId, remoteIds: remoteIds)
-        try dbPool.write { db in
+        let files: (raw: [String], parts: [String]) = try dbPool.write { db in
+            var raw = Set<String>(), parts = Set<String>()
             for chunk in remoteIds.chunked(500) {
                 let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
-                try db.execute(
-                    sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))",
-                    arguments: StatementArguments([accountId] + chunk))
+                let arguments = StatementArguments([accountId] + chunk)
+                raw.formUnion(try String.fetchAll(
+                    db, sql: "SELECT blobId FROM message WHERE accountId = ? AND remoteId IN (\(marks))", arguments: arguments))
+                parts.formUnion(try String.fetchAll(
+                    db, sql: """
+                        SELECT p.blobId FROM message_part p JOIN message m ON m.id = p.messageId
+                        WHERE m.accountId = ? AND m.remoteId IN (\(marks))
+                        """, arguments: arguments))
+                try db.execute(sql: "DELETE FROM message WHERE accountId = ? AND remoteId IN (\(marks))", arguments: arguments)
             }
             if !moves.isEmpty { try Self.renumberThreads(db, moves) }
+            // A server can share a blob between messages: what another message still has stays.
+            let stillUsed = try Self.blobIds(db, accountId: accountId, among: raw.union(parts))
+            return (Array(raw.subtracting(stillUsed)), Array(parts.subtracting(stillUsed)))
         }
+        // Their raw copies and kept parts go with them.
+        for blobId in files.raw { try? FileManager.default.removeItem(at: blobs.url(accountId: accountId, blobId: blobId)) }
+        for blobId in files.parts { try? FileManager.default.removeItem(at: blobs.partURL(accountId: accountId, blobId: blobId)) }
         if !moves.isEmpty { try refreshSmartCatalog() }
+    }
+
+    /// Which of `candidates` an account's messages or their parts use.
+    private static func blobIds(_ db: Database, accountId: String, among candidates: Set<String>) throws -> Set<String> {
+        guard !candidates.isEmpty else { return [] }
+        let list = String(decoding: try JSONEncoder().encode(Array(candidates)), as: UTF8.self)
+        return Set(try String.fetchAll(
+            db, sql: """
+                SELECT blobId FROM message WHERE accountId = ? AND blobId IN (SELECT value FROM json_each(?))
+                UNION SELECT p.blobId FROM message_part p JOIN message m ON m.id = p.messageId
+                WHERE m.accountId = ? AND p.blobId IN (SELECT value FROM json_each(?))
+                """, arguments: [accountId, list, accountId, list]))
+    }
+
+    /// Removes, once for each account, the files of messages deleted before their files went with them
+    /// (see `deleteMessages`). Returns how many it removed.
+    public func removeUnusedFilesOnce() throws -> Int {
+        var removed = 0
+        for account in try accounts() where try syncState(accountId: account.id, type: Self.unusedFilesRemoved) == nil {
+            let count = try removeUnusedFiles(accountId: account.id)
+            try setSyncState(String(count), accountId: account.id, type: Self.unusedFilesRemoved)
+            removed += count
+        }
+        return removed
+    }
+
+    static let unusedFilesRemoved = "UnusedFilesRemoved"
+
+    /// Removes an account's raw copies and kept parts that none of its messages use; those changed
+    /// since `before` stay (one being written now may not be a message's yet). Returns how many.
+    func removeUnusedFiles(accountId: String, before cutoff: Date = Date(timeIntervalSinceNow: -3600)) throws -> Int {
+        let (raw, parts) = try dbPool.read { db in
+            let raw = try String.fetchAll(db, sql: "SELECT blobId FROM message WHERE accountId = ?", arguments: [accountId])
+            let parts = try String.fetchAll(
+                db, sql: "SELECT p.blobId FROM message_part p JOIN message m ON m.id = p.messageId WHERE m.accountId = ?",
+                arguments: [accountId])
+            return (Set(raw.map { blobs.url(accountId: accountId, blobId: $0).lastPathComponent }),
+                    Set(parts.map { blobs.partURL(accountId: accountId, blobId: $0).lastPathComponent }))
+        }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
+        guard let files = FileManager.default.enumerator(
+            at: blobs.root.appendingPathComponent(accountId, isDirectory: true), includingPropertiesForKeys: keys)
+        else { return 0 }
+        var removed = 0
+        for case let file as URL in files {
+            guard let values = try? file.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
+                let changed = values.contentModificationDate, changed < cutoff
+            else { continue }
+            // Messages/<account>/<xx>/<blob>.eml, and Messages/<account>/parts/<xx>/<blob>.
+            let isPart = file.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "parts"
+            guard isPart || file.pathExtension == "eml" else { continue }
+            if !(isPart ? parts : raw).contains(file.lastPathComponent), (try? FileManager.default.removeItem(at: file)) != nil {
+                removed += 1
+            }
+        }
+        return removed
     }
 
     // MARK: Full download
