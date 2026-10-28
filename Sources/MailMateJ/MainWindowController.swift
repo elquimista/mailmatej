@@ -501,18 +501,60 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// selected there; a selection saved for the mailbox is restored instead, and with `keepSelection`
     /// (new mail, re-sorting) whatever the user selected in the pane stays selected.
     private func reloadCorrespondence(for id: Int64?, keepSelection: Bool = false) {
-        guard let id, let email = try? model.store.correspondent(messageId: id, myAddresses: model.myAddresses) else {
+        correspondenceReads += 1  // one read off the main thread before this is out of date
+        showCorrespondence(
+            id.flatMap {
+                Self.readCorrespondence(
+                    of: $0, store: model.store, myAddresses: model.myAddresses, sort: correspondence.sort, threads: showsThreads)
+            }, for: id, keepSelection: keepSelection)
+    }
+
+    /// `reloadCorrespondence` for a change in the store (new mail, marks): read off the main thread, which
+    /// it runs on for every change while mail syncs, and shown if nothing has changed the pane since.
+    private func refreshCorrespondence(for id: Int64?) {
+        guard let id else { return reloadCorrespondence(for: nil) }
+        correspondenceReads += 1
+        let (read, store, mine, sort, threads) = (correspondenceReads, model.store, model.myAddresses, correspondence.sort, showsThreads)
+        Task {
+            let found = await Task.detached(priority: .userInitiated) {
+                Self.readCorrespondence(of: id, store: store, myAddresses: mine, sort: sort, threads: threads)
+            }.value
+            guard read == correspondenceReads, (list.selectedID ?? correspondence.selectedID) == id else { return }
+            showCorrespondence(found, for: id, keepSelection: true)
+        }
+    }
+
+    /// Reads of the pane started (the last one's is the one to show).
+    private var correspondenceReads = 0
+
+    /// What the Correspondence pane shows for a message: its correspondent's mail with me, through the
+    /// address of mine this message used, and, with threads shown, how it threads.
+    struct CorrespondenceRead: Sendable {
+        let email: String
+        let flat: [Int64]
+        let threads: [MailStore.ThreadInput]?
+    }
+
+    nonisolated private static func readCorrespondence(
+        of id: Int64, store: MailStore, myAddresses: Set<String>, sort: MessageSort, threads: Bool
+    ) -> CorrespondenceRead? {
+        guard let email = try? store.correspondent(messageId: id, myAddresses: myAddresses) else { return nil }
+        let mine = try? store.myAddress(in: id, myAddresses: myAddresses)
+        let flat = (try? store.correspondenceIDs(email: email, via: mine, sort: sort, keeping: id)) ?? []
+        return CorrespondenceRead(email: email, flat: flat, threads: threads ? try? store.threadInfo(ids: flat) : nil)
+    }
+
+    private func showCorrespondence(_ found: CorrespondenceRead?, for id: Int64?, keepSelection: Bool) {
+        guard let id, let found else {
             correspondent = nil
             correspondence.setIDs([])
             return
         }
-        correspondent = email
-        // Only mail with this person through the address of mine this message used.
-        let mine = try? model.store.myAddress(in: id, myAddresses: model.myAddresses)
-        let flat = (try? model.store.correspondenceIDs(email: email, via: mine, sort: correspondence.sort, keeping: id)) ?? []
+        correspondent = found.email
+        let flat = found.flat
         // The main list's message is shown in its thread: opened down to it, unless the pane is just
         // refreshing (new mail, re-sorting) and keeps what the user opened or closed.
-        let ids = threadCorrespondence(flat, revealing: keepSelection ? nil : id)
+        let ids = threadCorrespondence(flat, threads: found.threads, revealing: keepSelection ? nil : id)
         // A message inside a collapsed thread is selected through its thread's first row.
         let selectable: (Int64) -> Int64 = { [correspondence] id in
             if correspondence.threadRows.isEmpty || flat.isEmpty { return id }
@@ -546,9 +588,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var selectAfterCorrespondenceThreads: [Int64]?
 
     /// The Correspondence pane's rows, grouped into threads when threads are shown (as in the main list).
-    private func threadCorrespondence(_ flat: [Int64], revealing reveal: Int64? = nil) -> [Int64] {
+    private func threadCorrespondence(_ flat: [Int64], threads: [MailStore.ThreadInput]?, revealing reveal: Int64? = nil) -> [Int64] {
         correspondence.showsThreads = showsThreads
-        guard showsThreads, let info = try? model.store.threadInfo(ids: flat) else {
+        guard showsThreads, let info = threads else {
             correspondence.threadRows = [:]
             correspondenceThreadOf = [:]
             return flat
@@ -577,7 +619,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         followSelectedScope()
         reloadList(.dataChanged, coalescing: !madeHere)
         if list.selectedID != nil || correspondent != nil {
-            reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
+            refreshCorrespondence(for: list.selectedID ?? correspondence.selectedID)
         }
     }
 

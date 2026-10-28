@@ -410,6 +410,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ attachment rows: \(windowController?.debugAttachmentRows ?? [])")
                     if badges { NSLog("MMJ badges settled: \(windowController?.debugSidebarBadges ?? "")") }
                 }
+                if let seconds = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_CORR_WATCH"] ?? "") {
+                    // The Correspondence pane's rows every second, to see it follow new mail.
+                    for _ in 0..<seconds {
+                        NSLog("MMJ correspondence: \(windowController?.debugCorrespondenceThreads ?? "-")")
+                        try? await Task.sleep(for: .seconds(1))
+                    }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENT_TIMING"] != nil {
                     await windowController?.debugTimeAttachment()  // the message MMJ_DEBUG_SELECT_SUBJECT selected
                 }
