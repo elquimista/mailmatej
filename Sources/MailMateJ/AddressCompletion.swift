@@ -16,7 +16,10 @@ final class AddressCompleter: NSObject, NSTableViewDataSource, NSTableViewDelega
     /// The address being typed, exactly as typed, and where it starts in the field editor's text.
     private var typed = ""
     private var start = 0
-    private var items: [String] = []
+    /// The table follows at once: laid out with a count of a longer list, it asked for rows past the end.
+    private var items: [String] = [] {
+        didSet { table.reloadData() }
+    }
     private var highlighted = -1
     /// Set while this changes the text itself, so the change isn't taken for typing.
     private var applying = false
@@ -175,7 +178,6 @@ final class AddressCompleter: NSObject, NSTableViewDataSource, NSTableViewDelega
         let rows = CGFloat(min(items.count, Self.maxRows))
         let height = rows * Self.rowHeight + 2
         panel.setFrame(NSRect(x: frame.minX, y: frame.minY - height, width: frame.width, height: height), display: false)
-        table.reloadData()
         if highlighted >= 0 {
             table.selectRowIndexes([highlighted], byExtendingSelection: false)
         } else {
@@ -198,6 +200,7 @@ final class AddressCompleter: NSObject, NSTableViewDataSource, NSTableViewDelega
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row < items.count else { return nil }
         let id = NSUserInterfaceItemIdentifier("suggestion")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? SuggestionCell ?? SuggestionCell(identifier: id)
         cell.textField?.stringValue = items[row]

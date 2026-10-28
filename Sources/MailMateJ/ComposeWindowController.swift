@@ -1089,7 +1089,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 window.makeFirstResponder(c.toField)
                 for (i, char) in typed.enumerated() {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3 * Double(i)) {
-                        let (key, code): (String, UInt16) = char == "⇥" ? ("\t", 48) : (String(char), 0)  // ⇥: Tab
+                        let (key, code): (String, UInt16) = switch char {  // ⇥: Tab, ⌫: Delete
+                        case "⇥": ("\t", 48)
+                        case "⌫": ("\u{7f}", 51)
+                        default: (String(char), 0)
+                        }
                         if let event = NSEvent.keyEvent(
                             with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                             windowNumber: window.windowNumber, context: nil, characters: key,
