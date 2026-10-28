@@ -674,6 +674,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     #if DEBUG
         func debugLoadRemote() { perform(.load) }
 
+        /// The message on show, or the placeholder's text.
+        var debugShowing: String { placeholder.isHidden ? "message \(currentID ?? -1)" : "“\(placeholder.stringValue)”" }
+
         var debugAttachmentRows: [String] { header.debugAttachmentRows }
 
         /// Logs the attachments, Quick Looks the second with MMJ_DEBUG_QUICKLOOK, and fetches the first to a

@@ -309,6 +309,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugSelectCorrespondence(row: row)
                     try? await Task.sleep(for: .milliseconds(600))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_CORR_DESELECT"] != nil {  // as a click on its blank area
+                    windowController?.debugDeselectCorrespondence()
+                    try? await Task.sleep(for: .milliseconds(600))
+                }
                 // MMJ_DEBUG_SELECT_SUBJECT="<subject>|<subject>…": selects each in turn, logging its attachment rows.
                 for subject in ProcessInfo.processInfo.environment["MMJ_DEBUG_SELECT_SUBJECT"]?.split(separator: "|") ?? [] {
                     windowController?.debugSelect(subject: String(subject))

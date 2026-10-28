@@ -282,9 +282,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             }
             messageList.addContextItems = { [weak self] menu, ids in self?.addMessageItems(to: menu, for: ids) }
         }
+        // As the main list's: nothing selected (a click on the pane's blank area) shows no message, as in
+        // MailMate, and several show how many.
         correspondence.onSelectionChange = { [weak self] id in
-            guard let self, let id else { return }
-            messageView.show(messageID: id)
+            guard let self else { return }
+            messageView.show(messageID: id, selectionCount: correspondence.selectedIDs.count)
         }
     }
 
@@ -755,6 +757,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSelectCorrespondence(row: Int) {
             guard row < correspondence.ids.count else { return }
             correspondence.tableView.selectRowIndexes([row], byExtendingSelection: false)
+        }
+
+        /// Clears the Correspondence pane's selection, as a click on its blank area does, logging what each
+        /// list selects and the message view shows, before and after.
+        func debugDeselectCorrespondence() {
+            func report(_ when: String) {
+                NSLog("MMJ corr deselect \(when): list \(list.selectedIDs) correspondence \(correspondence.selectedIDs) view \(messageView.debugShowing)")
+            }
+            report("before")
+            correspondence.tableView.deselectAll(nil)
+            report("after")
         }
 
         /// Deletes the displayed message's .eml, then fetches it through the Show in Finder path.
