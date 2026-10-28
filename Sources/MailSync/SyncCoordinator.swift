@@ -91,8 +91,6 @@ public actor SyncCoordinator {
     private let downloadLimiter = AsyncLimiter(limit: 3)
     /// Gmail's quota is per account (and each paces itself), so more of them download at once.
     private let gmailDownloadLimiter = AsyncLimiter(limit: 10)
-    /// Pause between download batches of one account, to stay well under server rate limits.
-    private let downloadPause: Duration = .milliseconds(500)
     private var pollTask: Task<Void, Never>?
 
     public init(
@@ -723,8 +721,9 @@ public actor SyncCoordinator {
             case .success(let result):
                 reportDownloadProgress(accountId, active: true)
                 if result.processed == 0 { break downloading }
+                // On at once: accounts take turns by the slot, and a server that pushes back (rate limits)
+                // fails a batch, which waits below.
                 backoff = 5
-                if !gmail { try? await Task.sleep(for: downloadPause) }
             case .failure(let error):
                 syncLog.error("Download failed for \(name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
                 if backoff > 600 { break downloading }  // Give up until the next sync restarts it.

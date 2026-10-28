@@ -47,6 +47,27 @@ import Testing
         let groups = JMAPAccountSync.groups([item(1, 300), item(2, 300), item(3, 500), item(4, 2000)], maxBytes: 1000)
         #expect(groups.map { $0.map(\.id) } == [[1, 2], [3], [4]])
     }
+
+    @Test func aBatchsRequestsAreItsBodiesBlobGroupsAndBigMessages() {
+        func item(_ id: Int64, _ size: Int, body: Bool = false) -> MailStore.PendingDownload {
+            MailStore.PendingDownload(id: id, remoteId: "r\(id)", blobId: "b\(id)", size: size, hasBody: body)
+        }
+        func shape(_ parts: [JMAPAccountSync.DownloadPart]) -> [String] {
+            parts.map { part in
+                switch part {
+                case .bodies(let items): "bodies \(items.map(\.id))"
+                case .blobs(let items): "blobs \(items.map(\.id))"
+                case .raw(let item): "raw \(item.id)"
+                }
+            }
+        }
+        let pending = [item(1, 100_000), item(2, 3_000_000), item(3, 200_000, body: true), item(4, 400_000)]
+        let needRaw = pending.filter { $0.id != 4 }  // 4's raw copy is stored already
+        #expect(shape(JMAPAccountSync.parts(pending, needRaw: needRaw, blobGet: true)) == ["bodies [1, 2, 4]", "blobs [1, 3]", "raw 2"])
+        // A server without Blob/get: each raw message on its own.
+        #expect(shape(JMAPAccountSync.parts(pending, needRaw: needRaw, blobGet: false)) == ["bodies [1, 2, 4]", "raw 1", "raw 2", "raw 3"])
+        #expect(JMAPAccountSync.parts([item(5, 10, body: true)], needRaw: [], blobGet: true).isEmpty)
+    }
 }
 
 @Test func unreachableErrorsAreQueuedRefusalsAreNot() {

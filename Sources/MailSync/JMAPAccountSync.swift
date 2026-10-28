@@ -94,69 +94,96 @@ public actor JMAPAccountSync {
 
     /// Downloads the next messages not yet stored locally, newest first: body text, HTML and parts
     /// (searchable, instant to open) and the raw .eml. Messages up to 512 KB come in batched
-    /// Blob/get requests where the server supports them; larger ones are downloaded one by one.
+    /// Blob/get requests where the server supports them; larger ones are downloaded one by one. The
+    /// bodies and the raw messages come side by side (`requestsAtOnce`), so a batch takes about as long
+    /// as its slowest part.
     public func downloadNextBatch(limit: Int = 25) async throws -> DownloadBatchResult {
-        let pending = try store.pendingDownloads(accountId: account.id, limit: limit)
+        let (client, store, localAccount) = (self.client, self.store, self.account.id)  // for the requests at once
+        let pending = try store.pendingDownloads(accountId: localAccount, limit: limit)
         guard !pending.isEmpty else { return DownloadBatchResult(processed: 0, failed: 0) }
         let session = try await client.currentSession()
         let accountId = try remoteAccountId(session)
-        var failed = Set<Int64>()
 
-        // Bodies, all in one request.
+        let parts = Self.parts(
+            pending, needRaw: pending.filter { !store.blobs.contains(accountId: localAccount, blobId: $0.blobId) },
+            blobGet: session.supports(Capability.blob))
+        let gone = try await concurrently(parts, limit: min(Self.requestsAtOnce, session.maxConcurrentRequests)) { part in
+            try await Self.download(part, accountId: accountId, client: client, store: store, account: localAccount)
+        }
+        let failed = gone.reduce(into: Set<Int64>()) { $0.formUnion($1) }
+        try store.setDownloadState(1, messageIds: pending.map(\.id).filter { !failed.contains($0) })
+        try store.setDownloadState(2, messageIds: Array(failed))
+        return DownloadBatchResult(processed: pending.count, failed: failed.count)
+    }
+
+    /// Requests one account's batch makes at once: the server's own limit, if lower, counts too. Most of
+    /// an account's mail is usually on a server with others (8 connections to a host for them all, with 3
+    /// accounts downloading at once), whose syncs mustn't wait on downloads.
+    static let requestsAtOnce = 2
+
+    /// A batch's requests: its messages' bodies, a Blob/get of raw messages, or one raw message.
+    enum DownloadPart: Sendable {
+        case bodies([MailStore.PendingDownload])
+        case blobs([MailStore.PendingDownload])
+        case raw(MailStore.PendingDownload)
+    }
+
+    /// A batch's requests: the bodies of those without one (all in one request), and the raw messages
+    /// `needRaw`: up to 512 KB in Blob/get groups of about 4 MB where the server has Blob/get, the rest
+    /// one by one.
+    static func parts(_ pending: [MailStore.PendingDownload], needRaw: [MailStore.PendingDownload], blobGet: Bool) -> [DownloadPart] {
+        var parts: [DownloadPart] = []
         let needBody = pending.filter { !$0.hasBody }
-        if !needBody.isEmpty {
+        if !needBody.isEmpty { parts.append(.bodies(needBody)) }
+        guard blobGet else { return parts + needRaw.map(DownloadPart.raw) }
+        parts += groups(needRaw.filter { $0.size <= 512_000 }, maxBytes: 4_000_000).map(DownloadPart.blobs)
+        return parts + needRaw.filter { $0.size > 512_000 }.map(DownloadPart.raw)
+    }
+
+    /// Fetches and stores one part of a batch; returns its messages the server no longer has.
+    private static func download(
+        _ part: DownloadPart, accountId: String, client: JMAPClient, store: MailStore, account: String
+    ) async throws -> Set<Int64> {
+        var gone = Set<Int64>()
+        switch part {
+        case .bodies(let items):
             var request = JMAPRequest()
             let get = request.call("Email/get", [
                 "accountId": .string(accountId),
-                "ids": .strings(needBody.map(\.remoteId)),
+                "ids": .strings(items.map(\.remoteId)),
                 "properties": .strings(EmailBody.properties),
                 "fetchTextBodyValues": true,
                 "fetchHTMLBodyValues": true,
                 "maxBodyValueBytes": 2_000_000,
             ])
             let result = try await client.send(request).decode(GetResponse<EmailBody>.self, get)
-            let ids = Dictionary(needBody.map { ($0.remoteId, $0.id) }, uniquingKeysWith: { a, _ in a })
+            let ids = Dictionary(items.map { ($0.remoteId, $0.id) }, uniquingKeysWith: { a, _ in a })
             for email in result.list {
-                if let id = ids[email.id] { try store.saveBody(messageId: id, Self.render(email), parts: Self.parts(email)) }
+                if let id = ids[email.id] { try store.saveBody(messageId: id, render(email), parts: parts(email)) }
             }
-            for gone in result.notFound ?? [] { if let id = ids[gone] { failed.insert(id) } }
-        }
-
-        // Raw messages.
-        let needRaw = pending.filter { !failed.contains($0.id) && !store.blobs.contains(accountId: account.id, blobId: $0.blobId) }
-        var oneByOne = needRaw
-        if session.supports(Capability.blob) {
-            let small = needRaw.filter { $0.size <= 512_000 }
-            oneByOne = needRaw.filter { $0.size > 512_000 }
-            for group in Self.groups(small, maxBytes: 4_000_000) {
-                var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.blob])
-                let blobIds = Array(Set(group.map(\.blobId)))
-                let get = request.call("Blob/get", [
-                    "accountId": .string(accountId), "ids": .strings(blobIds), "properties": ["data:asBase64"],
-                ])
-                let result = try await client.send(request).decode(BlobGetResponse.self, get)
-                var written = Set<String>()
-                for blob in result.list {
-                    guard let data = blob.data, blob.isTruncated != true else { continue }
-                    try store.blobs.write(data, accountId: account.id, blobId: blob.id)
-                    written.insert(blob.id)
-                }
-                for item in group where !written.contains(item.blobId) { failed.insert(item.id) }
+            for missing in result.notFound ?? [] { if let id = ids[missing] { gone.insert(id) } }
+        case .blobs(let group):
+            var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.blob])
+            let get = request.call("Blob/get", [
+                "accountId": .string(accountId), "ids": .strings(Array(Set(group.map(\.blobId)))), "properties": ["data:asBase64"],
+            ])
+            let result = try await client.send(request).decode(BlobGetResponse.self, get)
+            var written = Set<String>()
+            for blob in result.list {
+                guard let data = blob.data, blob.isTruncated != true else { continue }
+                try store.blobs.write(data, accountId: account, blobId: blob.id)
+                written.insert(blob.id)
             }
-        }
-        for item in oneByOne {
+            for item in group where !written.contains(item.blobId) { gone.insert(item.id) }
+        case .raw(let item):
             do {
-                let data = try await client.download(
-                    accountId: accountId, blobId: item.blobId, type: "message/rfc822", name: "message.eml")
-                try store.blobs.write(data, accountId: account.id, blobId: item.blobId)
+                let data = try await client.download(accountId: accountId, blobId: item.blobId, type: "message/rfc822", name: "message.eml")
+                try store.blobs.write(data, accountId: account, blobId: item.blobId)
             } catch JMAPError.http(status: 404, _, _) {
-                failed.insert(item.id)
+                gone.insert(item.id)
             }
         }
-
-        try store.setDownloadState(1, messageIds: pending.map(\.id).filter { !failed.contains($0) })
-        try store.setDownloadState(2, messageIds: Array(failed))
-        return DownloadBatchResult(processed: pending.count, failed: failed.count)
+        return gone
     }
 
     /// Splits downloads into groups whose sizes add up to at most `maxBytes` (at least one per group).

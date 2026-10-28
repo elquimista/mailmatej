@@ -61,6 +61,7 @@ public struct Session: Decodable, Sendable {
 
     public var maxObjectsInGet: Int { capabilities[Capability.core]?["maxObjectsInGet"]?.intValue ?? 500 }
     public var maxCallsInRequest: Int { capabilities[Capability.core]?["maxCallsInRequest"]?.intValue ?? 16 }
+    public var maxConcurrentRequests: Int { capabilities[Capability.core]?["maxConcurrentRequests"]?.intValue ?? 4 }
 
     public var primaryMailAccountId: String? { primaryAccounts[Capability.mail] }
 
