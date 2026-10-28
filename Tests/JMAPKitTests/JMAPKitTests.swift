@@ -43,6 +43,31 @@ import Testing
         #expect(get.state == "s1")
     }
 
+    @Test func responseFindsEachCallsArgumentsByIdAndName() throws {
+        // A set with an implicit second response under the same call id, then an import, then an error.
+        let data = Data("""
+            {"methodResponses": [["EmailSubmission/set", {"accountId": "a", "created": {"k": {"id": "s1"}}}, "c0"],
+                                 ["Email/set", {"accountId": "a", "updated": {"m1": null}, "newState": "9"}, "c0"],
+                                 ["Email/import", {"accountId": "a", "created": {"new": {"id": "M7", "blobId": "B7"}}}, "c1"],
+                                 ["error", {"type": "invalidArguments", "description": "bad ids"}, "c2"]],
+             "sessionState": "st"}
+            """.utf8)
+        let response = try JMAPResponse(data: data)
+        #expect(response.sessionState == "st")
+        #expect(response.calls.map(\.name) == ["EmailSubmission/set", "Email/set", "Email/import", "error"])
+        #expect(try response.arguments(CallID(id: "c0", name: "Email/set"))["newState"] == "9")
+        #expect(try response.arguments(CallID(id: "c0", name: "EmailSubmission/set"))["created"]?["k"]?["id"] == "s1")
+        #expect(try response.arguments(CallID(id: "c1", name: "Email/import"))["created"]?["new"]?["blobId"] == "B7")
+        do {
+            _ = try response.arguments(CallID(id: "c2", name: "Email/get"))
+            Issue.record("no error thrown")
+        } catch let error as JMAPMethodError {
+            #expect(error.type == "invalidArguments" && error.detail == "bad ids" && error.method == "Email/get")
+        }
+        #expect(throws: JMAPError.self) { try response.arguments(CallID(id: "c3", name: "Email/get")) }
+        #expect(throws: JMAPError.self) { try JMAPResponse(data: Data("{\"sessionState\": \"x\"}".utf8)) }
+    }
+
     @Test func urlTemplatesExpand() {
         let download = Session.expand(
             "https://h/jmap/download/{accountId}/{blobId}/{name}?accept={type}",

@@ -55,48 +55,106 @@ public struct JMAPMethodError: Error, Sendable, CustomStringConvertible {
     public var description: String { "\(method) failed: \(type)\(detail.map { " — \($0)" } ?? "")" }
 }
 
+/// A JMAP API response: its method responses' names and call ids, read in one quick pass; each call's
+/// arguments are decoded when asked for, straight into their type (one pass over the response, the
+/// other calls skipped), not into a JSON tree first.
 public struct JMAPResponse: Sendable {
-    public struct Invocation: Sendable {
-        public let name: String
-        public let arguments: JSONValue
-        public let id: String
-    }
-
-    public let invocations: [Invocation]
+    /// Each method response's name and call id, in order.
+    public let calls: [(name: String, id: String)]
     public let sessionState: String?
+    private let data: Data
 
     public init(data: Data) throws {
-        let raw = try JSONDecoder().decode(JSONValue.self, from: data)
-        guard case .array(let responses)? = raw["methodResponses"] else {
-            throw JMAPError.invalidResponse("missing methodResponses")
+        let envelope: Envelope
+        do {
+            envelope = try JSONDecoder().decode(Envelope.self, from: data)
+        } catch {
+            throw JMAPError.invalidResponse("malformed response: \(error)")
         }
-        invocations = try responses.map { item in
-            guard case .array(let parts) = item, parts.count == 3,
-                let name = parts[0].stringValue, let id = parts[2].stringValue
-            else { throw JMAPError.invalidResponse("malformed invocation") }
-            return Invocation(name: name, arguments: parts[1], id: id)
-        }
-        sessionState = raw["sessionState"]?.stringValue
+        guard let responses = envelope.methodResponses else { throw JMAPError.invalidResponse("missing methodResponses") }
+        calls = responses.map { ($0.name, $0.id) }
+        sessionState = envelope.sessionState
+        self.data = data
     }
 
     /// Returns the arguments of the response to `call`, throwing if the server returned an error for it.
     public func arguments(_ call: CallID) throws -> JSONValue {
-        let matching = invocations.filter { $0.id == call.id }
-        if let error = matching.first(where: { $0.name == "error" }) {
-            throw JMAPMethodError(
-                type: error.arguments["type"]?.stringValue ?? "unknown",
-                detail: error.arguments["description"]?.stringValue,
-                method: call.name)
-        }
-        guard let invocation = matching.first(where: { $0.name == call.name }) else {
-            throw JMAPError.invalidResponse("no response for \(call.name) (\(call.id))")
-        }
-        return invocation.arguments
+        try decode(JSONValue.self, call)
     }
 
+    /// The arguments of the response to `call` as `T`, throwing if the server returned an error for it.
     public func decode<T: Decodable>(_ type: T.Type, _ call: CallID) throws -> T {
-        try arguments(call).decode(T.self)
+        if let error = calls.firstIndex(where: { $0.id == call.id && $0.name == "error" }) {
+            let details = try arguments(at: error, as: MethodErrorArguments.self)
+            throw JMAPMethodError(type: details.type ?? "unknown", detail: details.description, method: call.name)
+        }
+        guard let index = calls.firstIndex(where: { $0.id == call.id && $0.name == call.name }) else {
+            throw JMAPError.invalidResponse("no response for \(call.name) (\(call.id))")
+        }
+        return try arguments(at: index, as: T.self)
     }
+
+    private func arguments<T: Decodable>(at index: Int, as type: T.Type) throws -> T {
+        let decoder = JMAPCoding.decoder
+        decoder.userInfo[ResponseCoding.index] = index
+        return try decoder.decode(Arguments<T>.self, from: data).value
+    }
+
+    /// The response without its calls' arguments.
+    private struct Envelope: Decodable {
+        struct Call: Decodable {
+            let name: String
+            let id: String
+
+            init(from decoder: Decoder) throws {
+                var parts = try decoder.unkeyedContainer()
+                name = try parts.decode(String.self)
+                _ = try parts.decode(Skipped.self)
+                id = try parts.decode(String.self)
+            }
+        }
+
+        let methodResponses: [Call]?
+        let sessionState: String?
+    }
+
+    /// The arguments of the method response at `ResponseCoding.index`, the others skipped.
+    private struct Arguments<T: Decodable>: Decodable {
+        let value: T
+
+        enum Keys: String, CodingKey { case methodResponses }
+
+        init(from decoder: Decoder) throws {
+            let wanted = decoder.userInfo[ResponseCoding.index] as? Int ?? 0
+            var list = try decoder.container(keyedBy: Keys.self).nestedUnkeyedContainer(forKey: .methodResponses)
+            while !list.isAtEnd {
+                let index = list.currentIndex
+                guard index == wanted else {
+                    _ = try list.decode(Skipped.self)
+                    continue
+                }
+                var call = try list.nestedUnkeyedContainer()
+                _ = try call.decode(Skipped.self)  // its name
+                value = try call.decode(T.self)
+                return
+            }
+            throw JMAPError.invalidResponse("missing method response \(wanted)")
+        }
+    }
+
+    private struct MethodErrorArguments: Decodable {
+        let type: String?
+        let description: String?
+    }
+}
+
+private enum ResponseCoding {
+    static let index = CodingUserInfoKey(rawValue: "JMAPResponse.index")!
+}
+
+/// Any JSON value, read past.
+private struct Skipped: Decodable {
+    init(from decoder: Decoder) throws {}
 }
 
 public enum JMAPError: Error, Sendable, CustomStringConvertible {
