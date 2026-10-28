@@ -835,6 +835,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugCheckAttachments() async { await messageView.debugCheckAttachments() }
 
         var debugAttachmentRows: [String] { messageView.debugAttachmentRows }
+        func debugTimeAttachment() async { await messageView.debugTimeAttachment() }
         func debugAttachment(click index: Int?, key: UInt16? = nil) { messageView.debugAttachment(click: index, key: key) }
 
         func debugCheckRawMessage() async {

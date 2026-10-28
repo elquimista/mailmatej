@@ -382,6 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("MMJ attachment rows: \(windowController?.debugAttachmentRows ?? [])")
                     if badges { NSLog("MMJ badges settled: \(windowController?.debugSidebarBadges ?? "")") }
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENT_TIMING"] != nil {
+                    await windowController?.debugTimeAttachment()  // the message MMJ_DEBUG_SELECT_SUBJECT selected
+                }
                 // MMJ_DEBUG_ATTACHMENT_KEYS="click:1,down,up,space,return": clicks an attachment's row in the
                 // message shown, or presses ↓ ↑ Space Return in the attachments, logging the rows after each.
                 for step in ProcessInfo.processInfo.environment["MMJ_DEBUG_ATTACHMENT_KEYS"]?.split(separator: ",") ?? [] {

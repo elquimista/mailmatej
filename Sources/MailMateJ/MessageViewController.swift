@@ -441,13 +441,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     /// Runs `body` with the attachment as a file, or reports why it couldn't be fetched.
-    private func withAttachmentFile(_ index: Int, _ body: @escaping @MainActor (URL) -> Void) {
+    private func withAttachmentFile(_ index: Int, _ body: @escaping @MainActor (URL) async -> Void) {
         guard attachments.indices.contains(index), let id = currentID, let detail = currentDetail else { return }
         let part = attachments[index]
         Task { @MainActor in
             do {
                 let url = try await model.attachmentFile(messageId: id, index: index, accountId: detail.accountId, part: part)
-                body(url)
+                await body(url)
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "Couldn’t get “\(AppModel.fileName(for: part))”."
@@ -483,7 +483,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     var hasAttachments: Bool { !attachments.isEmpty }
 
     /// Every attachment as a file, in the message's order; reports the first one that couldn't be fetched.
-    private func withAllAttachmentFiles(_ body: @escaping @MainActor ([URL]) -> Void) {
+    private func withAllAttachmentFiles(_ body: @escaping @MainActor ([URL]) async -> Void) {
         guard !attachments.isEmpty, let id = currentID, let detail = currentDetail else { return NSSound.beep() }
         let parts = attachments
         Task { @MainActor in
@@ -499,7 +499,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
                     return
                 }
             }
-            body(urls)
+            await body(urls)
         }
     }
 
@@ -528,7 +528,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             self?.withAllAttachmentFiles { urls in
                 for source in urls {
                     let target = Self.unusedURL(folder.appendingPathComponent(source.lastPathComponent))
-                    guard self?.copy(source, to: target, replacing: false) == true else { return }
+                    guard let self, await self.copy(source, to: target, replacing: false) else { return }
                 }
             }
         }
@@ -541,7 +541,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         panel.beginSheetModal(for: window) { [weak self] response in
             self?.syncOptionKey()  // ⌥ may have been released while the panel had the keyboard.
             guard response == .OK, let target = panel.url else { return }
-            self?.withAttachmentFile(index) { source in self?.copy(source, to: target, replacing: true) }
+            self?.withAttachmentFile(index) { source in await self?.copy(source, to: target, replacing: true) }
         }
     }
 
@@ -551,7 +551,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         withAttachmentFile(index) { [weak self] source in
             guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return }
             let target = Self.unusedURL(downloads.appendingPathComponent(source.lastPathComponent))
-            if self?.copy(source, to: target, replacing: false) == true {
+            if let self, await self.copy(source, to: target, replacing: false) {
                 DistributedNotificationCenter.default().post(
                     name: Notification.Name("com.apple.DownloadFileFinished"), object: target.path)
             }
@@ -570,15 +570,18 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         return candidate
     }
 
+    /// Copies an attachment's file where it's saved (off the main thread: another disk copies it whole).
     @discardableResult
-    private func copy(_ source: URL, to target: URL, replacing: Bool) -> Bool {
+    private func copy(_ source: URL, to target: URL, replacing: Bool) async -> Bool {
         do {
-            if replacing && FileManager.default.fileExists(atPath: target.path) {
-                _ = try FileManager.default.replaceItemAt(target, withItemAt: Self.stagedCopy(of: source))
-            } else {
-                try FileManager.default.copyItem(at: source, to: target)
+            try await AppModel.offMain {
+                if replacing && FileManager.default.fileExists(atPath: target.path) {
+                    _ = try FileManager.default.replaceItemAt(target, withItemAt: Self.stagedCopy(of: source))
+                } else {
+                    try FileManager.default.copyItem(at: source, to: target)
+                }
+                try AppModel.quarantine(target)
             }
-            try AppModel.quarantine(target)
             return true
         } catch {
             let alert = NSAlert(error: error)
@@ -588,7 +591,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     /// A copy of `source` beside it, for replacing a file in one step.
-    private static func stagedCopy(of source: URL) throws -> URL {
+    nonisolated private static func stagedCopy(of source: URL) throws -> URL {
         let staged = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
         try FileManager.default.copyItem(at: source, to: staged)
         return staged
@@ -714,6 +717,37 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         var debugShowing: String { placeholder.isHidden ? "message \(currentID ?? -1)" : "“\(placeholder.stringValue)”" }
 
         var debugAttachmentRows: [String] { header.debugAttachmentRows }
+
+        /// Gets the shown message's first attachment as a file, as Open and Quick Look do (twice: the
+        /// second from the copy kept here), logging how long each took and the longest the main thread
+        /// couldn't run meanwhile (a 2 ms timer on it).
+        func debugTimeAttachment() async {
+            guard let id = currentID, let detail = currentDetail, let part = attachments.first else {
+                return NSLog("MMJ attachment timing: no attachment")
+            }
+            final class Beat: @unchecked Sendable {
+                var last = ContinuousClock.now
+                var longest: Duration = .zero
+            }
+            for round in ["first", "again"] {
+                let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Attachments/\(id)-0", isDirectory: true)
+                try? FileManager.default.removeItem(at: folder)  // made anew, as for another message
+                let beat = Beat()
+                beat.last = .now
+                let timer = Timer.scheduledTimer(withTimeInterval: 0.002, repeats: true) { _ in
+                    let now = ContinuousClock.now
+                    beat.longest = max(beat.longest, now - beat.last)
+                    beat.last = now
+                }
+                let start = ContinuousClock.now
+                let url = try? await model.attachmentFile(messageId: id, index: 0, accountId: detail.accountId, part: part)
+                let took = start.duration(to: .now)
+                timer.invalidate()
+                beat.longest = max(beat.longest, beat.last.duration(to: .now))  // up to now, if it never ran
+                let size = (try? url?.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+                NSLog("MMJ attachment timing \(round): \(size / 1_000_000) MB in \(took), main thread held up to \(beat.longest)")
+            }
+        }
         func debugAttachment(click index: Int?, key: UInt16? = nil) { header.debugAttachment(click: index, key: key) }
 
         /// Logs the attachments, Quick Looks the second with MMJ_DEBUG_QUICKLOOK, and fetches the first to a
@@ -845,8 +879,10 @@ final class AttachmentPromiseDelegate: NSObject, NSFilePromiseProviderDelegate, 
             do {
                 let source = try await model.attachmentFile(
                     messageId: messageId, index: index, accountId: accountId, part: part)
-                try FileManager.default.copyItem(at: source, to: url)
-                try AppModel.quarantine(url)
+                try await AppModel.offMain {
+                    try FileManager.default.copyItem(at: source, to: url)
+                    try AppModel.quarantine(url)
+                }
                 done(nil)
             } catch {
                 done(error)

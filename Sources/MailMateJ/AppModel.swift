@@ -1234,10 +1234,10 @@ final class AppModel {
 
     /// The bytes of a message part (e.g. an embedded image), cached on disk after the first download.
     func partData(accountId: String, part: MessagePart) async throws -> Data {
-        if let cached = store.blobs.readPart(accountId: accountId, blobId: part.blobId) { return cached }
-        let data = try await coordinator.downloadBlob(
-            accountId: accountId, blobId: part.blobId, type: part.type, name: part.name ?? "part")
-        try? store.blobs.writePart(data, accountId: accountId, blobId: part.blobId)
+        let (blobs, blobId) = (store.blobs, part.blobId)
+        if let cached = try await Self.offMain({ blobs.readPart(accountId: accountId, blobId: blobId) }) { return cached }
+        let data = try await coordinator.downloadBlob(accountId: accountId, blobId: blobId, type: part.type, name: part.name ?? "part")
+        try await Self.offMain { try? blobs.writePart(data, accountId: accountId, blobId: blobId) }
         return data
     }
 
@@ -1247,13 +1247,42 @@ final class AppModel {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("Attachments", isDirectory: true)
             .appendingPathComponent("\(messageId)-\(index)", isDirectory: true)
+        return try await partFile(accountId: accountId, part: part, in: folder, quarantined: true)
+    }
+
+    /// A part as a file in `folder`, named as the sender named it (the one there already, if any): the copy
+    /// kept here cloned (instant on APFS, whatever its size), else downloaded first. The file work is off
+    /// the main thread: an attachment can be tens of megabytes.
+    func partFile(accountId: String, part: MessagePart, in folder: URL, quarantined: Bool) async throws -> URL {
         let url = folder.appendingPathComponent(Self.fileName(for: part))
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        let kept = store.blobs.partURL(accountId: accountId, blobId: part.blobId)
+        let placed = try await Self.offMain {
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+            guard FileManager.default.fileExists(atPath: kept.path) else { return false }
+            try Self.place(url, quarantined: quarantined) { try FileManager.default.copyItem(at: kept, to: $0) }
+            return true
+        }
+        if placed { return url }
         let data = try await partData(accountId: accountId, part: part)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
-        try Self.quarantine(url)
+        try await Self.offMain { try Self.place(url, quarantined: quarantined) { try data.write(to: $0, options: .atomic) } }
         return url
+    }
+
+    /// Puts a file at `url` with `write`, its folder made first; one there already (asked for twice at
+    /// once) stays.
+    nonisolated private static func place(_ url: URL, quarantined: Bool, write: (URL) throws -> Void) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try write(url)
+        } catch CocoaError.fileWriteFileExists {
+            return
+        }
+        if quarantined { try quarantine(url) }
+    }
+
+    /// File work, off the main thread.
+    nonisolated static func offMain<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await Task.detached(priority: .userInitiated) { try work() }.value
     }
 
     /// A safe file name for a part: the sender's name without path separators, or "Attachment".
@@ -1266,7 +1295,7 @@ final class AppModel {
     }
 
     /// Marks a file as downloaded from the internet by MailMateJ.
-    static func quarantine(_ url: URL) throws {
+    nonisolated static func quarantine(_ url: URL) throws {
         var values = URLResourceValues()
         values.quarantineProperties = [
             kLSQuarantineAgentNameKey as String: "MailMateJ",

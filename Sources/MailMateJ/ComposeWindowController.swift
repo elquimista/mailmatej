@@ -590,12 +590,9 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 } else if let accountId {
                     // A forwarded attachment: fetched (usually from disk) into a temporary file.
                     let part = parts[row]
-                    guard let data = try? await model.partData(accountId: accountId, part: part) else { continue }
                     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Compose", isDirectory: true)
                         .appendingPathComponent(part.blobId, isDirectory: true)
-                    let url = folder.appendingPathComponent(AppModel.fileName(for: part))
-                    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                    try? data.write(to: url, options: .atomic)
+                    guard let url = try? await model.partFile(accountId: accountId, part: part, in: folder, quarantined: false) else { continue }
                     urls.append(url)
                 }
             }
