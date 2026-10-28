@@ -623,6 +623,24 @@ import Testing
         #expect(MailStore.thread(rows, expanded: []).map(\.id) == [3, 2, 1])  // threads start collapsed
     }
 
+    @Test func threadsMarkAFlaggedReplyOnTheMessagesAboveIt() {
+        typealias T = MailStore.ThreadInput
+        // a, answered by b (flagged), answered by c; d answers a too. The first message is flagged in e's thread.
+        let rows = [
+            T(id: 1, at: 10, seen: true, messageId: "a"), T(id: 2, at: 20, seen: true, flagged: true, messageId: "b", inReplyTo: "a"),
+            T(id: 3, at: 30, seen: true, messageId: "c", inReplyTo: "b"), T(id: 4, at: 40, seen: true, messageId: "d", inReplyTo: "a"),
+            T(id: 5, at: 50, seen: true, flagged: true, messageId: "e"), T(id: 6, at: 60, seen: true, messageId: "f", inReplyTo: "e"),
+        ]
+        let keys = MailStore.threadKeys(rows)
+        let flagged = { (rows: [MailStore.ThreadedRow]) in rows.filter(\.flaggedReply).map(\.id) }
+        #expect(flagged(MailStore.thread(rows, expanded: [])) == [1])  // e's own flag isn't a reply's
+        #expect(flagged(MailStore.thread(rows, expanded: [keys[1]!])) == [1])  // b's flag is its own
+        // Under b, c isn't flagged; nothing under d.
+        #expect(flagged(MailStore.thread(rows, expanded: [keys[1]!], opened: [2])) == [1])
+        let unflagged = rows.map { var row = $0; row.flagged = row.id == 3; return row }
+        #expect(flagged(MailStore.thread(unflagged, expanded: [keys[1]!])) == [1, 2])  // c, under b
+    }
+
     @Test func threadsSortedByDateGoWhereTheirNewestMessageIs() {
         typealias T = MailStore.ThreadInput
         // Oldest first: a (answered today by a3), b, c, a3. The new reply brings thread a to the bottom,

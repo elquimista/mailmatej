@@ -1064,6 +1064,9 @@ public final class MailStore: Sendable {
         public var size: Int
         /// Whether any message of the thread is unread (on its first row).
         public var anyUnread: Bool
+        /// Whether a reply under this message, at any depth, is flagged: a folded row shows a hollow flag
+        /// for it, as MailMate does.
+        public var flaggedReply: Bool
         /// Whether replies hang under this message (it gets a chevron).
         public var hasReplies: Bool
         /// When the thread's newest message arrived (on its first row; the row's own date elsewhere): a
@@ -1071,13 +1074,15 @@ public final class MailStore: Sendable {
         public var newestAt: Double
 
         public init(
-            id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, hasReplies: Bool = false, newestAt: Double = 0
+            id: Int64, thread: String, depth: Int, size: Int, anyUnread: Bool, flaggedReply: Bool = false,
+            hasReplies: Bool = false, newestAt: Double = 0
         ) {
             self.id = id
             self.thread = thread
             self.depth = depth
             self.size = size
             self.anyUnread = anyUnread
+            self.flaggedReply = flaggedReply
             self.hasReplies = hasReplies
             self.newestAt = newestAt
         }
@@ -1089,19 +1094,21 @@ public final class MailStore: Sendable {
         public var account: String
         public var at: Double
         public var seen: Bool
+        public var flagged: Bool
         /// Its Message-ID and the reply headers that place it in a conversation.
         public var messageId: String?
         public var inReplyTo: String?
         public var references: [String]
 
         public init(
-            id: Int64, account: String = "", at: Double, seen: Bool, messageId: String? = nil, inReplyTo: String? = nil,
-            references: [String] = []
+            id: Int64, account: String = "", at: Double, seen: Bool, flagged: Bool = false, messageId: String? = nil,
+            inReplyTo: String? = nil, references: [String] = []
         ) {
             self.id = id
             self.account = account
             self.at = at
             self.seen = seen
+            self.flagged = flagged
             self.messageId = messageId
             self.inReplyTo = inReplyTo
             self.references = references
@@ -1110,14 +1117,14 @@ public final class MailStore: Sendable {
         init(_ row: Row) {
             let references: String? = row["referencesHeader"]
             self.init(
-                id: row["id"], account: row["accountId"], at: row["receivedAt"], seen: row["isSeen"],
+                id: row["id"], account: row["accountId"], at: row["receivedAt"], seen: row["isSeen"], flagged: row["isFlagged"],
                 messageId: row["messageIdHeader"], inReplyTo: row["inReplyTo"],
                 references: references.map { $0.split(separator: " ").map(String.init) } ?? [])
         }
     }
 
     private static let threadColumns =
-        "m.id, m.accountId, m.receivedAt, m.isSeen, m.messageIdHeader, m.inReplyTo, m.referencesHeader"
+        "m.id, m.accountId, m.receivedAt, m.isSeen, m.isFlagged, m.messageIdHeader, m.inReplyTo, m.referencesHeader"
 
     /// A threaded list: its rows, and the thread of every message in it (those inside closed threads too).
     public struct ThreadedList: Sendable {
@@ -1285,17 +1292,30 @@ public final class MailStore: Sendable {
             children[topID, default: []].append(contentsOf: messages.filter { !reachable.contains($0.id) })
             for key in children.keys { children[key]?.sort { ($0.at, $0.id) < ($1.at, $1.id) } }
 
+            // Every other message of the thread is under its first.
             result.append(ThreadedRow(
-                id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread, hasReplies: true,
-                newestAt: messages.last!.at))
+                id: topID, thread: thread, depth: 0, size: size, anyUnread: anyUnread,
+                flaggedReply: messages.contains { $0.flagged && $0.id != topID }, hasReplies: true, newestAt: messages.last!.at))
             guard expanded.contains(thread) else { continue }
             var placed: Set<Int64> = [topID]
+            // Whether a reply anywhere under `id` is flagged.
+            func flaggedUnder(_ id: Int64) -> Bool {
+                var seen: Set<Int64> = [id]
+                var queue = [id]
+                while let next = queue.popLast() {
+                    for child in children[next] ?? [] where seen.insert(child.id).inserted {
+                        if child.flagged { return true }
+                        queue.append(child.id)
+                    }
+                }
+                return false
+            }
             func walk(_ id: Int64, depth: Int) {
                 for child in children[id] ?? [] where placed.insert(child.id).inserted {
                     let replies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
                     result.append(ThreadedRow(
-                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, hasReplies: replies,
-                        newestAt: child.at))
+                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false,
+                        flaggedReply: replies && flaggedUnder(child.id), hasReplies: replies, newestAt: child.at))
                     if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
                 }
             }

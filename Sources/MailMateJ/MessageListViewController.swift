@@ -614,6 +614,12 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return thread.size > 1 && thread.anyUnread && !expandedThreads.contains(thread.thread)
     }
 
+    /// A folded row with a flagged reply under it (the replies hidden).
+    private func showsFlaggedReply(_ row: MessageRow) -> Bool {
+        guard let thread = threadRows[row.id], thread.flaggedReply else { return false }
+        return isFolded(thread)
+    }
+
     /// A closed thread shows when its newest message arrived, where the thread sorts by date; any other
     /// row its own date.
     private func shownDate(_ row: MessageRow) -> Date {
@@ -635,7 +641,9 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             if unread { return iconCell(tableView, column, image: Self.unreadDot, tint: .controlAccentColor) }
             return iconCell(tableView, column, image: row.isAnswered ? Self.repliedArrow : nil, tint: .labelColor)
         case .flag:
-            return iconCell(tableView, column, image: row.isFlagged ? Self.rowFlag : nil, tint: .systemRed)
+            if row.isFlagged { return iconCell(tableView, column, image: Self.rowFlag, tint: .systemRed) }
+            // A folded thread with a flagged reply: MailMate's hollow flag, in the text's color.
+            return iconCell(tableView, column, image: showsFlaggedReply(row) ? Self.replyFlag : nil, tint: .labelColor)
         case .attachment:
             return iconCell(tableView, column, image: row.hasAttachment ? Self.rowPaperclip : nil, tint: .labelColor)
         default:
@@ -978,22 +986,28 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return true
     }
 
-    private static let rowFlag: NSImage? = {
-        guard let symbol = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: "Flagged")?
+    /// Measured on screen against MailMate: the ink from 2 px below the row's top, 26 px before the sender.
+    private static let rowFlag = flagImage("flag.fill", accessibilityDescription: "Flagged", top: 1)
+    /// MailMate's hollow flag on a folded thread with a flagged reply (measured at 1x): 12 × 13 px, rows
+    /// 2–14 of the row counting its faint top edge (1 px lower than the flag as placed), across where the
+    /// flag is.
+    private static let replyFlag = flagImage("flag", accessibilityDescription: "Flagged reply", top: 2)
+
+    private static func flagImage(_ name: String, accessibilityDescription: String, top: CGFloat) -> NSImage? {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
         else { return nil }
         let ink = inkBounds(of: symbol, integral: false)
         let size = NSSize(width: 16, height: 17)  // The flag column's cell.
-        // Measured on screen against MailMate: the ink from 2 px below the row's top, 26 px before the sender.
         let shift = NSPoint(
-            x: ((size.width - ink.width) / 2 - ink.minX).rounded() - 1, y: (size.height - 1 - ink.maxY).rounded())
+            x: ((size.width - ink.width) / 2 - ink.minX).rounded() - 1, y: (size.height - top - ink.maxY).rounded())
         let image = NSImage(size: size, flipped: false) { _ in
             symbol.draw(at: shift, from: .zero, operation: .sourceOver, fraction: 1)
             return true
         }
         image.isTemplate = true
         return image
-    }()
+    }
 
     /// The paperclip as MailMate draws it in rows (measured at 1x): 14 px, 2 px below the row's top,
     /// on whole pixels in a cell-sized image so centering can't blur it.

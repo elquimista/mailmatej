@@ -679,6 +679,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 return NSLog("MMJ select: no message with subject \(subject)")
             }
             list.tableView.selectRowIndexes([row], byExtendingSelection: false)
+            list.tableView.scrollRowToVisible(row)
             NSLog("MMJ select: row \(row), message \(list.ids[row])")
         }
 
