@@ -65,13 +65,26 @@ struct SmartRuleContext {
     var otherKeywords: [String] { (try? model.store.otherKeywords()) ?? [] }
 
     /// Values for an "is" combo box, as MailMate's: the field's values among the messages the smart
-    /// mailbox's Mailboxes tab selects (read now, so changes there show), A to Z.
-    func suggestions(_ field: SmartField) -> [String] {
+    /// mailbox's Mailboxes tab selects (as it is now, so changes there show), A to Z. Read off the main
+    /// thread (tens of milliseconds over all mail), and kept a few minutes for every editor.
+    @MainActor func suggestions(_ field: SmartField) async -> [String] {
         guard field.kind == .text, !field.isFullText else { return [] }
         let sources = mailboxKey.map { SmartSources(scopes: [$0]) }
             ?? (try? model.store.smartMailboxes())?.first { $0.id == smartID }?.definition.sources ?? SmartSources(scopes: [])
-        return (try? model.store.fieldValues(field, sources: sources)) ?? []
+        let key = SuggestionsKey(field: field, sources: sources)
+        if let kept = Self.suggestions[key], kept.at.duration(to: .now) < .seconds(300) { return kept.values }
+        let store = model.store
+        let values = await Task.detached(priority: .userInitiated) { (try? store.fieldValues(field, sources: sources)) ?? [] }.value
+        Self.suggestions[key] = (values, .now)
+        return values
     }
+
+    private struct SuggestionsKey: Hashable {
+        let field: SmartField
+        let sources: SmartSources
+    }
+
+    @MainActor private static var suggestions: [SuggestionsKey: (values: [String], at: ContinuousClock.Instant)] = [:]
 
 }
 
@@ -404,14 +417,21 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             combo.font = Self.font
             combo.completes = true
             combo.numberOfVisibleItems = 12
-            let suggestions = suggestionCache[field] ?? context.suggestions(field)
-            suggestionCache[field] = suggestions
             // MailMate's list narrows to what's typed (values starting with it), completing the first.
             combo.usesDataSource = true
             combo.dataSource = self
-            comboValues[ObjectIdentifier(combo)] = (all: suggestions, shown: suggestions)
+            comboValues[ObjectIdentifier(combo)] = (all: suggestionCache[field] ?? [], shown: suggestionCache[field] ?? [])
             combo.stringValue = value
             combo.delegate = self
+            if suggestionCache[field] == nil {  // read off the main thread: the list fills in when they're here
+                Task { [weak self, weak combo, context] in
+                    let values = await context.suggestions(field)
+                    guard let self, let combo, self.comboValues[ObjectIdentifier(combo)] != nil else { return }
+                    self.suggestionCache[field] = values
+                    self.comboValues[ObjectIdentifier(combo)] = (all: values, shown: Self.narrowed(values, to: combo.stringValue))
+                    combo.reloadData()
+                }
+            }
             return combo
         case .text:
             let search = NSSearchField(frame: NSRect(x: 0, y: 0, width: 148, height: 19))
@@ -979,12 +999,16 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
 
     func controlTextDidChange(_ obj: Notification) {
         if let combo = obj.object as? NSComboBox, var values = comboValues[ObjectIdentifier(combo)] {
-            let typed = combo.stringValue
-            values.shown = typed.isEmpty ? values.all : values.all.filter { $0.range(of: typed, options: [.caseInsensitive, .anchored]) != nil }
+            values.shown = Self.narrowed(values.all, to: combo.stringValue)
             comboValues[ObjectIdentifier(combo)] = values
             combo.reloadData()
         }
         onChange(false)
+    }
+
+    /// The values starting with what's typed.
+    private static func narrowed(_ values: [String], to typed: String) -> [String] {
+        typed.isEmpty ? values : values.filter { $0.range(of: typed, options: [.caseInsensitive, .anchored]) != nil }
     }
 
     // MARK: Combo box values
