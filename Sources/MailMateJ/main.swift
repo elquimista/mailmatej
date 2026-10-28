@@ -50,6 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                // MMJ_DEBUG_RENAME="<key>|<name>[|rebuild]": renames as typed while the rows refresh.
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_RENAME"]?.split(separator: "|").map(String.init),
+                    spec.count >= 2
+                {
+                    windowController?.debugRenameSidebar(spec[0], to: spec[1], rebuild: spec.count > 2)
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_PROGRESS"] != nil {
                     windowController?.debugShowProgress()
                     try? await Task.sleep(for: .milliseconds(700))

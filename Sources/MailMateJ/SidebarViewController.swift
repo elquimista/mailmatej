@@ -345,6 +345,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             refreshStatuses()
             return
         }
+        // Rows came or went: rebuilt, the outline would drop a name being typed. Once it's done.
+        if renaming != nil {
+            reloadAfterRename = true
+            return
+        }
         let previous = selectedNode?.key
         // At launch, the mailbox chosen last time (the main window's sidebar), else Inbox.
         let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : nil
@@ -452,6 +457,30 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             guard let scope = node.scope else { return }
             if choose == "erase", items.contains(where: { $0.title.hasPrefix("Empty") && $0.action != nil }) { model.emptyMailbox(scope) }
             if choose == "read" { model.markAllRead(scope) }
+        }
+
+        /// Renames `key` to `name` as typed, refreshing the rows meanwhile as a download does (and, with
+        /// `rebuild`, adding a smart mailbox, which rebuilds them), then Return; logs what the field showed.
+        func debugRenameWhileRefreshing(key: String, name: String, rebuild: Bool) {
+            NSApp.activate()
+            view.window?.makeKeyAndOrderFront(nil)
+            beginRename(key: key, thenEdit: false)
+            guard let node = find(key, in: roots), case let row = outline.row(forItem: node), row >= 0,
+                let editor = (outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell)?.textField?.currentEditor()
+                    as? NSTextView
+            else { return NSLog("MMJ rename: not editing") }
+            editor.insertText(name, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            for _ in 0..<3 {
+                refreshStatuses()
+                reconfigureVisibleRows()
+                reload()
+            }
+            let added = rebuild ? try? model.store.createSmartMailbox(name: "Rebuild", parentId: nil) : nil
+            if added != nil { reload() }
+            NSLog("MMJ rename: field shows \"\(editor.string)\" after refreshes, still editing \(renaming != nil)")
+            editor.insertNewline(nil)
+            NSLog("MMJ rename: kept \"\(find(key, in: roots)?.title ?? "-")\", rows rebuilt \(added.map { find("smart.\($0)", in: roots) != nil } ?? false)")
+            if let added { model.deleteSmartMailbox(id: added) }
         }
 
         func debugDuplicate(key: String) {
@@ -1599,6 +1628,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private var renaming: (key: String, thenEdit: Bool)?
+    private var reloadAfterRename = false
 
     /// Smart mailboxes, accounts and an account's folders can be renamed (not unified mailboxes or Inbox).
     private func canRename(_ node: SidebarNode) -> Bool {
@@ -1634,6 +1664,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func controlTextDidEndEditing(_ obj: Notification) {
         guard let field = obj.object as? NSTextField, let renaming else { return }
         self.renaming = nil
+        defer {
+            if reloadAfterRename {
+                reloadAfterRename = false
+                reload()
+            }
+        }
         field.isEditable = false
         guard let node = find(renaming.key, in: roots) else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1797,10 +1833,13 @@ final class SidebarCell: NSTableCellView {
     /// `plain`: icon and name only (the mailbox editor's sidebar).
     func configure(_ node: SidebarNode, plain: Bool = false) {
         isOffline = node.isOffline && !plain
-        textField?.stringValue = isOffline ? node.title + " (offline)" : node.title
-        // A long name gives way in the middle, so " (offline)" still shows.
-        textField?.lineBreakMode = isOffline ? .byTruncatingMiddle : .byTruncatingTail
-        styleTitle()
+        // A name being typed stays as typed: rows are refreshed all the while mail downloads.
+        if textField?.currentEditor() == nil {
+            textField?.stringValue = isOffline ? node.title + " (offline)" : node.title
+            // A long name gives way in the middle, so " (offline)" still shows.
+            textField?.lineBreakMode = isOffline ? .byTruncatingMiddle : .byTruncatingTail
+            styleTitle()
+        }
         if let warning = node.warning, !plain {
             imageView?.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Sync error")
             imageView?.contentTintColor = .systemOrange
