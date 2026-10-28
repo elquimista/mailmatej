@@ -483,6 +483,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             if let added { model.deleteSmartMailbox(id: added) }
         }
 
+        /// The first visible rows' title colors, as set and as resolved, with each cell's background style.
+        var debugTitleColors: String {
+            let rows = outline.rows(in: outline.visibleRect)
+            return (rows.location..<(rows.location + min(rows.length, 8))).compactMap { row -> String? in
+                guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell,
+                    let field = cell.textField, let color = field.textColor
+                else { return nil }
+                var drawn = ""
+                field.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    let c = color.usingColorSpace(.sRGB)
+                    drawn = c.map { String(format: "%.0f,%.0f,%.0f", $0.redComponent * 255, $0.greenComponent * 255, $0.blueComponent * 255) } ?? "?"
+                }
+                return "\(field.stringValue): \(color.colorNameComponent) \(drawn) bg \(cell.backgroundStyle.rawValue)"
+            }.joined(separator: "; ")
+        }
+
+        func debugRefreshStatuses() { refreshStatuses() }
+        func debugScrollToTop() { outline.scrollRowToVisible(0) }
+
         func debugDuplicate(key: String) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ duplicate: no \(key)") }
             duplicate(node)
@@ -1825,6 +1844,16 @@ final class SidebarCell: NSTableCellView {
 
     private var isOffline = false
 
+    /// Sets the name again, as `configure` does: when the window's focus changes, AppKit redraws it
+    /// vibrant (grey while the window is inactive), and only setting it anew draws it solid again.
+    func restyleTitle() {
+        guard let field = textField, field.currentEditor() == nil else { return }
+        let text = field.stringValue
+        field.stringValue = text
+        field.lineBreakMode = field.lineBreakMode
+        styleTitle()
+    }
+
     private func styleTitle() {
         textField?.textColor = isOffline ? .systemRed
             : backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .textColor
@@ -1909,6 +1938,11 @@ final class BadgeView: NSView {
 /// Sidebar selection in MailMate's shape (inset, rounded) and the app's own colors: the same
 /// accent-based selection color as the message lists while focused, grey otherwise.
 final class SidebarRowView: NSTableRowView {
+    /// The window's focus changed: the names are set again at once, or they stay grey while it's inactive.
+    override var isEmphasized: Bool {
+        didSet { if isEmphasized != oldValue { subviews.forEach { ($0 as? SidebarCell)?.restyleTitle() } } }
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
         let rect = bounds.insetBy(dx: 10, dy: 0)

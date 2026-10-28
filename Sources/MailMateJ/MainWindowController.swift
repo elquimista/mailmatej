@@ -692,6 +692,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             list.tableView.sortDescriptors = [prototype]
         }
         func debugDuplicateSidebar(_ key: String) { sidebar.debugDuplicate(key: key) }
+        var debugSidebarTitleColors: String { sidebar.debugTitleColors }
+        func debugRefreshSidebarStatuses() { sidebar.debugRefreshStatuses() }
+        func debugScrollSidebarToTop() { sidebar.debugScrollToTop() }
         func debugRenameSidebar(_ key: String, to name: String, rebuild: Bool) {
             sidebar.debugRenameWhileRefreshing(key: key, name: name, rebuild: rebuild)
         }

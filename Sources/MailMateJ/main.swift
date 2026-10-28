@@ -50,6 +50,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                // MMJ_DEBUG_INACTIVE=<png>: once the app is brought to the front (open it from a shell) and then
+                // leaves it, the main window captured active, inactive, and after a sidebar refresh (as a sync
+                // tick does), with the sidebar names' colors logged.
+                if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_INACTIVE"], let main = windowController?.window {
+                    @MainActor func step(_ name: String) {
+                        main.display()
+                        NSLog("MMJ inactive \(name): \(windowController?.debugSidebarTitleColors ?? "")")
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(main.windowNumber)", path.replacingOccurrences(of: ".png", with: "-\(name).png")]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                    }
+                    windowController?.debugScrollSidebarToTop()
+                    NSLog("MMJ inactive: waiting for focus")
+                    var waited = 0
+                    while !NSApp.isActive && waited < 300 { try? await Task.sleep(for: .milliseconds(100)); waited += 1 }
+                    main.makeKeyAndOrderFront(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    step("active")
+                    NSLog("MMJ inactive: waiting to lose focus")
+                    waited = 0
+                    while NSApp.isActive && waited < 300 { try? await Task.sleep(for: .milliseconds(100)); waited += 1 }
+                    try? await Task.sleep(for: .milliseconds(400))
+                    step("inactive")
+                    windowController?.debugRefreshSidebarStatuses()
+                    try? await Task.sleep(for: .milliseconds(500))
+                    step("refreshed")
+                }
                 // MMJ_DEBUG_RENAME="<key>|<name>[|rebuild]": renames as typed while the rows refresh.
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_RENAME"]?.split(separator: "|").map(String.init),
                     spec.count >= 2
