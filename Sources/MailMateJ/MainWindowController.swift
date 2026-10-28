@@ -109,7 +109,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             forName: .mailStoreDidChange, object: nil, queue: .main
         ) { [weak self] note in
             let countsUnchanged = note.userInfo?[AppModel.countsUnchangedKey] != nil
-            MainActor.assumeIsolated { self?.storeDidChange(countsUnchanged: countsUnchanged) }
+            let madeHere = note.userInfo?[AppModel.madeHereKey] != nil
+            MainActor.assumeIsolated { self?.storeDidChange(countsUnchanged: countsUnchanged, madeHere: madeHere) }
         }
         NotificationCenter.default.addObserver(
             forName: .syncStatusDidChange, object: nil, queue: .main
@@ -228,6 +229,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             self?.toggle(row, collapse: collapse, inCorrespondence: true)
         }
         sidebar.onEditAccount = { [weak self] id in self?.editAccount(id: id) }
+        sidebar.onRebuilt = { [weak self] in
+            guard let self, followSelectedScope() else { return }
+            reloadList(.dataChanged)
+        }
         sidebar.onSelectNone = { [weak self] in
             guard let self else { return }
             leaveResult()
@@ -303,7 +308,19 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// no mailbox, nothing.
     private var shownScope: MessageScope { hasMailbox ? scope : .smart(-1) }  // .smart(-1) matches nothing
 
-    private func reloadList(_ reason: ReloadReason) {
+    /// List loads under way, and whether a sync's change came in meanwhile (see `reloadList`).
+    private var listLoads = 0
+    private var listLoadAgain = false
+
+    /// Loads the list off the main thread. With `coalescing` (a change a sync brought), no load starts
+    /// while one runs (each one threads the whole mailbox; during a sync they piled up): one more
+    /// follows it instead, and what it found shows meanwhile.
+    private func reloadList(_ reason: ReloadReason, coalescing: Bool = false) {
+        if coalescing, listLoads > 0 {
+            listLoadAgain = true
+            return
+        }
+        listLoads += 1
         loadGeneration += 1
         let generation = loadGeneration
         let (store, sort) = (model.store, list.sort)
@@ -356,6 +373,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                     NSLog("MMJ timing: reload stages: \(stages) ms, back on main after \(Int(Date().timeIntervalSince(started) * 1000))")
                 }
             #endif
+            listLoads -= 1
+            // Once this one shows: the load for changes that came in meanwhile.
+            let loadAgain = listLoads == 0 && listLoadAgain
+            if loadAgain { listLoadAgain = false }
+            defer { if loadAgain { reloadList(.dataChanged, coalescing: true) } }
             guard generation == loadGeneration else { return }
             messageCount = messages
             if result != nil {
@@ -366,6 +388,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
             }
             let ids = rows.map(\.id)
+            // Selections can be tens of thousands: looked up in a set, not the list.
+            let listed = Set(ids)
             list.showsThreads = threaded
             list.expandedThreads = expanded
             list.openedMessages = opened
@@ -377,11 +401,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             let newestEnd = sort.key == .receivedAt ? (sort.ascending ? ids.last : ids.first) : newest
 
             switch reason {
-            case .scopeChanged where pendingHistorySelection.map(ids.contains) == true:
+            case .scopeChanged where pendingHistorySelection.map(listed.contains) == true:
                 list.setIDs(ids, selecting: [pendingHistorySelection!], scroll: .toSelection)
                 pendingHistorySelection = nil
             case .scopeChanged:
-                if let saved = remembered[scope], saved.selection.contains(where: ids.contains) {
+                if let saved = remembered[scope], saved.selection.contains(where: listed.contains) {
                     list.setIDs(ids, selecting: saved.selection, scroll: .restore(saved.anchor))
                     // Mail that arrived while away shows at once, unless that scrolls the selection away.
                     list.scrollToEdge(newestEnd)
@@ -393,7 +417,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                     list.setIDs(ids, selecting: [], scroll: .toMessage(newestEnd))
                 }
             case .threadsChanged:
-                let wanted = (selectAfterThreads ?? before).filter(ids.contains)
+                let wanted = (selectAfterThreads ?? before).filter(listed.contains)
                 selectAfterThreads = nil
                 let toggled = toggledRow
                 toggledRow = nil
@@ -402,13 +426,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
             case .searchChanged, .sortChanged:
                 // Keep the selection if it is still in the list; otherwise show the newest message.
-                let kept = before.filter(ids.contains)
+                let kept = before.filter(listed.contains)
                 list.setIDs(ids, selecting: kept, scroll: kept.isEmpty ? .toMessage(newestEnd) : .toSelection)
-            case .dataChanged where selectAfterMove.map { pending in !pending.moved.contains(where: ids.contains) } == true:
+            case .dataChanged where selectAfterMove.map { pending in !pending.moved.contains(where: listed.contains) } == true:
                 // After Archive/Junk/Delete/Move, once the messages have left the list: the next one.
                 let next = selectAfterMove!.next
                 selectAfterMove = nil
-                list.setIDs(ids, selecting: ids.contains(next) ? [next] : nil, scroll: .keepPosition)
+                list.setIDs(ids, selecting: listed.contains(next) ? [next] : nil, scroll: .keepPosition)
             case .dataChanged:
                 // A list that just got its first messages (initial sync) opens at the newest one.
                 // When sorted by date and the end new mail arrives at (the top, or the bottom when oldest
@@ -533,14 +557,25 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return rows.map(\.id)
     }
 
-    private func storeDidChange(countsUnchanged: Bool) {
-        sidebar.reload(keepingCounts: countsUnchanged)
-        // The selected mailbox's scope can change in place (a special mailbox's conditions now narrow it).
-        if let current = sidebar.selectedNode?.scope, current != scope, current.base == scope.base { scope = current }
-        reloadList(.dataChanged)
+    private func storeDidChange(countsUnchanged: Bool, madeHere: Bool) {
+        selectionMarks = nil
+        // Rows come and go at once after a change made here (only new rows are counted then); counts are
+        // queried off the main thread.
+        if countsUnchanged || madeHere { sidebar.reload(keepingCounts: true) }
+        if !countsUnchanged { sidebar.reloadInBackground() }
+        followSelectedScope()
+        reloadList(.dataChanged, coalescing: !madeHere)
         if list.selectedID != nil || correspondent != nil {
             reloadCorrespondence(for: list.selectedID ?? correspondence.selectedID, keepSelection: true)
         }
+    }
+
+    /// The selected mailbox's scope can change in place (a special mailbox's conditions now narrow it).
+    @discardableResult
+    private func followSelectedScope() -> Bool {
+        guard let current = sidebar.selectedNode?.scope, current != scope, current.base == scope.base else { return false }
+        scope = current
+        return true
     }
 
     private func syncStatusDidChange() {
@@ -552,7 +587,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// downloading their message headers (a first sync, which fills the lists), how far they've got;
     /// then how much of the selected mailbox is downloaded, while whole messages are downloading and it
     /// isn't all here yet.
+    /// Bumped by each `updateProgress`: a count that comes back after a newer one started is dropped.
+    private var progressGeneration = 0
+
     private func updateProgress() {
+        progressGeneration += 1
         #if DEBUG
             if let shown = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_PROGRESS"] ?? "") {  // e.g. "0.4"
                 return sidebar.showProgress(true, fraction: shown, texts: ["Downloading \(Int(shown * 560)) of 560", "\(Int(shown * 560)) of 560"])
@@ -566,12 +605,17 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 true, fraction: Double(headers.downloaded) / Double(headers.total),
                 texts: headers.whole ? ["Downloading \(count)", count] : ["Downloading headers \(count)", "Headers \(count)", count])
         }
-        guard hasMailbox, model.downloadProgress != nil, let counts = try? model.store.downloadCounts(scope: scope),
-            counts.total > 0, counts.downloaded < counts.total
-        else { return sidebar.showProgress(false) }
-        let count = "\(counts.downloaded.formatted()) of \(counts.total.formatted())"
-        sidebar.showProgress(
-            true, fraction: Double(counts.downloaded) / Double(counts.total), texts: ["Downloading \(count)", count])
+        guard hasMailbox, model.downloadProgress != nil else { return sidebar.showProgress(false) }
+        // Counted off the main thread: it reads the whole mailbox, twice a second while mail downloads.
+        let (generation, store, scope) = (progressGeneration, model.store, scope)
+        Task {
+            let counts = await Task.detached(priority: .utility) { try? store.downloadCounts(scope: scope) }.value
+            guard generation == progressGeneration else { return }
+            guard let counts, counts.total > 0, counts.downloaded < counts.total else { return sidebar.showProgress(false) }
+            let count = "\(counts.downloaded.formatted()) of \(counts.total.formatted())"
+            sidebar.showProgress(
+                true, fraction: Double(counts.downloaded) / Double(counts.total), texts: ["Downloading \(count)", count])
+        }
     }
 
     /// The accounts a mailbox shows mail of, when that's one account (its mailboxes, its account row);
@@ -964,9 +1008,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             #selector(moveToMailbox(_:)), #selector(flagMessages(_:)), #selector(unflagMessages(_:)):
             return !editing && !ids.isEmpty
         case #selector(toggleReadState(_:)):
-            let rows = (try? model.store.rows(ids: ids)) ?? []
-            item.title = !rows.isEmpty && !rows.contains(where: \.isSeen) ? "Mark as Read" : "Mark as Unread"
-            return !editing && !rows.isEmpty
+            let marks = marks(of: ids)
+            item.title = marks.count > 0 && !marks.anySeen ? "Mark as Read" : "Mark as Unread"
+            return !editing && marks.count > 0
         case #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
             return ids.count == 1 && model.canCompose
         case #selector(nextMessage(_:)), #selector(previousMessage(_:)), #selector(nextUnreadMessage(_:)),
@@ -1556,12 +1600,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             guard let self else { return }
             let ids = targetIDs
             let hasTarget = !ids.isEmpty
-            let rows = hasTarget ? (try? model.store.rows(ids: ids)) ?? [] : []
+            let marks = marks(of: ids)
             for button in views {
                 switch button.action {
                 // As in MailMate, a mark button is off when it would change nothing.
-                case #selector(markRead(_:)): button.isEnabled = rows.contains { !$0.isSeen }
-                case #selector(markUnread(_:)): button.isEnabled = rows.contains(where: \.isSeen)
+                case #selector(markRead(_:)): button.isEnabled = marks.anyUnread
+                case #selector(markUnread(_:)): button.isEnabled = marks.anySeen
                 case #selector(newMessage(_:)): button.isEnabled = model.canCompose
                 // Replying and forwarding act on one message.
                 case #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
@@ -1581,8 +1625,29 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private func allFlagged(_ ids: [Int64]) -> Bool {
-        guard !ids.isEmpty, let rows = try? model.store.rows(ids: ids) else { return false }
-        return rows.allSatisfy(\.isFlagged)
+        let marks = marks(of: ids)
+        return marks.count > 0 && marks.allFlagged
+    }
+
+    /// What's marked among some messages, for the buttons and menus.
+    private struct SelectionMarks {
+        var count = 0, anySeen = false, anyUnread = false, allFlagged = true
+    }
+
+    /// The last selection's marks: the toolbar's groups and the menus ask for the same messages many
+    /// times over (a selection can be tens of thousands); forgotten with every change.
+    private var selectionMarks: (ids: [Int64], marks: SelectionMarks)?
+
+    private func marks(of ids: [Int64]) -> SelectionMarks {
+        if let cached = selectionMarks, cached.ids == ids { return cached.marks }
+        var marks = SelectionMarks()
+        for mark in (try? model.store.marks(ids: ids)) ?? [] {
+            marks.count += 1
+            if mark.seen { marks.anySeen = true } else { marks.anyUnread = true }
+            if !mark.flagged { marks.allFlagged = false }
+        }
+        selectionMarks = (ids, marks)
+        return marks
     }
 
     @objc func newMessage(_ sender: Any?) { model.compose(.new, messageId: targetIDs.first, window: window) }
@@ -1612,8 +1677,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// Message → Mark as Unread (Mark as Read when every selected message is unread).
     @objc func toggleReadState(_ sender: Any?) {
         let ids = menuIDs(sender)
-        let rows = (try? model.store.rows(ids: ids)) ?? []
-        perform(rows.contains(where: \.isSeen) ? .markUnread : .markRead, on: ids)
+        perform(marks(of: ids).anySeen ? .markUnread : .markRead, on: ids)
     }
     @objc func toggleFlag(_ sender: Any?) {
         let ids = targetIDs
@@ -1745,16 +1809,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: action \(action) start") }
         #endif
         registerUndo(for: action, on: ids)
+        selectionMarks = nil
         // Marks and flags show in the rows at once.
-        for id in ids {
-            for rows in [list, correspondence] {
-                switch action {
-                case .markRead: rows.showSeen(true, id: id)
-                case .markUnread: rows.showSeen(false, id: id)
-                case .flag: rows.showFlagged(true, id: id)
-                case .unflag: rows.showFlagged(false, id: id)
-                default: break
-                }
+        for rows in [list, correspondence] {
+            switch action {
+            case .markRead: rows.showSeen(true, ids: ids)
+            case .markUnread: rows.showSeen(false, ids: ids)
+            case .flag: rows.showFlagged(true, ids: ids)
+            case .unflag: rows.showFlagged(false, ids: ids)
+            default: break
             }
         }
         model.perform(action, on: ids) { [weak self] count in
@@ -1767,7 +1830,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// so they go as fast as the keypress whatever the list's size; the list's reload confirms it.
     /// Messages that stay in the list (archived in All Messages, say) stay.
     private func removeLeavingRows(_ ids: [Int64]) {
-        let shown = ids.filter(list.ids.contains)
+        let listed = Set(list.ids)
+        let shown = ids.filter(listed.contains)
         guard !shown.isEmpty, let staying = try? model.store.ids(shown, in: shownScope) else { return }
         let leaving = Set(shown).subtracting(staying)
         guard !leaving.isEmpty else { return }
@@ -1793,9 +1857,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// through `perform` again, which records the redo. Deleting for good can't be undone.
     private func registerUndo(for action: AppModel.MessageAction, on ids: [Int64]) {
         guard let undo = window?.undoManager else { return }
-        let rows = (try? model.store.rows(ids: ids)) ?? []
-        func keyword(_ name: String, _ on: KeyPath<MessageRow, Bool>, set: AppModel.MessageAction, clear: AppModel.MessageAction) {
-            let wasOn = rows.filter { $0[keyPath: on] }.map(\.id), wasOff = rows.filter { !$0[keyPath: on] }.map(\.id)
+        func keyword(_ name: String, _ flagged: Bool, set: AppModel.MessageAction, clear: AppModel.MessageAction) {
+            let marks = (try? model.store.marks(ids: ids)) ?? []
+            let wasOn = marks.filter { flagged ? $0.flagged : $0.seen }.map(\.id)
+            let wasOff = marks.filter { !(flagged ? $0.flagged : $0.seen) }.map(\.id)
             undo.registerUndo(withTarget: self) { target in
                 if !wasOn.isEmpty { target.perform(set, on: wasOn) }
                 if !wasOff.isEmpty { target.perform(clear, on: wasOff) }
@@ -1803,10 +1868,10 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             undo.setActionName(name)
         }
         switch action {
-        case .markRead: keyword("Mark as Read", \.isSeen, set: .markRead, clear: .markUnread)
-        case .markUnread: keyword("Mark as Unread", \.isSeen, set: .markRead, clear: .markUnread)
-        case .flag: keyword("Flag", \.isFlagged, set: .flag, clear: .unflag)
-        case .unflag: keyword("Unflag", \.isFlagged, set: .flag, clear: .unflag)
+        case .markRead: keyword("Mark as Read", false, set: .markRead, clear: .markUnread)
+        case .markUnread: keyword("Mark as Unread", false, set: .markRead, clear: .markUnread)
+        case .flag: keyword("Flag", true, set: .flag, clear: .unflag)
+        case .unflag: keyword("Unflag", true, set: .flag, clear: .unflag)
         case .keyword, .copy, .deletePermanently: break  // only rules do these
         case .archive, .junk, .notJunk, .delete, .move, .moveToRole, .restoreMailboxes, .removeFromMailbox:
             let inTrash: Set<Int64>
@@ -2037,10 +2102,10 @@ extension MainWindowController {
         case ("g", "g"): selectRow(0)
         case ("*", "a"): activeList.tableView.selectAll(nil)
         case ("*", "n"): activeList.tableView.deselectAll(nil)
-        case ("*", "r"): selectRows { $0.isSeen }
-        case ("*", "u"): selectRows { !$0.isSeen }
-        case ("*", "s"): selectRows { $0.isFlagged }
-        case ("*", "t"): selectRows { !$0.isFlagged }
+        case ("*", "r"): selectRows { seen, _ in seen }
+        case ("*", "u"): selectRows { seen, _ in !seen }
+        case ("*", "s"): selectRows { _, flagged in flagged }
+        case ("*", "t"): selectRows { _, flagged in !flagged }
         case ("d", "d"): moveAway(.delete)
         case ("r", "r"): reply(nil)
         case ("r", "a"): replyAll(nil)
@@ -2096,9 +2161,9 @@ extension MainWindowController {
     }
 
     /// *r, *u, *s, *t: selects the list's messages that are read, unread, flagged or not flagged.
-    private func selectRows(where matches: (MessageRow) -> Bool) {
+    private func selectRows(where matches: (_ seen: Bool, _ flagged: Bool) -> Bool) {
         let rows = activeList
-        let wanted = Set(((try? model.store.rows(ids: rows.ids)) ?? []).filter(matches).map(\.id))
+        let wanted = Set(((try? model.store.marks(ids: rows.ids)) ?? []).filter { matches($0.seen, $0.flagged) }.map(\.id))
         rows.tableView.selectRowIndexes(IndexSet(rows.ids.indices.filter { wanted.contains(rows.ids[$0]) }), byExtendingSelection: false)
     }
 
@@ -2294,7 +2359,7 @@ extension MainWindowController {
     /// The next or previous unread message, or thread with unread mail, in the list.
     fileprivate func moveToUnread(down: Bool, threads: Bool) {
         let rows = activeList
-        let unread = Set(((try? model.store.rows(ids: rows.ids)) ?? []).filter { !$0.isSeen }.map(\.id))
+        let unread = (try? model.store.unreadMessageIDs()) ?? []
         let selected = rows.tableView.selectedRowIndexes
         let start = down ? (selected.last ?? -1) : (selected.first ?? rows.ids.count)
         let candidates = down ? Array(stride(from: start + 1, to: rows.ids.count, by: 1)) : Array(stride(from: start - 1, through: 0, by: -1))

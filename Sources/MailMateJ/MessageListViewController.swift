@@ -347,7 +347,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         rowColors.removeAll(keepingCapacity: true)
         suppressSelection = true
         tableView.reloadData()
-        let indexes = IndexSet(wanted.compactMap { newIDs.firstIndex(of: $0) })
+        let indexes = IndexSet(Self.rows(of: wanted, in: newIDs))
         tableView.selectRowIndexes(indexes, byExtendingSelection: false)
         suppressSelection = false
 
@@ -392,20 +392,46 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         scrollView.reflectScrolledClipView(clip)
     }
 
-    /// Shows a message as read or unread right away, before the store's change reaches the list.
-    func showSeen(_ seen: Bool, id: Int64) {
-        guard let index = ids.firstIndex(of: id), var row = cache[id], row.isSeen != seen else { return }
-        row.isSeen = seen
-        cache[id] = row
-        tableView.reloadData(forRowIndexes: [index], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+    /// The rows of these messages in `ids`: looked up one by one for a few, through a dictionary for
+    /// many (restoring a Select All of tens of thousands compared every pair).
+    static func rows(of wanted: [Int64], in ids: [Int64]) -> [Int] {
+        guard wanted.count > 8 else { return wanted.compactMap { ids.firstIndex(of: $0) } }
+        let index = Dictionary(ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        return wanted.compactMap { index[$0] }
     }
 
-    /// Shows a message as flagged or not at once, before the store's change comes back.
-    func showFlagged(_ flagged: Bool, id: Int64) {
-        guard let index = ids.firstIndex(of: id), var row = cache[id], row.isFlagged != flagged else { return }
-        row.isFlagged = flagged
-        cache[id] = row
-        tableView.reloadData(forRowIndexes: [index], columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+    /// Shows a message as read or unread right away, before the store's change reaches the list.
+    func showSeen(_ seen: Bool, id: Int64) { showSeen(seen, ids: [id]) }
+
+    /// Shows messages as read or unread right away (the rows loaded; the others load so from the store).
+    func showSeen(_ seen: Bool, ids changing: [Int64]) {
+        update(changing) { row in
+            guard row.isSeen != seen else { return false }
+            row.isSeen = seen
+            return true
+        }
+    }
+
+    /// Shows messages as flagged or not at once, before the store's change comes back.
+    func showFlagged(_ flagged: Bool, ids changing: [Int64]) {
+        update(changing) { row in
+            guard row.isFlagged != flagged else { return false }
+            row.isFlagged = flagged
+            return true
+        }
+    }
+
+    /// Changes the loaded rows of these messages and redraws them, in one go.
+    private func update(_ changing: [Int64], _ change: (inout MessageRow) -> Bool) {
+        var changed: [Int64] = []
+        for id in changing {
+            guard var row = cache[id], change(&row) else { continue }
+            cache[id] = row
+            changed.append(id)
+        }
+        guard !changed.isEmpty else { return }
+        tableView.reloadData(
+            forRowIndexes: IndexSet(Self.rows(of: changed, in: ids)), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
     }
 
     private func row(at index: Int) -> MessageRow? {
@@ -832,9 +858,15 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         image.draw(in: NSRect(x: 0, y: 0, width: width, height: height))
         NSGraphicsContext.restoreGraphicsState()
+        guard let data = rep.bitmapData else { return NSRect(origin: .zero, size: image.size) }
+        // Alpha read from the bytes (`colorAt` made an NSColor per pixel: milliseconds a symbol, and an
+        // attachment row measures nine). Over 0.1 is over 25 of 255.
+        let rowBytes = rep.bytesPerRow, pixelBytes = rep.bitsPerPixel / 8
+        let alpha = rep.bitmapFormat.contains(.alphaFirst) ? 0 : pixelBytes - 1
         var minX = width, minY = height, maxX = -1, maxY = -1
         for y in 0..<height {
-            for x in 0..<width where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 {
+            let row = data + y * rowBytes
+            for x in 0..<width where row[x * pixelBytes + alpha] > 25 {
                 minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
             }
         }

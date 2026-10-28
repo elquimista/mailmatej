@@ -18,6 +18,13 @@ import Testing
         ], destroyed: [], replaceAll: true)
     }
 
+    /// Stores messages as a finished download leaves them: listed.
+    func upsert(_ messages: [IncomingMessage]) throws {
+        try store.upsertMessages(accountId: "acc", messages)
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: messages.map(\.remoteId))
+        try store.setDownloadState(1, messageIds: Array(ids.values))
+    }
+
     func message(_ id: String, from: String, to: String = "me@example.com", box: String = "in", at: Double,
                  subject: String = "Hello", keywords: [String] = []) -> IncomingMessage {
         IncomingMessage(
@@ -28,7 +35,7 @@ import Testing
     }
 
     @Test func otherSideIsTheRecipientOfTheirMailAndTheSenderOfMine() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "support@vendor.com", to: "alias@gmail.com", at: 100),
             message("2", from: "alias@gmail.com", to: "support@vendor.com", at: 200),
         ])
@@ -45,7 +52,7 @@ import Testing
         ]
         var none = message("3", from: "me@example.com", box: "se", at: 300, subject: "None")
         none.addresses = [.init(role: .from, name: nil, email: "me@example.com"), .init(role: .bcc, name: nil, email: "b@x.com")]
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             several, message("2", from: "me@example.com", to: "Bob@X.com", box: "se", at: 200, subject: "One"), none,
         ])
         let byTo = try store.messageIDs(scope: .role("sent"), sort: MessageSort(key: .to, ascending: true))
@@ -61,7 +68,7 @@ import Testing
             m.inReplyTo = parent
             return m
         }
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             reply("1", "a@x", to: nil, at: 100), reply("2", "b@x", to: "a@x", at: 200), reply("9", "z@x", to: nil, at: 150),
         ])
         let ids = try store.messageIDs(scope: .allMessages)  // newest first: the reply, the other, the first
@@ -70,7 +77,7 @@ import Testing
         let condition = SmartCondition.rule(.threadId, .is, String(number))
         #expect(Set(try store.messageIDs(scope: .allMessages, search: condition)) == [ids[0], ids[2]])
         // A new reply joins the saved condition's thread.
-        try store.upsertMessages(accountId: "acc", [reply("3", "c@x", to: "b@x", at: 300)])
+        try upsert([reply("3", "c@x", to: "b@x", at: 300)])
         #expect(try store.messageIDs(scope: .allMessages, search: condition).count == 3)
         #expect(try store.messageIDs(scope: .allMessages, search: .rule(.threadId, .isNot, String(number))).count == 1)
 
@@ -104,7 +111,7 @@ import Testing
         var late = message("2", from: "b@x.com", at: at("2024-03-15T12:00:00Z"))
         late.sentAt = Date(timeIntervalSince1970: at("2024-03-15T12:00:00Z"))
         late.sentZone = -300
-        try store.upsertMessages(accountId: "acc", [early, late])
+        try upsert([early, late])
         let ids = try store.messageIDs(scope: .allMessages, sort: MessageSort(key: .receivedAt, ascending: true))
         func matching(_ field: SmartField, _ op: SmartOperator, _ value: String = "") throws -> [Int64] {
             let id = try store.createSmartMailbox(name: "\(field.rawValue) \(op)", parentId: nil)
@@ -135,7 +142,7 @@ import Testing
         // Written (its Date header) in December, delivered in March: Date is March.
         var delayed = message("1", from: "a@x.com", at: try Date("2024-03-20T12:00:00Z", strategy: .iso8601).timeIntervalSince1970)
         delayed.sentAt = try Date("2023-12-20T12:00:00Z", strategy: .iso8601)
-        try store.upsertMessages(accountId: "acc", [delayed])
+        try upsert([delayed])
         let id = try store.createSmartMailbox(name: "March", parentId: nil)
         var definition = SmartDefinition(sources: SmartSources(scopes: ["all"]))
         definition.condition = .compound(.all, [.rule(.date, .isExactly, "2024-03"), .rule(.datePart(.year, local: true), .is, "2024")])
@@ -169,14 +176,14 @@ import Testing
     }
 
     @Test func unquotedAndQuotedTextConditionsSearchTheirParts() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100, subject: "Re: plan"), message("2", from: "b@x.com", at: 200, subject: "Invoice"),
         ])
         let ids = try store.messageIDs(scope: .allMessages, sort: MessageSort(key: .receivedAt, ascending: true))
         try store.saveBody(messageId: ids[0], MessageBody(html: nil, text: "Sounds good.\n> the invoice is attached"))
         try store.saveBody(messageId: ids[1], MessageBody(html: "<p>Here is the invoice.</p>", text: nil))
         // Indexed text survives the message being updated again (a flag change).
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100, subject: "Re: plan", keywords: ["$seen"])])
+        try upsert([message("1", from: "a@x.com", at: 100, subject: "Re: plan", keywords: ["$seen"])])
         func matching(_ field: SmartField) throws -> [Int64] {
             let id = try store.createSmartMailbox(name: field.rawValue, parentId: nil)
             var definition = SmartDefinition(sources: SmartSources(scopes: ["all"]))
@@ -191,7 +198,7 @@ import Testing
     }
 
     @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),
         ])
         // A smart mailbox with no mailboxes of its own, including its submailboxes.
@@ -212,7 +219,7 @@ import Testing
     }
 
     @Test func smartMailboxesMatchTheirConditions() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "pay@payoneer.com", at: 100, subject: "You Have Received a Payment!"),
             message("2", from: "news@payoneer.com", at: 200, subject: "Newsletter"),
             message("3", from: "x@other.com", at: 300, subject: "Payment from Bob was deposited", keywords: ["$seen"]),
@@ -301,7 +308,7 @@ import Testing
         var a = message("a", from: "Ann <ann@mail.payoneer.co.uk>", at: 100, subject: "One", keywords: ["$label1"])
         a.addresses = [.init(role: .from, name: "Ann Lee", email: "ann@mail.payoneer.co.uk"), .init(role: .bcc, name: nil, email: "me@example.com")]
         let b = message("b", from: "bob@x.com", at: Date().timeIntervalSince1970 - 3600, subject: "Two")
-        try store.upsertMessages(accountId: "acc", [a, b])
+        try upsert([a, b])
         let id = try store.createSmartMailbox(name: "S", parentId: nil)
         func matches(_ condition: SmartCondition) throws -> Set<String> {
             try store.updateSmartMailbox(id: id, definition: SmartDefinition(condition: .compound(.all, [condition])))
@@ -363,7 +370,7 @@ import Testing
     }
 
     @Test func rulesMatchNewMessagesInTheirMailbox() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "alert@alert.go2bank.com", at: 100, subject: "Your GO2bank statement"),
             message("2", from: "alert@alert.go2bank.com", box: "se", at: 200, subject: "Your GO2bank statement"),
             message("3", from: "x@other.com", at: 300, subject: "Your GO2bank statement"),
@@ -393,7 +400,7 @@ import Testing
     }
 
     @Test func specialMailboxConditionsNarrowThemAndTheirSubmailboxes() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "news@shop.com", at: 100, subject: "Sale"),
             message("2", from: "ann@x.com", at: 200, subject: "Lunch"),
         ])
@@ -415,7 +422,7 @@ import Testing
     }
 
     @Test func noMailboxesMeansNoMessages() throws {
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        try upsert([message("1", from: "a@x.com", at: 100)])
         let id = try store.createSmartMailbox(name: "New", parentId: nil)  // MailMate's new one: no mailboxes
         #expect(try store.messageIDs(scope: .smart(id)).isEmpty)
         try store.updateSmartMailbox(id: id, definition: SmartDefinition(sources: SmartSources(scopes: ["all"])))
@@ -423,7 +430,7 @@ import Testing
     }
 
     @Test func smartMailboxesInsideSpecialOnes() throws {
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", box: "tr", at: 200)])
+        try upsert([message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", box: "tr", at: 200)])
         let id = try store.createSmartMailbox(name: "In All", parentId: nil, parentKey: "all")
         let record = try #require(try store.smartMailboxes().first { $0.id == id })
         #expect(record.parentKey == "all" && record.definition.sources.scopes == ["all"])  // starts from All Messages
@@ -447,7 +454,7 @@ import Testing
     }
 
     @Test func scopesAndOrdering() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100),
             message("2", from: "b@x.com", box: "tr", at: 200),
             message("3", from: "c@x.com", at: 300, keywords: ["$flagged", "$seen"]),
@@ -465,9 +472,9 @@ import Testing
     }
 
     @Test func upsertUpdatesInPlaceAndDeleteCascades() throws {
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        try upsert([message("1", from: "a@x.com", at: 100)])
         let id = try #require(store.messageIDs(scope: .allMessages).first)
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", box: "tr", at: 100, keywords: ["$seen"])])
+        try upsert([message("1", from: "a@x.com", box: "tr", at: 100, keywords: ["$seen"])])
         #expect(try store.messageIDs(scope: .allMessages).isEmpty)
         #expect(try store.messageIDs(scope: .role("trash")) == [id])  // same local id
 
@@ -478,7 +485,7 @@ import Testing
     }
 
     @Test func correspondence() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "Ada@X.com", at: 100),
             message("2", from: "me@example.com", to: "ada@x.com", box: "se", at: 200),
             message("3", from: "bob@x.com", at: 300),
@@ -494,7 +501,7 @@ import Testing
         #expect(oldestFirst == thread.reversed())
 
         // Deleted messages are left out, unless the pane is for that message.
-        try store.upsertMessages(accountId: "acc", [message("4", from: "ada@x.com", box: "tr", at: 400)])
+        try upsert([message("4", from: "ada@x.com", box: "tr", at: 400)])
         let deleted = try #require(try store.messageIDs(scope: .role("trash")).first)
         #expect(try store.correspondenceIDs(email: "ada@x.com") == thread)
         #expect(try store.correspondenceIDs(email: "ada@x.com", keeping: deleted) == [deleted] + thread)
@@ -524,7 +531,7 @@ import Testing
     }
 
     @Test func contentTypeConditionsTestTheMessagesParts() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "notifications@calendly.com", at: 100), message("2", from: "a@x.com", at: 200),
         ])
         let ids = try store.messageIDs(scope: .allMessages)  // newest first
@@ -708,7 +715,7 @@ import Testing
     }
 
     @Test func submailboxScopes() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100, keywords: ["$flagged"]),
             message("2", from: "b@x.com", box: "tr", at: 200, keywords: ["$flagged"]),
             message("3", from: "c@x.com", at: 300),
@@ -723,7 +730,7 @@ import Testing
     }
 
     @Test func correspondenceStaysWithTheAddressUsed() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "ada@x.com", to: "me@example.com", at: 100),
             message("2", from: "ada@x.com", to: "alias@example.com", at: 200),
             message("3", from: "me@example.com", to: "ada@x.com", box: "se", at: 300),
@@ -739,7 +746,7 @@ import Testing
     }
 
     @Test func partsAndRemoteAllowList() throws {
-        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        try upsert([message("1", from: "a@x.com", at: 100)])
         let id = try #require(store.messageIDs(scope: .allMessages).first)
         try store.saveBody(messageId: id, MessageBody(html: "<img src=cid:Logo@X>", text: nil), parts: [
             MessagePart(blobId: "B1", cid: "<Logo@X>", type: "image/png", name: "logo.png", size: 10)
@@ -781,23 +788,57 @@ import Testing
         #expect(try store.pendingDownloads(accountId: "acc", limit: 10).count == 1)
     }
 
-    @Test func downloadBookkeepingDoesNotNotifyTheUI() throws {
+    @Test func downloadedMessagesShowUpAndEchoesWriteNothing() throws {
         try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
-        let id = try #require(store.messageIDs(scope: .allMessages).first)
+        let id = try #require(store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1"])["1"])
         let count = Counter()
         let observation = store.observeChanges { count.increment() }
         defer { observation.cancel() }
 
-        try store.setDownloadState(1, messageIds: [id])
+        // Its body is bookkeeping; being downloaded shows it.
         try store.saveBody(messageId: id, MessageBody(html: nil, text: "full body"))
         #expect(count.value == 0)
+        try store.setDownloadState(1, messageIds: [id])
+        #expect(count.value == 1)
 
+        // The server reporting it unchanged (an echo of a change made here) writes nothing.
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100)])
+        #expect(count.value == 1)
+        try store.setKeyword("$seen", true, messageIds: [id])
+        #expect(count.value == 2)
         try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100, keywords: ["$seen"])])
-        #expect(count.value > 0)
+        #expect(count.value == 2)
+        // Its downloaded text stays searchable through it all.
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("full body")) == [id])
+
+        // A change made elsewhere comes through: the keyword, and new addresses (searchable).
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", to: "zed@x.com", at: 100)])
+        #expect(count.value == 3)
+        #expect(try store.unreadIDs(scope: .allMessages) == [id])
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("zed")) == [id])
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("full body")) == [id])
+    }
+
+    @Test func messagesShowOnceDownloaded() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200)])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2"])
+        #expect(try store.messageIDs(scope: .allMessages).isEmpty)
+        #expect(try store.count(scope: .role("inbox"), counting: .unread) == 0)
+        #expect(try store.downloadCounts(scope: .allMessages) == (0, 2))
+
+        try store.setDownloadState(1, messageIds: [ids["2"]!])
+        #expect(try store.messageIDs(scope: .allMessages) == [ids["2"]!])
+        #expect(try store.count(scope: .role("inbox"), counting: .unread) == 1)
+        #expect(try store.correspondenceIDs(email: "a@x.com").isEmpty)
+        // One that couldn't be downloaded shows as far as it's known.
+        try store.setDownloadState(2, messageIds: [ids["1"]!])
+        #expect(try store.messageIDs(scope: .allMessages) == [ids["2"]!, ids["1"]!])
+        #expect(try store.correspondenceIDs(email: "a@x.com") == [ids["1"]!])
+        #expect(try store.downloadCounts(scope: .allMessages) == (1, 2))
     }
 
     @Test func countsAndScopeKeys() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200, keywords: ["$seen"]),
             message("3", from: "c@x.com", box: "tr", at: 300),
         ])
@@ -817,7 +858,7 @@ import Testing
     }
 
     @Test func search() throws {
-        try store.upsertMessages(accountId: "acc", [
+        try upsert([
             message("1", from: "a@x.com", at: 100, subject: "Quarterly planning"),
             message("2", from: "b@x.com", at: 200, subject: "Lunch"),
         ])

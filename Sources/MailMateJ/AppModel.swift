@@ -510,9 +510,9 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: "")
             }
             let current = try store.mailboxIDs(messageIds: ids)
-            for id in ids where !(current[id] ?? []).contains(target.id) {
-                try store.setMailboxes((current[id] ?? []) + [target.id], messageId: id)
-            }
+            try store.setMailboxes(Dictionary(
+                ids.filter { !(current[$0] ?? []).contains(target.id) }.map { ($0, (current[$0] ?? []) + [target.id]) },
+                uniquingKeysWith: { a, _ in a }))
             work.updates.append((remoteIds, ["mailboxIds/\(target.remoteId)": .bool(true)]))
         case .deletePermanently:
             try store.deleteMessages(accountId: accountId, remoteIds: remoteIds)  // gone here at once
@@ -525,7 +525,7 @@ final class AppModel {
                 // the messages are out of their mailboxes here, so they leave the lists at once.
                 work.archiveIntoNewMailbox = true
                 work.previousMailboxes = try store.mailboxIDs(messageIds: ids)
-                for id in ids { try store.setMailboxes([], messageId: id) }
+                try store.setMailboxes(Dictionary(ids.map { ($0, []) }, uniquingKeysWith: { a, _ in a }))
             }
         case .junk:
             guard let junk = try store.mailbox(accountId: accountId, role: "junk") else {
@@ -546,7 +546,8 @@ final class AppModel {
                 let boxes = current[ref.id] ?? []
                 return boxes.contains(mailboxId) && boxes.count > 1
             }
-            for ref in removable { try store.setMailboxes((current[ref.id] ?? []).filter { $0 != mailboxId }, messageId: ref.id) }
+            try store.setMailboxes(Dictionary(
+                removable.map { ($0.id, (current[$0.id] ?? []).filter { $0 != mailboxId }) }, uniquingKeysWith: { a, _ in a }))
             if !removable.isEmpty { work.updates.append((removable.map(\.remoteId), ["mailboxIds/\(target.remoteId)": .null])) }
         case .move(let mailboxId):
             guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
@@ -562,7 +563,7 @@ final class AppModel {
             let remote = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.id, $0.remoteId) })
             // One request per set of mailboxes (usually all the same).
             for (boxes, group) in Dictionary(grouping: refs, by: { Set(saved[$0.id] ?? []) }) where !boxes.isEmpty {
-                for ref in group { try store.setMailboxes(Array(boxes), messageId: ref.id) }
+                try store.setMailboxes(Dictionary(group.map { ($0.id, Array(boxes)) }, uniquingKeysWith: { a, _ in a }))
                 var patch: [String: JSONValue] = [
                     "mailboxIds": .object(Dictionary(uniqueKeysWithValues: boxes.compactMap { remote[$0] }.map { ($0, JSONValue.bool(true)) }))
                 ]
@@ -599,7 +600,7 @@ final class AppModel {
                 }
                 archive = made
             } catch {
-                for (id, boxes) in work.previousMailboxes { try? store.setMailboxes(boxes, messageId: id) }  // back
+                try? store.setMailboxes(work.previousMailboxes)  // back
                 refreshNow()
                 throw error
             }
@@ -649,11 +650,15 @@ final class AppModel {
             dockCounters?.update()
         }
         NotificationCenter.default.post(
-            name: .mailStoreDidChange, object: nil, userInfo: countsUnchanged ? [Self.countsUnchangedKey: true] : nil)
+            name: .mailStoreDidChange, object: nil,
+            userInfo: countsUnchanged ? [Self.countsUnchangedKey: true] : [Self.madeHereKey: true])
     }
 
     /// In a store change's userInfo: see `refreshNow(countsUnchanged:)`.
     nonisolated static let countsUnchangedKey = "countsUnchanged"
+    /// In a store change's userInfo: a change made here (an action, a mailbox made or moved), which
+    /// shows at once; not one a sync brought.
+    nonisolated static let madeHereKey = "madeHere"
 
     // MARK: Work in progress
 

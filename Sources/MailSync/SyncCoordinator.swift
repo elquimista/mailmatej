@@ -665,24 +665,38 @@ public actor SyncCoordinator {
     ) async {
         let limiter = gmail ? gmailDownloadLimiter : downloadLimiter
         reportDownloadProgress(accountId, active: true)
-        await limiter.acquire()
         var backoff = 5.0
-        while !Task.isCancelled {
+        downloading: while !Task.isCancelled {
+            // A slot per batch, not per download: accounts take turns, so one account's first download
+            // never holds back another's new mail (which shows only once it's downloaded).
+            await limiter.acquire()
+            #if DEBUG
+                // A slow server's downloads, to see new mail show up only once it's downloaded.
+                if let seconds = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_SLOW_DOWNLOAD"] ?? "") {
+                    try? await Task.sleep(for: .seconds(seconds))
+                }
+            #endif
+            let outcome: Swift.Result<JMAPAccountSync.DownloadBatchResult, Error>
             do {
                 reportBusyMailboxes(accountId, (try? store.mailboxIdsOfPendingDownloads(accountId: accountId, limit: 25)) ?? [])
-                let result = try await next()
+                outcome = .success(try await next())
+            } catch {
+                outcome = .failure(error)
+            }
+            await limiter.release()
+            switch outcome {
+            case .success(let result):
                 reportDownloadProgress(accountId, active: true)
-                if result.processed == 0 { break }
+                if result.processed == 0 { break downloading }
                 backoff = 5
                 if !gmail { try? await Task.sleep(for: downloadPause) }
-            } catch {
+            case .failure(let error):
                 syncLog.error("Download failed for \(name, privacy: .public): \(ErrorText.technical(error), privacy: .public)")
-                if backoff > 600 { break }  // Give up until the next sync restarts it.
+                if backoff > 600 { break downloading }  // Give up until the next sync restarts it.
                 try? await Task.sleep(for: .seconds(backoff))
                 backoff *= 2
             }
         }
-        await limiter.release()
         // A cancelled one was taken off by whoever cancelled it, who may have started another since.
         guard !Task.isCancelled else { return }
         downloadTasks[accountId] = nil

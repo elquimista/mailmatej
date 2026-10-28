@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// URL patterns for remote content. Each is valid both as a WebKit content-rule `url-filter`
 /// (a limited regex dialect: no `|`, no groups) and as an `NSRegularExpression`, so the counts
@@ -206,15 +207,28 @@ public enum MessageHTML {
 
     // MARK: Regex helpers
 
+    /// Each pattern compiled once: `prepare` runs them per style attribute and per image, thousands of
+    /// times for a newsletter. (A fixed set of patterns, so it stays small.)
+    private static let compiled = Mutex<[String: NSRegularExpression]>([:])
+
+    private static func regex(_ pattern: String) -> NSRegularExpression {
+        compiled.withLock { cache in
+            if let regex = cache[pattern] { return regex }
+            let regex = try! NSRegularExpression(pattern: pattern)
+            cache[pattern] = regex
+            return regex
+        }
+    }
+
     private static func matches(_ pattern: String, in text: String) -> [[String]] {
-        let regex = try! NSRegularExpression(pattern: pattern)
+        let regex = regex(pattern)
         return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).map { m in
             (0..<m.numberOfRanges).map { i in Range(m.range(at: i), in: text).map { String(text[$0]) } ?? "" }
         }
     }
 
     private static func replace(_ pattern: String, in text: String, with transform: ([String]) -> String) -> String {
-        let regex = try! NSRegularExpression(pattern: pattern)
+        let regex = regex(pattern)
         var result = ""
         var last = text.startIndex
         for m in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {

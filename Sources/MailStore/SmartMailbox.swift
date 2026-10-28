@@ -1123,7 +1123,7 @@ extension MailStore {
         let valueSQL = """
             SELECT \(split.column) AS v, count(DISTINCT m.id) AS n, count(DISTINCT CASE WHEN NOT m.isSeen THEN m.id END) AS u
             FROM \(tables)
-            WHERE \(link) AND \(split.filter) AND \(filter) AND v IS NOT NULL\(keepsOther ? "" : " AND v <> ''")
+            WHERE \(link) AND \(split.filter) AND (\(filter)) AND \(Self.shown) AND v IS NOT NULL\(keepsOther ? "" : " AND v <> ''")
             GROUP BY lower(v) ORDER BY v COLLATE NOCASE LIMIT ?
             """
         let values: [(value: String, unread: Int)] = try dbPool.read { db in
@@ -1177,7 +1177,7 @@ extension MailStore {
         let (filter, args) = smartFilter(id: id)
         return try dbPool.read { db in
             try Row.fetchAll(
-                db, sql: "SELECT m.accountId AS a, sum(NOT m.isSeen) AS u FROM message m WHERE \(filter) GROUP BY m.accountId",
+                db, sql: "SELECT m.accountId AS a, sum(NOT m.isSeen) AS u FROM message m WHERE (\(filter)) AND \(Self.shown) GROUP BY m.accountId",
                 arguments: StatementArguments(args)
             ).map { ($0["a"], $0["u"]) }
         }

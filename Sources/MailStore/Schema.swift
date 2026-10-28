@@ -322,6 +322,11 @@ enum Schema {
             try db.execute(sql: "ALTER TABLE message ADD COLUMN sentZone INTEGER")
         }
 
+        m.registerMigration("v20-flagged-by-account") { db in
+            // The sidebar's flagged counts by account, on every refresh: without it, the whole table.
+            try db.execute(sql: "CREATE INDEX message_flagged_account ON message(accountId) WHERE isFlagged")
+        }
+
         return m
     }
 }
