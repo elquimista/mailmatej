@@ -398,7 +398,7 @@ public final class MailStore: Sendable {
                 try addFTS.execute(arguments: [id, m.subject, addressText, m.preview, m.preview])
                 // Its downloaded text stays searchable.
                 if !isNew, let body = try Row.fetchOne(storedBody, arguments: [id]) {
-                    try Self.indexText(db, messageId: id, text: body["text"], html: body["html"])
+                    try Self.indexText(db, messageId: id, text: Self.unpacked(body["text"]), html: Self.unpacked(body["html"]))
                 }
             }
         }
@@ -549,50 +549,6 @@ public final class MailStore: Sendable {
                 """, arguments: [accountId, list, accountId, list]))
     }
 
-    /// Removes, once for each account, the files of messages deleted before their files went with them
-    /// (see `deleteMessages`). Returns how many it removed.
-    public func removeUnusedFilesOnce() throws -> Int {
-        var removed = 0
-        for account in try accounts() where try syncState(accountId: account.id, type: Self.unusedFilesRemoved) == nil {
-            let count = try removeUnusedFiles(accountId: account.id)
-            try setSyncState(String(count), accountId: account.id, type: Self.unusedFilesRemoved)
-            removed += count
-        }
-        return removed
-    }
-
-    static let unusedFilesRemoved = "UnusedFilesRemoved"
-
-    /// Removes an account's raw copies and kept parts that none of its messages use; those changed
-    /// since `before` stay (one being written now may not be a message's yet). Returns how many.
-    func removeUnusedFiles(accountId: String, before cutoff: Date = Date(timeIntervalSinceNow: -3600)) throws -> Int {
-        let (raw, parts) = try dbPool.read { db in
-            let raw = try String.fetchAll(db, sql: "SELECT blobId FROM message WHERE accountId = ?", arguments: [accountId])
-            let parts = try String.fetchAll(
-                db, sql: "SELECT p.blobId FROM message_part p JOIN message m ON m.id = p.messageId WHERE m.accountId = ?",
-                arguments: [accountId])
-            return (Set(raw.map { blobs.url(accountId: accountId, blobId: $0).lastPathComponent }),
-                    Set(parts.map { blobs.partURL(accountId: accountId, blobId: $0).lastPathComponent }))
-        }
-        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
-        guard let files = FileManager.default.enumerator(
-            at: blobs.root.appendingPathComponent(accountId, isDirectory: true), includingPropertiesForKeys: keys)
-        else { return 0 }
-        var removed = 0
-        for case let file as URL in files {
-            guard let values = try? file.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
-                let changed = values.contentModificationDate, changed < cutoff
-            else { continue }
-            // Messages/<account>/<xx>/<blob>.eml, and Messages/<account>/parts/<xx>/<blob>.
-            let isPart = file.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "parts"
-            guard isPart || file.pathExtension == "eml" else { continue }
-            if !(isPart ? parts : raw).contains(file.lastPathComponent), (try? FileManager.default.removeItem(at: file)) != nil {
-                removed += 1
-            }
-        }
-        return removed
-    }
-
     // MARK: Full download
 
     public struct PendingDownload: Sendable {
@@ -675,7 +631,7 @@ public final class MailStore: Sendable {
         try dbPool.write { db in
             try db.execute(
                 sql: "INSERT OR REPLACE INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, ?, ?)",
-                arguments: [messageId, body.html, body.text, Date().timeIntervalSince1970])
+                arguments: [messageId, Self.packed(body.html), Self.packed(body.text), Date().timeIntervalSince1970])
             try db.execute(sql: "DELETE FROM message_part WHERE messageId = ?", arguments: [messageId])
             for (position, p) in parts.enumerated() {
                 try db.execute(
@@ -1647,8 +1603,39 @@ public final class MailStore: Sendable {
     public func body(messageId: Int64) throws -> MessageBody? {
         try dbPool.read { db in
             try Row.fetchOne(db, sql: "SELECT html, text FROM message_body WHERE messageId = ?", arguments: [messageId])
-                .map { MessageBody(html: $0["html"], text: $0["text"]) }
+                .map { MessageBody(html: Self.unpacked($0["html"]), text: Self.unpacked($0["text"])) }
         }
+    }
+
+    /// Bodies' text and HTML are kept compressed (LZFSE: HTML in about a sixth of the space, coming back
+    /// in hundredths of a millisecond); empty ones, and any stored before, as text.
+    static func packed(_ text: String?) -> DatabaseValue {
+        guard let text, !text.isEmpty, let packed = try? (Data(text.utf8) as NSData).compressed(using: .lzfse) else {
+            return text.databaseValue
+        }
+        return (packed as Data).databaseValue
+    }
+
+    static func unpacked(_ value: DatabaseValue) -> String? {
+        switch value.storage {
+        case .string(let text): text
+        case .blob(let packed): (try? (packed as NSData).decompressed(using: .lzfse)).map { String(decoding: $0 as Data, as: UTF8.self) }
+        default: nil
+        }
+    }
+
+    /// Gives the free space inside the database back to the disk (VACUUM) when there's a lot of it,
+    /// more than `minimum` bytes and a fifth of the file: after much mail went (an account removed, say).
+    /// Writes wait meanwhile (seconds, for a large store). Returns whether it did.
+    public func compactIfWorthwhile(minimum: Int = 100_000_000) throws -> Bool {
+        let (free, total) = try dbPool.read { db in
+            let page = try Int.fetchOne(db, sql: "PRAGMA page_size") ?? 4096
+            return (try (Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0) * page, try (Int.fetchOne(db, sql: "PRAGMA page_count") ?? 0) * page)
+        }
+        guard free > minimum, free * 5 > total else { return false }
+        try dbPool.vacuum()
+        try dbPool.writeWithoutTransaction { db in try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)") }  // the file shrinks
+        return true
     }
 
     // MARK: Correspondence
@@ -1843,7 +1830,6 @@ public final class MailStore: Sendable {
             note("\(table)_added", "INSERT", table, "NEW.messageId")
             note("\(table)_deleted", "DELETE", table, "OLD.messageId")
         }
-        note("message_body_updated", "UPDATE", "message_body", "NEW.messageId")  // its text is searched
         note("mailbox", "UPDATE OF name, role", "mailbox", "-1", when: " WHEN OLD.name IS NOT NEW.name OR OLD.role IS NOT NEW.role")
         try dbPool.writeWithoutTransaction { db in try db.execute(sql: sql) }
     }

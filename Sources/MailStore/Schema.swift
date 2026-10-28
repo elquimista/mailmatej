@@ -313,7 +313,8 @@ enum Schema {
                 END;
                 """)
             for row in try Row.fetchAll(db, sql: "SELECT messageId, html, text FROM message_body") {
-                try MailStore.indexText(db, messageId: row["messageId"], text: row["text"], html: row["html"])
+                try MailStore.indexText(
+                    db, messageId: row["messageId"], text: MailStore.unpacked(row["text"]), html: MailStore.unpacked(row["html"]))
             }
         }
 

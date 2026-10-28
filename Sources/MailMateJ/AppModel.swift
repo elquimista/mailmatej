@@ -87,7 +87,7 @@ final class AppModel {
         myAddresses = (try? store.myAddresses()) ?? []
         refreshKnownAddresses()
         let store = self.store
-        Task.detached(priority: .background) { _ = try? store.removeUnusedFilesOnce() }  // left by deleted mail
+        Task.detached(priority: .background) { _ = try? store.compactIfWorthwhile() }  // space deleted mail freed
         createDefaultSmartMailboxes()
         dockCounters = DockCounters(store: store)
         dockCounters?.update()

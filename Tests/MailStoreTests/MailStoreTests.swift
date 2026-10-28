@@ -965,6 +965,44 @@ import Testing
         try expectCounted { try store.deleteSmartMailbox(id: money) }
     }
 
+    @Test func bodiesAreKeptCompressed() throws {
+        try upsert([message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200), message("3", from: "c@x.com", at: 300)])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3"])
+        let html = "<p>" + String(repeating: "Your invoice is attached. ", count: 200) + "</p>"
+        try store.saveBody(messageId: ids["1"]!, MessageBody(html: html, text: "Your invoice"))
+        func kinds(_ id: Int64) throws -> [String] {
+            try store.dbPool.read { db in
+                try Row.fetchOne(db, sql: "SELECT typeof(html), typeof(text) FROM message_body WHERE messageId = ?", arguments: [id])
+                    .map { [$0[0], $0[1]] } ?? []
+            }
+        }
+        #expect(try kinds(ids["1"]!) == ["blob", "blob"])
+        #expect(try store.body(messageId: ids["1"]!).map { [$0.html, $0.text] } == [html, "Your invoice"])
+        #expect(try store.messageIDs(scope: .allMessages, search: .quickSearch("invoice")).contains(ids["1"]!))
+
+        // Stored before bodies were compressed (a store from a backup): read as they are.
+        try store.dbPool.write { db in
+            try db.execute(sql: "INSERT INTO message_body (messageId, html, text, fetchedAt) VALUES (?, ?, NULL, 0)",
+                           arguments: [ids["2"]!, html])
+        }
+        #expect(try store.body(messageId: ids["2"]!).map { [$0.html, $0.text] } == [html, nil])
+        try store.saveBody(messageId: ids["2"]!, MessageBody(html: "", text: nil))
+        #expect(try kinds(ids["2"]!) == ["text", "null"])  // nothing to compress
+
+        // The space that frees given back to the disk, when there's enough of it.
+        try store.saveBody(messageId: ids["3"]!, MessageBody(html: nil, text: (0..<200_000).map { "x\($0)" }.joined()))
+        try store.deleteMessages(accountId: "acc", remoteIds: ["3"])
+        let file = store.directory.appendingPathComponent("mail.sqlite")
+        func size() throws -> Int { try FileManager.default.attributesOfItem(atPath: file.path)[.size] as! Int }
+        try store.dbPool.writeWithoutTransaction { db in try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)") }
+        let before = try size()
+        #expect(try !store.compactIfWorthwhile())  // not 100 MB of it
+        #expect(try store.compactIfWorthwhile(minimum: 0))
+        #expect(try size() < before)
+        #expect(try !store.compactIfWorthwhile(minimum: 0))  // none left
+        #expect(try store.body(messageId: ids["1"]!)?.html == html)
+    }
+
     @Test func deletedMessagesTakeTheirFilesAlong() throws {
         var shared = message("3", from: "c@x.com", at: 300)
         shared.blobId = "b1"  // the server shares one blob between two messages
@@ -981,21 +1019,6 @@ import Testing
         #expect(!exists(store.blobs.url(accountId: "acc", blobId: "b2")))
         #expect(!exists(store.blobs.partURL(accountId: "acc", blobId: "p2")))
         #expect(exists(store.blobs.url(accountId: "acc", blobId: "b1")))  // message 3 still has it
-
-        // Files a deletion left before they went along: removed once, unless written lately.
-        for blob in ["old", "new"] { try store.blobs.write(Data("raw".utf8), accountId: "acc", blobId: blob) }
-        try store.blobs.writePart(Data("png".utf8), accountId: "acc", blobId: "oldpart")
-        for url in [store.blobs.url(accountId: "acc", blobId: "old"), store.blobs.partURL(accountId: "acc", blobId: "oldpart"),
-                    store.blobs.url(accountId: "acc", blobId: "b1")] {
-            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -7200)], ofItemAtPath: url.path)
-        }
-        #expect(try store.removeUnusedFilesOnce() == 2)
-        #expect(!exists(store.blobs.url(accountId: "acc", blobId: "old")))
-        #expect(!exists(store.blobs.partURL(accountId: "acc", blobId: "oldpart")))
-        #expect(exists(store.blobs.url(accountId: "acc", blobId: "new")) && exists(store.blobs.url(accountId: "acc", blobId: "b1")))
-        try FileManager.default.setAttributes(
-            [.modificationDate: Date(timeIntervalSinceNow: -7200)], ofItemAtPath: store.blobs.url(accountId: "acc", blobId: "new").path)
-        #expect(try store.removeUnusedFilesOnce() == 0)  // once
     }
 
     @Test func backfillChecksUseTheirIndexes() throws {
