@@ -329,7 +329,7 @@ public final class MailStore: Sendable {
             let addAddress = try db.cachedStatement(
                 sql: "INSERT OR REPLACE INTO address (messageId, role, position, name, email) VALUES (?, ?, ?, ?, ?)")
             let addFTS = try db.cachedStatement(
-                sql: "INSERT INTO message_fts (rowid, subject, addresses, body, unquoted) VALUES (?, ?, ?, ?, ?)")
+                sql: "INSERT INTO message_fts (rowid, subject, addresses, unquoted) VALUES (?, ?, ?, ?)")
             let storedBody = try db.cachedStatement(sql: "SELECT html, text FROM message_body WHERE messageId = ?")
 
             for m in messages {
@@ -395,10 +395,12 @@ public final class MailStore: Sendable {
                     .joined(separator: " ")
                 if !isNew { try clearFTS.execute(arguments: [id]) }
                 // Until its body is here, the preview stands for its text (it's the start: the sender's own).
-                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview, m.preview])
+                try addFTS.execute(arguments: [id, m.subject, addressText, m.preview])
                 // Its downloaded text stays searchable.
                 if !isNew, let body = try Row.fetchOne(storedBody, arguments: [id]) {
-                    try Self.indexText(db, messageId: id, text: Self.unpacked(body["text"]), html: Self.unpacked(body["html"]))
+                    try Self.indexText(
+                        db, messageId: id, text: Self.unpacked(body["text"]), html: Self.unpacked(body["html"]),
+                        headers: (m.subject, addressText))
                 }
             }
         }
@@ -645,15 +647,26 @@ public final class MailStore: Sendable {
         }
     }
 
-    /// Puts a message's text in the search index: all of it, and split into what the sender wrote and
-    /// what it quotes (see `QuotedText`), each at most 100,000 characters.
-    static func indexText(_ db: Database, messageId: Int64, text: String?, html: String?) throws {
+    /// Puts a message's text in the search index, split into what the sender wrote and what it quotes
+    /// (see `QuotedText`), each at most 100,000 characters. The index keeps no copy to update, so the
+    /// message's row is written whole: with its subject and addresses (`headers`, else as stored).
+    static func indexText(
+        _ db: Database, messageId: Int64, text: String?, html: String?, headers: (subject: String, addresses: String)? = nil
+    ) throws {
         let split = QuotedText.split(text: text, html: html)
         guard !split.all.isEmpty else { return }
+        var headers = headers
+        if headers == nil, let subject = try String.fetchOne(db, sql: "SELECT subject FROM message WHERE id = ?", arguments: [messageId]) {
+            let addresses = try Row.fetchAll(
+                db, sql: "SELECT name, email FROM address WHERE messageId = ? ORDER BY role, position", arguments: [messageId]
+            ).map { [$0["name"] as String?, $0["email"] as String?].compactMap { $0 }.joined(separator: " ") }
+            headers = (subject, addresses.joined(separator: " "))
+        }
+        guard let headers else { return }  // a message gone meanwhile
         try db.execute(
-            sql: "UPDATE message_fts SET body = ?, unquoted = ?, quoted = ? WHERE rowid = ?",
-            arguments: [String(split.all.prefix(100_000)), String(split.unquoted.prefix(100_000)),
-                        String(split.quoted.prefix(100_000)), messageId])
+            sql: "INSERT OR REPLACE INTO message_fts (rowid, subject, addresses, unquoted, quoted) VALUES (?, ?, ?, ?, ?)",
+            arguments: [messageId, headers.subject, headers.addresses, String(split.unquoted.prefix(100_000)),
+                        String(split.quoted.prefix(100_000))])
     }
 
     // MARK: Local edits (applied right away; the server copy follows)

@@ -965,6 +965,25 @@ import Testing
         try expectCounted { try store.deleteSmartMailbox(id: money) }
     }
 
+    @Test func searchFollowsChangesWithoutAStoredCopy() throws {
+        try upsert([message("1", from: "ann@x.com", at: 100, subject: "Quarterly figures")])
+        let id = try #require(try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1"])["1"])
+        try store.saveBody(messageId: id, MessageBody(html: nil, text: "Numbers attached.\n> earlier draft"))
+        func found(_ field: SmartField, _ text: String) throws -> Bool {
+            try store.messageIDs(scope: .allMessages, search: .rule(field, .contains, text)).contains(id)
+        }
+        #expect(try found(.body, "attached") && found(.body, "draft") && found(.quoted, "draft") && !found(.unquoted, "draft"))
+        #expect(try found(.headersOrUnquoted, "quarterly") && found(.headersOrUnquoted, "ann"))
+
+        // A new subject: the old one isn't found, the text still is.
+        try upsert([message("1", from: "ann@x.com", at: 100, subject: "Annual report")])
+        #expect(try !found(.headersOrUnquoted, "quarterly") && found(.headersOrUnquoted, "annual"))
+        #expect(try found(.body, "attached") && found(.quoted, "draft") && found(.headersOrText, "ann"))
+
+        try store.deleteMessages(accountId: "acc", remoteIds: ["1"])
+        #expect(try store.dbPool.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'annual'") } == 0)
+    }
+
     @Test func bodiesAreKeptCompressed() throws {
         try upsert([message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200), message("3", from: "c@x.com", at: 300)])
         let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3"])

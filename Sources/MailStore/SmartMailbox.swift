@@ -870,8 +870,9 @@ extension MailStore {
             switch field {
             case .body, .unquoted, .quoted, .headersOrUnquoted, .headersOrText:
                 guard let query = Self.ftsQuery(value) else { return ("1", []) }
-                // The index's columns each field searches (all of them for Common Headers or Text).
-                let columns = [SmartField.body: "body", .unquoted: "unquoted", .quoted: "quoted",
+                // The index's columns each field searches (all of them for Common Headers or Text; the
+                // whole text is its unquoted and quoted parts).
+                let columns = [SmartField.body: "{unquoted quoted}", .unquoted: "unquoted", .quoted: "quoted",
                                .headersOrUnquoted: "{subject addresses unquoted}"][field]
                 return ("m.id \(not)IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?)",
                         [columns.map { "\($0) : (\(query))" } ?? query])

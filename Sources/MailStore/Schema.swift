@@ -338,6 +338,26 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v22-slim-search-index") { db in
+            // The search index without its own copy of the text (nothing reads it back: searches only
+            // find rows), nor the whole text again beside its unquoted and quoted parts (searched together
+            // they find the same). Built from the index as it is, so nothing is read or split again.
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE message_fts_new USING fts5(
+                    subject, addresses, unquoted, quoted,
+                    content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 2'
+                );
+                INSERT INTO message_fts_new (rowid, subject, addresses, unquoted, quoted)
+                    SELECT rowid, subject, addresses, unquoted, quoted FROM message_fts;
+                DROP TRIGGER message_fts_delete;
+                DROP TABLE message_fts;
+                ALTER TABLE message_fts_new RENAME TO message_fts;
+                CREATE TRIGGER message_fts_delete AFTER DELETE ON message BEGIN
+                    DELETE FROM message_fts WHERE rowid = old.id;
+                END;
+                """)
+        }
+
         return m
     }
 }
