@@ -724,13 +724,15 @@ public actor SyncCoordinator {
 
     /// Keeps a push connection open: WebSocket first (proxies don't buffer it), EventSource as the
     /// fallback. A connection that delivers nothing at all — not even the server's pings — counts as
-    /// broken; while push is broken the account is checked for new mail every 20 s instead.
+    /// broken; while push is broken the account is checked for new mail every 20 s instead. Once push
+    /// connects again after a drop, the account syncs at once.
     private func startPush(_ accountId: String, engine: JMAPAccountSync) {
         pushTasks[accountId]?.cancel()
         pushTasks[accountId] = Task { [weak self] in
             let name = engine.account.name
             var transport: JMAPAccountSync.PushTransport = await engine.supportsWebSocketPush() ? .webSocket : .eventSource
             var backoff: Double = 5
+            var reconnecting = false
             while !Task.isCancelled {
                 let started = ContinuousClock.now
                 var signals = 0
@@ -738,6 +740,10 @@ public actor SyncCoordinator {
                 do {
                     let stream = try await engine.pushSignals(transport)
                     syncLog.notice("Push connecting over \(transport.rawValue, privacy: .public) for \(name, privacy: .public)")
+                    // Connected again after a drop, so the server is back (restarted, say): the sync that
+                    // failed while it was away runs again now, clearing its warning and catching up on what
+                    // changed, rather than waiting for new mail or the next check (the first ping is 30 s off).
+                    if reconnecting { await self?.requestSync(accountId) }
                     for try await signal in stream {
                         signals += 1
                         if signals == 1 {
@@ -750,6 +756,7 @@ public actor SyncCoordinator {
                     failure = ErrorText.technical(error)
                 }
                 guard !Task.isCancelled else { return }
+                reconnecting = true
                 let seconds = (ContinuousClock.now - started).components.seconds
                 syncLog.notice("Push over \(transport.rawValue, privacy: .public) ended for \(name, privacy: .public) after \(seconds)s with \(signals) signals\(failure.map { ": " + $0 } ?? "", privacy: .public)")
                 if signals == 0 {
