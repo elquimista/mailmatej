@@ -165,8 +165,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             v.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(v)
         }
-        progressBar.isHidden = true
-        progressHeight = progressBar.heightAnchor.constraint(equalToConstant: 0)
+        progressBar.isHidden = !showsStatus
+        progressHeight = progressBar.heightAnchor.constraint(equalToConstant: showsStatus ? SyncProgressBar.height : 0)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -180,17 +180,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         view = container
     }
 
-    /// Sync and download progress, at the bottom while there is any (the main window's sidebar).
+    /// Sync and download progress at the bottom (the main window's sidebar), there all the time, empty
+    /// while nothing is under way, as MailMate's storage bar is: the rows above never move or hide for it.
     private let progressBar = SyncProgressBar()
     private var progressHeight: NSLayoutConstraint!
 
-    /// Shows the progress bar (`fraction` done) with the first of `texts` that fits across it, or hides it.
+    /// Shows `fraction` done on the progress bar, with the first of `texts` that fits across it, or empties it.
     func showProgress(_ shown: Bool, fraction: Double = 0, texts: [String] = []) {
+        guard shown else { return progressBar.empty() }
         progressBar.fraction = fraction
         progressBar.texts = texts
-        guard progressBar.isHidden == shown else { return }
-        progressBar.isHidden = !shown
-        progressHeight.constant = shown ? SyncProgressBar.height : 0
     }
 
     var selectedNode: SidebarNode? { outline.item(atRow: outline.selectedRow) as? SidebarNode }
@@ -719,6 +718,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             clip.scroll(to: clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: points)).origin)
             scrollView.reflectScrolledClipView(clip)
             NSLog("MMJ sidebar scrolled to \(clip.bounds.minY), top row \(firstVisibleRow()?.key ?? "-")")
+        }
+
+        /// Selects the last row as a click would (without scrolling to it).
+        func debugSelectLast() {
+            outline.selectRowIndexes([outline.numberOfRows - 1], byExtendingSelection: false)
+            debugLogLastRow("selected")
+        }
+
+        /// Shows `fraction` on the progress bar (nil: empties it).
+        func debugProgress(_ fraction: Double?) {
+            showProgress(fraction != nil, fraction: fraction ?? 0, texts: ["Downloading"])
+            debugLogLastRow(fraction == nil ? "bar emptied" : "bar filled")
+        }
+
+        private func debugLogLastRow(_ step: String) {
+            view.layoutSubtreeIfNeeded()
+            let visible = outline.visibleRect
+            let last = outline.rect(ofRow: outline.numberOfRows - 1)
+            NSLog("MMJ sidebar \(step): last row \(last.minY)-\(last.maxY), rows in view to \(visible.maxY), scrolled \(visible.minY): \(last.maxY <= visible.maxY ? "in view" : "cut off")")
         }
 
         func debugDuplicate(key: String) {

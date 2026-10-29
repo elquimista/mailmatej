@@ -946,6 +946,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSnapshotWeb(to path: String) async { await messageView.debugSnapshotWeb(to: path) }
 
         func debugScrollSidebar(by points: CGFloat) { sidebar.debugScroll(by: points) }
+        func debugSelectLastInSidebar() { sidebar.debugSelectLast() }
+        func debugSidebarProgress(_ fraction: Double?) { sidebar.debugProgress(fraction) }
 
         func debugScrollList(by points: CGFloat) {
             guard let scrollView = list.tableView.enclosingScrollView else { return }

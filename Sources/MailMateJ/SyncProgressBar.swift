@@ -1,11 +1,12 @@
 import AppKit
 
-/// The sidebar's bottom strip while the selected mailbox downloads, in the place, size and green of
-/// MailMate's storage bar (measured at 1x): a 23 pt strip from a 1 pt line to the window's edge (which
-/// covers its last point), its bar 16 pt tall, 3 pt below the line, 2 pt above the edge and 8 pt in from
-/// the left, over a grey track; its corners rounded (2.5 pt), the fill's leading end too. What's under way is written across the bar in 10 pt digits that don't jitter,
-/// dark over the green and in the text color over the track, so it reads on both; in a narrow sidebar
-/// a shorter wording is used. The fill eases to each new amount.
+/// The sidebar's bottom strip, filling while the selected mailbox downloads, in the place, size and
+/// green of MailMate's storage bar (measured at 1x): a 23 pt strip from a 1 pt line to the window's edge
+/// (which covers its last point), its bar 16 pt tall, 3 pt below the line, 2 pt above the edge and 8 pt
+/// in from the left, over a grey track; its corners rounded (2.5 pt), the fill's leading end too. What's
+/// under way is written across the bar in 10 pt digits that don't jitter, dark over the green and in the
+/// text color over the track, so it reads on both; in a narrow sidebar a shorter wording is used. The
+/// fill eases to each new amount.
 final class SyncProgressBar: NSView {
     static let height: CGFloat = 23
     private static let radius: CGFloat = 2.5
@@ -28,6 +29,15 @@ final class SyncProgressBar: NSView {
     /// The fraction drawn: eases toward `fraction`.
     private var shown = 0.0
     private var timer: Timer?
+
+    /// Nothing under way: the track alone, at once (not easing back from the last amount).
+    func empty() {
+        guard fraction != 0 || shown != 0 || !texts.isEmpty else { return }
+        shown = 0
+        fraction = 0
+        texts = []
+        needsDisplay = true
+    }
 
     private static let track = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua

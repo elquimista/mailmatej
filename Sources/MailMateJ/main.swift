@@ -561,7 +561,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // MMJ_SNAPSHOT_SCROLL=<points>[,<points>…]: scroll the list by each in turn, as the wheel would
                 // (h<points>: the window that much taller, or shorter, at its bottom edge, as dragging it would;
-                // s<points>: the sidebar scrolled instead).
+                // s<points>: the sidebar scrolled instead; last: the sidebar's last row clicked; p<fraction>: the
+                // progress bar filled that much, p alone emptied).
                 for step in (ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL"] ?? "").split(separator: ",") {
                     if step.hasPrefix("h"), let points = Double(step.dropFirst()), let window = windowController?.window {
                         var frame = window.frame
@@ -570,6 +571,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         window.setFrame(frame, display: true)
                     } else if step.hasPrefix("s"), let points = Double(step.dropFirst()) {
                         windowController?.debugScrollSidebar(by: points)
+                    } else if step == "last" {
+                        windowController?.debugSelectLastInSidebar()
+                    } else if step.hasPrefix("p") {
+                        windowController?.debugSidebarProgress(Double(step.dropFirst()))
                     } else if let points = Double(step) {
                         windowController?.debugScrollList(by: points)
                     }
