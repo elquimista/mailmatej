@@ -1896,13 +1896,15 @@ public final class MailStore: Sendable {
     /// Starts noting which messages each write changes, for `takeChangedMessages` (`SmartCounter`
     /// keeps its counts from them): temporary triggers on the connection every write goes through, on
     /// everything a list's conditions can test (a condition on anything else needs one here too). A mailbox
-    /// renamed or given another role is noted as -1.
+    /// renamed or given another role is noted as -1. A message already noted is looked for rather than
+    /// inserted OR IGNORE: SQLite applies the conflict handling of the statement that fires a trigger to
+    /// the trigger's own, so an upsert changing a message noted since the last take failed.
     func noteChangedMessages() throws {
         var sql = "CREATE TEMP TABLE IF NOT EXISTS changed_message (id INTEGER PRIMARY KEY);"
         func note(_ name: String, _ event: String, _ table: String, _ id: String, when: String = "") {
             sql += """
                 CREATE TEMP TRIGGER IF NOT EXISTS changed_message_\(name) AFTER \(event) ON main.\(table)\(when)
-                BEGIN INSERT OR IGNORE INTO changed_message VALUES (\(id)); END;
+                BEGIN INSERT INTO changed_message SELECT \(id) WHERE NOT EXISTS (SELECT 1 FROM changed_message WHERE id = \(id)); END;
                 """
         }
         note("added", "INSERT", "message", "NEW.id")

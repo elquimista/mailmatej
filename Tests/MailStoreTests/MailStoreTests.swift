@@ -944,6 +944,12 @@ import Testing
         try expectCounted { try store.setKeyword("$flagged", true, messageIds: [ids["2"]!, ids["4"]!]) }
         try expectCounted { try store.moveMessages([ids["2"]!, ids["3"]!], toMailboxId: boxes["in"]!) }
         try expectCounted { try store.setKeyword("$label1", true, messageIds: [ids["4"]!]) }
+        // A message changed here and then by the server before the counts are taken (the server's change
+        // is an upsert, whose own conflict handling SQLite applies to the triggers it fires).
+        try expectCounted {
+            try store.setKeyword("$seen", false, messageIds: [ids["4"]!])
+            try store.upsertMessages(accountId: "acc", [message("4", from: "d@x.com", at: 400, keywords: ["$seen", "$flagged"])])
+        }
         // New mail counts once it's downloaded; a text found in its body once that's here.
         try expectCounted { try store.upsertMessages(accountId: "acc", [message("7", from: "g@vendor.com", at: 700)]) }
         ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3", "4", "5", "7"])
