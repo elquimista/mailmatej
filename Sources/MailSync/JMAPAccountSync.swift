@@ -545,30 +545,53 @@ public actor JMAPAccountSync {
             return
         }
         let accountId = try remoteAccountId(try await client.currentSession())
-        var request = JMAPRequest()
-        let set = request.call("Email/set", [
-            "accountId": .string(accountId),
-            "update": .object(Dictionary(uniqueKeysWithValues: remoteIds.map { ($0, JSONValue.object(patch)) })),
-        ])
-        let failed: [String]
-        let gone: [String]
-        let reason: String?
-        do {
-            let notUpdated = try await client.send(request).arguments(set)["notUpdated"]?.objectValue ?? [:]
-            // A message already gone (deleted elsewhere) has nothing left to change: it just leaves here.
-            gone = notUpdated.filter { $0.value["type"]?.stringValue == "notFound" }.map(\.key)
-            failed = notUpdated.keys.filter { !gone.contains($0) }
-            reason = failed.first.flatMap { notUpdated[$0] }.map(Self.setErrorText)
-        } catch {
-            // Unreachable: the change is queued (see SyncCoordinator), so the local copy stays as it is.
-            if !ErrorText.isUnreachable(error) { try? await refetch(remoteIds, accountId) }
-            throw error
+        var pending = remoteIds
+        var gone: [String] = []
+        var refused: [String: JSONValue] = [:]
+        for attempt in 1...Self.attempts {
+            var request = JMAPRequest()
+            let set = request.call("Email/set", [
+                "accountId": .string(accountId),
+                "update": .object(Dictionary(uniqueKeysWithValues: pending.map { ($0, JSONValue.object(patch)) })),
+            ])
+            let notUpdated: [String: JSONValue]
+            do {
+                notUpdated = try await client.send(request).arguments(set)["notUpdated"]?.objectValue ?? [:]
+            } catch {
+                // Unreachable: the change is queued (see SyncCoordinator), so the local copy stays as it is.
+                if !ErrorText.isUnreachable(error) { try? await refetch(remoteIds, accountId) }
+                throw error
+            }
+            pending = []
+            for (id, error) in notUpdated {
+                // A message already gone (deleted elsewhere) has nothing left to change: it just leaves here.
+                if error["type"]?.stringValue == "notFound" {
+                    gone.append(id)
+                } else if attempt < Self.attempts, Self.isConflict(error) {
+                    pending.append(id)
+                } else {
+                    refused[id] = error
+                }
+            }
+            if pending.isEmpty { break }
+            try? await Task.sleep(for: .milliseconds(200 * attempt))
         }
         if !gone.isEmpty { try? store.deleteMessages(accountId: account.id, remoteIds: gone) }
-        guard failed.isEmpty else {
-            try? await refetch(failed, accountId)
-            throw ChangeRefused(count: failed.count, deleting: false, reason: reason)
+        guard refused.isEmpty else {
+            try? await refetch(Array(refused.keys), accountId)
+            throw ChangeRefused(count: refused.count, deleting: false, reason: refused.values.first.map(Self.setErrorText))
         }
+    }
+
+    /// Tries for a change refused for a conflict (see `isConflict`): the first, then after 0.2, 0.4 and 0.6 s.
+    private static let attempts = 4
+
+    /// Stalwart refuses a change to a message that something else changes at the same moment (another
+    /// app, or its own processing) with "forbidden: Another process modified this message, please try
+    /// again." Made again a moment later, it goes through.
+    private static func isConflict(_ error: JSONValue) -> Bool {
+        error["type"]?.stringValue == "forbidden"
+            && error["description"]?.stringValue?.localizedCaseInsensitiveContains("try again") == true
     }
 
     /// Creates a top-level mailbox (Mailbox/set), with `role` if the server accepts it, and syncs the
@@ -632,15 +655,21 @@ public actor JMAPAccountSync {
         var refused: [String: JSONValue] = [:]
         // In batches, within what servers take in one call (an emptied Deleted Messages can hold thousands).
         for start in stride(from: 0, to: remoteIds.count, by: 500) {
-            let batch = Array(remoteIds[start..<min(start + 500, remoteIds.count)])
-            var request = JMAPRequest()
-            let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(batch)])
-            // Already gone (deleted elsewhere, or by an earlier try whose reply was lost) counts as done.
-            for (id, error) in try await client.send(request).arguments(set)["notDestroyed"]?.objectValue ?? [:]
-            where error["type"]?.stringValue != "notFound" {
-                refused[id] = error
+            var batch = Array(remoteIds[start..<min(start + 500, remoteIds.count)])
+            for attempt in 1...Self.attempts {
+                var request = JMAPRequest()
+                let set = request.call("Email/set", ["accountId": .string(accountId), "destroy": .strings(batch)])
+                var again: Set<String> = []
+                // Already gone (deleted elsewhere, or by an earlier try whose reply was lost) counts as done.
+                for (id, error) in try await client.send(request).arguments(set)["notDestroyed"]?.objectValue ?? [:]
+                where error["type"]?.stringValue != "notFound" {
+                    if attempt < Self.attempts, Self.isConflict(error) { again.insert(id) } else { refused[id] = error }
+                }
+                try store.deleteMessages(accountId: account.id, remoteIds: batch.filter { refused[$0] == nil && !again.contains($0) })
+                if again.isEmpty { break }
+                batch = Array(again)
+                try? await Task.sleep(for: .milliseconds(200 * attempt))
             }
-            try store.deleteMessages(accountId: account.id, remoteIds: batch.filter { refused[$0] == nil })
         }
         if !refused.isEmpty {
             throw ChangeRefused(count: refused.count, deleting: true, reason: refused.values.first.map(Self.setErrorText))

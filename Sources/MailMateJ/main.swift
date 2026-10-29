@@ -696,15 +696,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 if let actions = ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS"] {
-                    // Comma-separated toolbar actions, 3 s apart; with MMJ_DEBUG_BADGES, the badges 80 ms after each.
+                    // Comma-separated toolbar actions, 3 s apart (MMJ_DEBUG_ACTIONS_GAP=<seconds> otherwise); with
+                    // MMJ_DEBUG_BADGES, the badges 80 ms after each.
                     let badges = ProcessInfo.processInfo.environment["MMJ_DEBUG_BADGES"] != nil
+                    let gap = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_ACTIONS_GAP"] ?? "") ?? 3
                     for name in actions.split(separator: ",") {
                         windowController?.debugPerform(String(name))
                         if badges {
                             try? await Task.sleep(for: .milliseconds(80))
                             NSLog("MMJ badges 80 ms after \(name): \(windowController?.debugSidebarBadges ?? "")")
                         }
-                        try? await Task.sleep(for: .seconds(3))
+                        try? await Task.sleep(for: .seconds(gap))
                         NSLog("MMJ after \(name): selection \(windowController?.debugSelection ?? [])")
                         if badges { NSLog("MMJ badges settled after \(name): \(windowController?.debugSidebarBadges ?? "")") }
                     }

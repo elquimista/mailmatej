@@ -623,6 +623,8 @@ final class AppModel {
     }
 
     private func report(_ error: Error, count: Int) {
+        Logger(subsystem: "app.mailmatej", category: "changes")
+            .error("Couldn't change \(count) messages: \(String(describing: error), privacy: .public)")
         let alert = NSAlert()
         alert.messageText = "Couldn’t change \(count == 1 ? "the message" : "\(count) messages") on the server."
         alert.informativeText = Self.describe(error)

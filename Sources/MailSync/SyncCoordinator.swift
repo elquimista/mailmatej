@@ -94,6 +94,9 @@ public actor SyncCoordinator {
     /// Gmail full syncs (every message fetched whole: hours for an old account) take their rounds a few
     /// accounts at a time, apart from the slots other syncs use.
     private let gmailFullSyncLimiter = AsyncLimiter(limit: 3)
+    /// Each account's changes go to its server one at a time, in the order they were made: two at once
+    /// to the same message (read, then archived straight away) can be refused, or land the wrong way round.
+    private var changeTurns: [String: AsyncLimiter] = [:]
     private var pollTask: Task<Void, Never>?
 
     public init(
@@ -395,9 +398,29 @@ public actor SyncCoordinator {
 
     // MARK: Change queue
 
-    /// Makes a change on the server now, unless older changes are still queued (it waits behind them, so
-    /// changes reach the server in the order they were made) or the server can't be reached.
+    /// Runs `work` once the account's changes before it are done (see `changeTurns`).
+    private func inTurn<T>(_ accountId: String, _ work: () async throws -> T) async throws -> T {
+        let turn = changeTurns[accountId] ?? AsyncLimiter(limit: 1)
+        changeTurns[accountId] = turn
+        await turn.acquire()
+        do {
+            let result = try await work()
+            await turn.release()
+            return result
+        } catch {
+            await turn.release()
+            throw error
+        }
+    }
+
+    /// Makes a change on the server once the account's earlier ones are done, unless older changes are
+    /// still queued (it waits behind them, so changes reach the server in the order they were made) or
+    /// the server can't be reached.
     private func makeOrQueue(_ change: QueuedChange, accountId: String) async throws {
+        try await inTurn(accountId) { try await makeOrQueueInTurn(change, accountId: accountId) }
+    }
+
+    private func makeOrQueueInTurn(_ change: QueuedChange, accountId: String) async throws {
         if try statuses[accountId]?.isOffline == true || store.queuedChangeCount(accountId: accountId) > 0 {
             return try enqueue(change, accountId: accountId)
         }
@@ -453,6 +476,10 @@ public actor SyncCoordinator {
     /// be reached for (the sync waits too, so it can't bring back the server's older state over local
     /// changes). One the server refuses is dropped, its messages back to the server's state, and reported.
     private func flushQueue(_ accountId: String) async throws {
+        try await inTurn(accountId) { try await flushQueueInTurn(accountId) }
+    }
+
+    private func flushQueueInTurn(_ accountId: String) async throws {
         let queued = try store.queuedChanges(accountId: accountId)
         guard !queued.isEmpty else { return }
         defer { reportQueue(accountId) }
