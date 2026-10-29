@@ -82,6 +82,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                // MMJ_DEBUG_ABOUT=<png>: About MailMateJ opened and its panel captured.
+                if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_ABOUT"] {
+                    (NSApp.delegate as? AppDelegate)?.showAbout(nil)
+                    try? await Task.sleep(for: .seconds(1))
+                    let mainWindow = windowController?.window
+                    if let panel = NSApp.windows.first(where: { $0.isVisible && $0 !== mainWindow && $0.title.isEmpty && $0.frame.width < 600 }) {
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(panel.windowNumber)", path]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                        NSLog("MMJ about: \(NSStringFromRect(panel.frame))")
+                        // Its credits scrolled to the end, captured to <png>-end.png.
+                        func textView(in view: NSView) -> NSTextView? {
+                            view as? NSTextView ?? view.subviews.lazy.compactMap(textView(in:)).first
+                        }
+                        if let credits = panel.contentView.flatMap(textView(in:)) {
+                            credits.scrollToEndOfDocument(nil)
+                            try? await Task.sleep(for: .milliseconds(400))
+                            let end = Process()
+                            end.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            end.arguments = ["-x", "-o", "-l\(panel.windowNumber)", path.replacingOccurrences(of: ".png", with: "-end.png")]
+                            try? end.run()
+                            end.waitUntilExit()
+                        }
+                    } else {
+                        NSLog("MMJ about: no panel")
+                    }
+                }
                 // MMJ_DEBUG_INACTIVE=<png>: once the app is brought to the front (open it from a shell) and then
                 // leaves it, the main window captured active, inactive, and after a sidebar refresh (as a sync
                 // tick does), with the sidebar names' colors logged.
@@ -1048,6 +1077,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show()
     }
 
+    /// About MailMateJ: AppKit's panel as MailMate's, its version naming the build and the commit it's
+    /// from, then the credits (see `aboutCredits`) and the copyright (Info.plist's).
+    @objc func showAbout(_ sender: Any?) {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let build = [info["CFBundleVersion"] as? String, info["MMJCommit"] as? String].compactMap { $0 }.joined(separator: " · ")
+        NSApp.orderFrontStandardAboutPanel(options: [.version: build, .credits: Self.aboutCredits()])
+    }
+
+    /// As MailMate's credits (measured at 1x): centered, SF 11, a heading's line medium, each line 27 pt
+    /// under the last, "—" between parts; the libraries with links to them and to their notices.
+    private static func aboutCredits() -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacing = 27 - ceil(NSFont.systemFont(ofSize: 11).ascender - NSFont.systemFont(ofSize: 11).descender)
+        let credits = NSMutableAttributedString()
+        // A line's parts, " · " between them (`joined`: run together, as one phrase).
+        func line(_ parts: [(text: String, link: URL?)], heading: Bool = false, joined: Bool = false) {
+            for (index, part) in parts.enumerated() {
+                if index > 0, !joined { credits.append(NSAttributedString(string: " · ")) }
+                var attributes: [NSAttributedString.Key: Any] = [:]
+                if let link = part.link { attributes[.link] = link }
+                if heading { attributes[.font] = NSFont.systemFont(ofSize: 11, weight: .medium) }
+                credits.append(NSAttributedString(string: part.text, attributes: attributes))
+            }
+            credits.append(NSAttributedString(string: "\n"))
+        }
+        func license(_ file: String) -> URL? { Bundle.main.url(forResource: file, withExtension: "txt", subdirectory: "Licenses") }
+        line([("A MailMate-style mail client for JMAP and Gmail", nil)])
+        line([("—", nil)])
+        line([("Programmed by", nil)], heading: true)
+        line([("Felix-Andre Lee", nil)])
+        line([("with ", nil), ("Claude Code", URL(string: "https://claude.com/claude-code")), (" by Anthropic", nil)], joined: true)
+        line([("—", nil)])
+        line([("Design after MailMate by", nil)], heading: true)
+        line([("Freron Software", URL(string: "https://freron.com"))])
+        line([("Not affiliated with Freron Software", nil)])
+        line([("—", nil)])
+        line([("Open-source software", nil)], heading: true)
+        line([("GRDB.swift", URL(string: "https://github.com/groue/GRDB.swift")), ("License", license("GRDB.swift-LICENSE"))])
+        line([("swift-markdown", URL(string: "https://github.com/swiftlang/swift-markdown")),
+              ("License", license("swift-markdown-LICENSE")), ("Notice", license("swift-markdown-NOTICE"))])
+        line([("swift-cmark", URL(string: "https://github.com/swiftlang/swift-cmark")), ("License", license("swift-cmark-COPYING"))])
+        credits.deleteCharacters(in: NSRange(location: credits.length - 1, length: 1))  // no last line break
+        let all = NSRange(location: 0, length: credits.length)
+        credits.addAttribute(.paragraphStyle, value: paragraph, range: all)
+        credits.enumerateAttribute(.font, in: all) { font, range, _ in
+            if font == nil { credits.addAttribute(.font, value: NSFont.systemFont(ofSize: 11), range: range) }
+        }
+        credits.addAttribute(.foregroundColor, value: NSColor.labelColor, range: all)
+        return credits
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// Unsent messages are saved as drafts first. Then, with changes still on their way to the servers,
@@ -1089,7 +1170,7 @@ enum MainMenu {
         let main = NSMenu()
 
         let app = submenu(main, appName)
-        app.addItem(withTitle: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "About \(appName)", action: #selector(AppDelegate.showAbout(_:)), keyEquivalent: "")
         app.addItem(.separator())
         app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
         app.addItem(.separator())

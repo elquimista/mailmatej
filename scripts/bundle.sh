@@ -34,6 +34,12 @@ if [ -n "$VERSION" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" "$APP/Contents/Info.plist"
+# The commit it's built from, shown in About ("+": with changes not yet committed).
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+if [ -n "$COMMIT" ]; then
+  git diff --quiet HEAD -- 2>/dev/null || COMMIT="$COMMIT+"
+  /usr/libexec/PlistBuddy -c "Add :MMJCommit string $COMMIT" "$APP/Contents/Info.plist"
+fi
 # The Google OAuth client for Gmail accounts: the JSON file Google Cloud downloads for a "Desktop app"
 # client, at google-oauth-client.json (not in git) or MMJ_GOOGLE_OAUTH_JSON. Without it, adding a Gmail
 # account says so.
@@ -49,6 +55,7 @@ if [ -f "$GOOGLE_JSON" ]; then
   fi
 fi
 cp "Resources/$ICON.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp -R Resources/Licenses "$APP/Contents/Resources/"  # the open-source libraries' notices (linked from About)
 for bundle in "$BIN"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
 done

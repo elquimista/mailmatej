@@ -30,7 +30,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Personal build</string>
+	<string>Copyright © 2026 Felix-Andre Lee</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
