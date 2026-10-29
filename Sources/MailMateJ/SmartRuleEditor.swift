@@ -587,7 +587,17 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             row.minus.frame.origin = NSPoint(x: bounds.width - 10 - 18 - 20, y: top + 3)
             row.minus.isHidden = isPlaceholder || !canRemove(row)
         }
+        if inBar { linkKeyViews() }
         needsDisplay = true
+    }
+
+    /// Tab and ⇧Tab go through the rows' controls in order, round to the first. The search's bar sits in
+    /// the main window, which doesn't work out its own key view loop as the editor's window does. (What
+    /// can't take focus, such as a pop-up without Keyboard Navigation, is passed over.)
+    private func linkKeyViews() {
+        let views = flatten().flatMap { $0.controls + [$0.minus, $0.plus] }.filter { !$0.isHidden && $0.superview === self }
+        guard let first = views.first else { return }
+        for (view, next) in zip(views, views.dropFirst() + [first]) { view.nextKeyView = next }
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
