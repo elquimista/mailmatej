@@ -48,6 +48,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     var onShowInFinder: ((Int64) -> Void)?
     /// A message double-clicked.
     var onOpen: ((Int64) -> Void)?
+    /// A message's flag cell clicked: the message and whether to flag it (it wasn't) or not.
+    var onToggleFlag: ((Int64, Bool) -> Void)?
 
     /// The list's sort, remembered across launches (per list, keyed by its autosave name).
     private(set) var sort: MessageSort
@@ -119,6 +121,10 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         }
         let table = tableView
         (table as? MessageTableView)?.onArrow = { [weak self] expand in self?.arrowKey(expand: expand) ?? false }
+        (table as? MessageTableView)?.onFlagClick = { [weak self] index in
+            guard let self, let row = row(at: index) else { return }
+            onToggleFlag?(row.id, !row.isFlagged)
+        }
         table.target = self
         table.doubleAction = #selector(rowDoubleClicked(_:))
         table.style = .fullWidth
@@ -820,6 +826,33 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     #if DEBUG
+        /// A click on a row's flag cell: mouse down sent to the view under it, mouse up queued for its
+        /// tracking. Logs what was hit, the row's flag as shown and stored, and the selection.
+        func debugClickFlag(row: Int, command: Bool) {
+            guard let window = tableView.window, row < ids.count,
+                let column = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == Column.flag.rawValue })
+            else { return NSLog("MMJ flag click: no row \(row) or no flag column") }
+            tableView.scrollRowToVisible(row)
+            tableView.window?.layoutIfNeeded()
+            let cell = tableView.frameOfCell(atColumn: column, row: row)
+            let point = tableView.convert(NSPoint(x: cell.midX, y: cell.midY), to: nil)
+            func event(_ type: NSEvent.EventType) -> NSEvent? {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: command ? [.command] : [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                    eventNumber: 0, clickCount: 1, pressure: 1)
+            }
+            guard let down = event(.leftMouseDown), let up = event(.leftMouseUp),
+                let hit = window.contentView?.superview?.hitTest(point)
+            else { return NSLog("MMJ flag click: no event") }
+            let id = ids[row], selection = selectedIDs
+            let shown = { self.cache[id]?.isFlagged.description ?? "-" }
+            let stored = { ((try? self.store.marks(ids: [id]))?.first?.flagged).map(\.description) ?? "-" }
+            let before = "shown \(shown()), stored \(stored())"
+            NSApp.postEvent(up, atStart: false)
+            hit.mouseDown(with: down)
+            NSLog("MMJ flag click row \(row) (message \(id)) on \(type(of: hit)): \(before) → shown \(shown()), stored \(stored()); selection \(selection) → \(selectedIDs)")
+        }
+
         /// The context menu of a row as a right-click builds it; runs the item titled `run`, if any.
         /// The flag and the unread dot as drawn on a selected row of the focused list (emphasized): each
         /// cell rendered on the selection color, with its icon's commonest colors (the pixels, not the tint).
@@ -1258,9 +1291,24 @@ extension MessageListViewController {
     }
 }
 
-/// The message table, passing ← and → to the list for collapsing and expanding threads.
+/// The message table, passing ← and → to the list for collapsing and expanding threads, and a click on
+/// a row's flag cell, which flags or unflags that message, as in MailMate.
 final class MessageTableView: NSTableView {
     var onArrow: (Bool) -> Bool = { _ in false }
+    var onFlagClick: (Int) -> Void = { _ in }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point), column = column(at: point)
+        // A plain click on a flag cell flags or unflags its message, then selects the row as any click
+        // does; with ⌘ or ⇧ it only changes the selection.
+        if row >= 0, column >= 0, tableColumns[column].identifier.rawValue == MessageListViewController.Column.flag.rawValue,
+            event.modifierFlags.isDisjoint(with: [.command, .shift])
+        {
+            onFlagClick(row)
+        }
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         switch event.specialKey {

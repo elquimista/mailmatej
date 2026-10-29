@@ -288,6 +288,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 model.openDraft(messageId: id, window: window)
             }
             messageList.addContextItems = { [weak self] menu, ids in self?.addMessageItems(to: menu, for: ids) }
+            messageList.onToggleFlag = { [weak self] id, flag in self?.perform(flag ? .flag : .unflag, on: [id]) }
         }
         // As the main list's: nothing selected (a click on the pane's blank area) shows no message, as in
         // MailMate, and several show how many.
@@ -808,6 +809,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step == "findesc" { return messageView.debugFindEscape() }
                 if step == "download" { return messageView.loadRemoteContentOnce() }  // the bar's Download
                 if step == "reload" { return messageView.debugBarAction(.reload) }  // the bar's Reload
+                // "!flagclick3": a click on list row 3's flag cell, as the mouse makes it (⌘ with "!flagclick3cmd");
+                // "!flagclick@377": on message 377's row.
+                if step.hasPrefix("flagclick") {
+                    let arg = step.dropFirst(9)
+                    let number = arg.drop { $0 == "@" }.prefix { $0.isNumber }
+                    let row = arg.hasPrefix("@") ? Int64(number).flatMap { list.ids.firstIndex(of: $0) } : Int(number)
+                    guard let row else { return NSLog("MMJ flag click: no row for \(arg)") }
+                    return list.debugClickFlag(row: row, command: step.hasSuffix("cmd"))
+                }
                 // "!keytab7" / "!keybacktab7": from the sidebar, Tab (⇧Tab) 7 times as the key handler takes it, logged.
                 if step.hasPrefix("keytab") || step.hasPrefix("keybacktab"), let window {
                     let back = step.hasPrefix("keyback"), count = Int(step.drop { !$0.isNumber }) ?? 1
