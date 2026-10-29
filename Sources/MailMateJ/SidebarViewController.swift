@@ -811,6 +811,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         func count(_ key: String, _ scope: MessageScope) -> Int? {
             guard withCounts, reuse?[key] == nil else { return nil }
             if case .smart(let id) = scope, let unread = counter?.unreadCount(smart: id) { return unread }
+            if let unread = counter?.unreadCount(scope: scope) { return unread }
             return (try? store.count(scope: scope, counting: .unread)) ?? 0
         }
         let counts = (try? store.counts(

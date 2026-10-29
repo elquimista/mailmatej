@@ -21,10 +21,10 @@ public final class SmartCounter: @unchecked Sendable {
     }
 
     private var tests: [Int64: Test] = [:]
-    /// The messages (shown) each test picks, as of the last refresh.
+    /// The messages (shown) each test picks, as of the last refresh: changed in place (the only copy).
     private var picked: [Int64: Set<Int64>] = [:]
-    /// Each smart mailbox's messages: those its test picks, and its included submailboxes'.
-    private var members: [Int64: Set<Int64>] = [:]
+    /// The messages of each smart mailbox that includes its submailboxes': its test's and theirs.
+    private var composed: [Int64: Set<Int64>] = [:]
     /// Smart mailboxes whose messages change without any being written (see `MailStore.SQLNotes`):
     /// listed anew at each refresh.
     private var volatile: Set<Int64> = []
@@ -39,12 +39,19 @@ public final class SmartCounter: @unchecked Sendable {
     /// Smart mailboxes some of whose messages changed in the last refresh (joined, left, or were marked).
     private var touched: Set<Int64> = []
     private var values: [ValuesKey: [(value: String, unread: Int)]] = [:]
+    /// `accounts(smart:)`, as of the last refresh that touched each.
+    private var accountCounts: [Int64: [(accountId: String, unread: Int)]] = [:]
 
     private struct ValuesKey: Hashable {
         let id: Int64
         let field: SmartField
         let account: String?
     }
+
+    /// All Messages and All / Junk / Deleted, kept as smart mailboxes are (under ids none has): their
+    /// unread counts are the sidebar's too. One that lists every shown message has no test (its unread
+    /// messages are `unread`).
+    private static let scopes: [(scope: MessageScope, id: Int64)] = [(.allMessages, -1), (.everything, -2)]
 
     /// More changed messages than this are counted anew, which is quicker then.
     static let retestLimit = 5_000
@@ -74,6 +81,7 @@ public final class SmartCounter: @unchecked Sendable {
                 if names != accountNames { values = [:] }  // values by Mailbox name their accounts
                 accountNames = names
                 values = values.filter { !touched.contains($0.key.id) }
+                accountCounts = accountCounts.filter { !touched.contains($0.key) }
             } catch {
                 counted = nil  // changes taken but not counted: anew next time
                 throw error
@@ -85,42 +93,66 @@ public final class SmartCounter: @unchecked Sendable {
 
     /// A smart mailbox's unread messages, as `MailStore.count(scope: .smart(id), counting: .unread)`.
     public func unreadCount(smart id: Int64) -> Int? {
-        lock.withLock {
-            guard let set = members[id] else { return nil }
-            return set.count < unread.count ? set.lazy.filter { self.unread.contains($0) }.count
-                : unread.lazy.filter { set.contains($0) }.count
+        lock.withLock { members(id).map(unreadCount) }
+    }
+
+    /// All Messages' or All / Junk / Deleted's unread messages, as `MailStore.count(scope:counting: .unread)`
+    /// (nil for other lists).
+    public func unreadCount(scope: MessageScope) -> Int? {
+        guard let id = Self.scopes.first(where: { $0.scope == scope })?.id else { return nil }
+        return lock.withLock {
+            guard counted != nil else { return nil }
+            return members(id).map(unreadCount) ?? unread.count
         }
+    }
+
+    /// A smart mailbox's messages: those its test picks, and its included submailboxes'.
+    private func members(_ id: Int64) -> Set<Int64>? {
+        tests[id]?.includes.isEmpty == false ? composed[id] : picked[id]
+    }
+
+    private func unreadCount(_ set: Set<Int64>) -> Int {
+        set.count < unread.count ? set.lazy.filter { self.unread.contains($0) }.count : unread.lazy.filter { set.contains($0) }.count
     }
 
     /// The accounts with messages in a smart mailbox, and their unread counts, as `MailStore.smartAccounts`.
     public func accounts(smart id: Int64) -> [(accountId: String, unread: Int)]? {
         lock.withLock {
-            guard let set = members[id] else { return nil }
-            var counts: [Int32: Int] = [:]
-            for message in set {
-                guard let account = accountOf[message] else { continue }
-                counts[account, default: 0] += unread.contains(message) ? 1 : 0
-            }
-            return counts.map { (accountIDs[Int($0.key)], $0.value) }
+            if let known = accountCounts[id] { return known }
+            guard let set = members(id) else { return nil }
+            let counts = unreadByAccount(set).map { (accountIDs[Int($0.key)], $0.value) }
+            accountCounts[id] = counts
+            return counts
         }
+    }
+
+    /// The unread messages among these in each account (by its index) that has any of them.
+    private func unreadByAccount(_ set: Set<Int64>, only: Int32? = nil) -> [Int32: Int] {
+        var counts: [Int32: Int] = [:]
+        for message in set {
+            guard let account = accountOf[message], only == nil || account == only else { continue }
+            counts[account, default: 0] += unread.contains(message) ? 1 : 0
+        }
+        return counts
     }
 
     /// The values of `field` among a smart mailbox's messages (in one account), as `MailStore.smartValues`:
     /// accounts' names from here, other fields queried again only once its messages change.
     public func values(smart id: Int64, field: SmartField, account: String? = nil) throws -> [(value: String, unread: Int)] {
         try lock.withLock {
-            if field == .account, let set = members[id] {
-                var byName: [String: (value: String, unread: Int)] = [:]
-                for message in set {
-                    guard let index = accountOf[message] else { continue }
-                    let accountId = accountIDs[Int(index)]
-                    guard account == nil || account == accountId, let name = accountNames[accountId], !name.isEmpty else { continue }
-                    byName[name.lowercased(), default: (name, 0)].unread += unread.contains(message) ? 1 : 0
-                }
-                return byName.sorted { $0.key < $1.key }.map(\.value)
-            }
             let key = ValuesKey(id: id, field: field, account: account)
             if let known = values[key] { return known }
+            if field == .account, let set = members(id) {
+                guard account == nil || accountIndex[account!] != nil else { return [] }
+                var byName: [String: (value: String, unread: Int)] = [:]
+                for (index, unread) in unreadByAccount(set, only: account.flatMap { accountIndex[$0] }) {
+                    guard let name = accountNames[accountIDs[Int(index)]], !name.isEmpty else { continue }
+                    byName[name.lowercased(), default: (name, 0)].unread += unread
+                }
+                let named = byName.sorted { $0.key < $1.key }.map(\.value)
+                values[key] = named
+                return named
+            }
             let fresh = try store.smartValues(id: id, field: field, account: account)
             values[key] = fresh
             return fresh
@@ -148,6 +180,12 @@ public final class SmartCounter: @unchecked Sendable {
                 tests[id] = Test(all: (whole.0, StatementArguments(whole.1)), few: few, includes: [])
             }
         }
+        for (scope, id) in Self.scopes {
+            let whole = store.filterParts(scope: scope, search: nil)
+            guard whole.0 != "1" else { continue }  // every shown message
+            let few = MailStore.$testingFewMessages.withValue(true) { store.filterParts(scope: scope, search: nil) }
+            tests[id] = Test(all: (whole.0, StatementArguments(whole.1)), few: few, includes: [])
+        }
         var picked: [Int64: Set<Int64>] = [:]
         var accounts: [(Int64, String)] = []
         let unread: Set<Int64> = try store.dbPool.read { db in
@@ -161,12 +199,14 @@ public final class SmartCounter: @unchecked Sendable {
         }
         self.tests = tests
         self.picked = picked
+        composed = [:]
         self.volatile = volatile
         self.unread = unread
         accountOf = [:]
         accountOf.reserveCapacity(accounts.count)
         for (message, account) in accounts { accountOf[message] = intern(account) }
         values = [:]
+        accountCounts = [:]
         compose(touched: Set(tests.keys))
         counted = (generation, .now)
     }
@@ -214,12 +254,11 @@ public final class SmartCounter: @unchecked Sendable {
             }
         }
         var touched = volatile
-        for id in tested {
+        for id in tested where picked[id] != nil {
             let matches = matching[id] ?? []
-            guard var set = picked[id], !matches.isEmpty || !changed.isDisjoint(with: set) else { continue }
-            set.subtract(changed)
-            set.formUnion(matches)
-            picked[id] = set
+            guard !matches.isEmpty || !changed.isDisjoint(with: picked[id]!) else { continue }
+            picked[id]!.subtract(changed)  // in place: a copy of a big list costs milliseconds
+            picked[id]!.formUnion(matches)
             touched.insert(id)
         }
         for (id, set) in fresh { picked[id] = set }
@@ -235,24 +274,25 @@ public final class SmartCounter: @unchecked Sendable {
         compose(touched: touched)
     }
 
-    /// `members` from `picked`, and `touched` from the tests whose picks changed (one including its
-    /// submailboxes' messages is touched with them).
+    /// `touched` from the tests whose picks changed (one including its submailboxes' messages is touched
+    /// with them), and `composed` again for those touched.
     private func compose(touched changed: Set<Int64>) {
-        var members: [Int64: Set<Int64>] = [:]
         var touched = Set<Int64>()
+        var done = Set<Int64>()
         func compose(_ id: Int64) {
-            guard members[id] == nil else { return }
-            var set = picked[id] ?? []
-            for child in tests[id]?.includes ?? [] {
+            guard done.insert(id).inserted else { return }
+            let includes = tests[id]?.includes ?? []
+            for child in includes {
                 compose(child)
-                set.formUnion(members[child] ?? [])
                 if touched.contains(child) { touched.insert(id) }
             }
             if changed.contains(id) { touched.insert(id) }
-            members[id] = set
+            guard !includes.isEmpty, touched.contains(id) || composed[id] == nil else { return }
+            var set = picked[id] ?? []
+            for child in includes { set.formUnion(members(child) ?? []) }
+            composed[id] = set
         }
         for id in tests.keys { compose(id) }
-        self.members = members
         self.touched = touched
     }
 
@@ -269,6 +309,10 @@ public final class SmartCounter: @unchecked Sendable {
                 let names = try store.smartValues(id: id, field: .account).map { "\($0.value) \($0.unread)" }
                 let keptNames = try values(smart: id, field: .account).map { "\($0.value) \($0.unread)" }
                 if keptNames != names { wrong.append("smart \(id) by account \(keptNames), not \(names)") }
+            }
+            for (scope, _) in Self.scopes {
+                let unread = try store.count(scope: scope, counting: .unread)
+                if unreadCount(scope: scope) != unread { wrong.append("\(scope.key) unread \(unreadCount(scope: scope) ?? -1), not \(unread)") }
             }
             return wrong
         }
