@@ -69,6 +69,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         config.userContentController.addUserScript(WKUserScript(
             source: Self.heightScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         config.userContentController.add(WeakMessageHandler(self), contentWorld: .defaultClient, name: "mmjHeight")
+        config.userContentController.addUserScript(WKUserScript(
+            source: Self.markScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         webView = MessageWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsMagnification = true
@@ -159,6 +161,111 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         })();
         """
 
+    /// `mmjMark(terms)`, in the app's own script world: marks where the message's text shows the search's
+    /// terms (`SearchHighlight`s: a word, or a phrase whose words any spacing separates; ignoring case and
+    /// accents; only where a word starts unless `wordStart` is false), wrapping them in `mmj-mark`, which
+    /// the page's CSS colors. The marks made before go first. Elements that start a block (and `br`) part
+    /// words, as on screen (a U+2029 in the text searched). Marks of the same `group` only spaces part
+    /// are joined into one, within a block. Returns how many places it marked.
+    private static let markScript = """
+        window.mmjMark = (terms) => {
+          const parents = new Set();
+          for (const mark of document.querySelectorAll('mmj-mark')) { parents.add(mark.parentNode); mark.replaceWith(...mark.childNodes); }
+          parents.forEach(p => p.normalize());
+          const root = document.querySelector('mmj-content');
+          if (!root || !terms.length) return 0;
+          const fold = (s) => {
+            let out = '';
+            for (let i = 0; i < s.length; i++) {
+              const code = s.charCodeAt(i);
+              if (code < 128) { out += code >= 65 && code <= 90 ? String.fromCharCode(code + 32) : s[i]; continue; }
+              const plain = s[i].normalize('NFD').replace(/\\p{M}/gu, '').toLowerCase(), lower = s[i].toLowerCase();
+              out += plain.length === 1 ? plain : lower.length === 1 ? lower : s[i];  // one for one, so offsets hold
+            }
+            return out;
+          };
+          const blocks = new Set(['ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'CENTER', 'DD', 'DIV', 'DL', 'DT', 'FIGCAPTION',
+            'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE',
+            'SECTION', 'TABLE', 'TD', 'TH', 'TR', 'UL']);
+          const skipped = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'TITLE', 'TEMPLATE']);
+          const blockOf = (node) => {
+            for (let e = node.parentElement; e && e !== root; e = e.parentElement) if (blocks.has(e.tagName)) return e;
+            return root;
+          };
+          const nodes = [];
+          let text = '', lastBlock = null;
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+            acceptNode: n => n.nodeType === 1 && skipped.has(n.tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+          for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+            if (n.nodeType === 1) { if (n.tagName === 'BR') text += '\\u2029'; continue; }
+            const block = blockOf(n);
+            if (block !== lastBlock) { text += '\\u2029'; lastBlock = block; }
+            nodes.push({ node: n, start: text.length });
+            text += fold(n.data);
+          }
+          const wordCharacter = /[\\p{L}\\p{N}]/u;
+          const found = [];
+          for (const term of terms) {
+            const words = fold(term.text).split(/\\s+/).filter(w => w).map(w => w.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'));
+            if (!words.length) continue;
+            const pattern = new RegExp(words.join('\\\\s+'), 'g');
+            for (let m; (m = pattern.exec(text)); ) {
+              if (term.wordStart && m.index > 0 && wordCharacter.test(text[m.index - 1])) continue;
+              found.push([m.index, m.index + m[0].length, term.group]);
+            }
+          }
+          found.sort((a, b) => a[0] - b[0]);
+          const merged = [], spaces = /^[^\\S\\u2029]*$/;
+          for (const r of found) {
+            const last = merged[merged.length - 1];
+            if (last && (r[0] <= last[1] || (last[2].has(r[2]) && spaces.test(text.slice(last[1], r[0]))))) {
+              last[1] = Math.max(last[1], r[1]);
+              last[2].add(r[2]);  // every row found in it, so two rows with the same words still mark them as one
+            } else merged.push([r[0], r[1], new Set([r[2]])]);
+          }
+          // Last first, so the text nodes still to split keep their offsets.
+          for (let r = merged.length - 1; r >= 0; r--) {
+            const [a, b] = merged[r];
+            let lo = 0, hi = nodes.length - 1, i = -1;
+            while (lo <= hi) { const mid = (lo + hi) >> 1; if (nodes[mid].start < b) { i = mid; lo = mid + 1; } else hi = mid - 1; }
+            for (; i >= 0; i--) {
+              const { node, start } = nodes[i];
+              const end = start + node.data.length;
+              if (end <= a) break;
+              const x = Math.max(a, start) - start, y = Math.min(b, end) - start;
+              if (y <= x) continue;
+              const part = x > 0 ? node.splitText(x) : node;
+              if (y - x < part.data.length) part.splitText(y - x);
+              const mark = document.createElement('mmj-mark');
+              part.replaceWith(mark);
+              mark.appendChild(part);
+            }
+          }
+          return merged.length;
+        };
+        """
+
+    /// What the search marks in the message shown (headers and text), as MailMate highlights it.
+    var highlights: [SearchHighlight] = [] {
+        didSet {
+            guard highlights != oldValue else { return }
+            header.highlights = highlights
+            markHighlights()
+        }
+    }
+
+    private func markHighlights() {
+        webView.callAsyncJavaScript(
+            "return typeof mmjMark === 'function' ? mmjMark(terms) : -1;",
+            arguments: ["terms": highlights.map { ["text": $0.text, "wordStart": $0.wordStart, "group": $0.group] }], in: nil,
+            in: .defaultClient
+        ) { result in
+            #if DEBUG
+                NSLog("MMJ marked: \((try? result.get()).map { "\($0)" } ?? "error \(result)")")
+            #endif
+        }
+    }
+
     nonisolated func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
             if let height = (message.body as? NSNumber)?.doubleValue { contentHeightChanged(height) }
@@ -174,8 +281,10 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         layoutDocument()
     }
 
-    /// Measures the content once more when the page has loaded (the script reports changes after that).
+    /// Measures the content once more when the page has loaded (the script reports changes after that),
+    /// and marks what the search finds in it.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if !highlights.isEmpty { markHighlights() }
         webView.callAsyncJavaScript(
             "const e = document.querySelector('mmj-end'); return e ? Math.ceil(e.getBoundingClientRect().top + window.scrollY) : 0;",
             arguments: [:], in: nil, in: .defaultClient
@@ -283,7 +392,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         return [
             .init(label: "From:", value: list(.from)),
             .init(label: "Subject:", value: detail.subject),
-            .init(label: "Date:", value: Formatters.fullDate(detail.sentAt ?? detail.receivedAt)),
+            .init(label: "Date:", value: Formatters.fullDate(detail.sentAt ?? detail.receivedAt), searched: false),
             .init(label: "To:", value: list(.to, groups: .toGroup)),
             .init(label: "Cc:", value: list(.cc, groups: .ccGroup)),
             .init(label: "Bcc:", value: list(.bcc)),

@@ -317,6 +317,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// while one runs (each one threads the whole mailbox; during a sync they piled up): one more
     /// follows it instead, and what it found shows meanwhile.
     private func reloadList(_ reason: ReloadReason, coalescing: Bool = false) {
+        messageView.highlights = searchHighlights  // each search change reloads the list
         if coalescing, listLoads > 0 {
             listLoadAgain = true
             return
@@ -789,6 +790,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         /// Searches as typing in the search field and pressing Return would ("" clears it).
         func debugSearch(_ text: String) {
             if text.hasPrefix("@") { return _ = sidebar.select(key: String(text.dropFirst())) }  // "@key": choose a mailbox
+            if text.hasPrefix("#"), let row = Int(text.dropFirst()) { return debugSelectRow(row) }  // "#row": select a list row
             // "!Details", "!Save", "!Cancel": the bar's buttons; "!+text": ⊕ on the conditions, the first one
             // then "text"; "!name=X" / "!edit=X" / "!name": the name sheet's Save, Save and Edit…, Cancel.
             if text.hasPrefix("!") {
@@ -1202,6 +1204,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private var searchEditor: SmartRuleEditor?
     /// What the list is narrowed to: the custom search, or the field's text as Details would show it.
     private var searchCondition: SmartCondition? { customSearch ?? .quickSearch(search) }
+    /// What the search marks in the message shown: the field's words, or the custom search's Contains rows.
+    private var searchHighlights: [SearchHighlight] { customSearch?.highlights ?? SearchHighlight.terms(search) }
     private var isSearching: Bool { !search.isEmpty || customSearch != nil }
 
     /// As MailMate: a search starts in All Messages, so the sidebar goes there, and the list's bar says

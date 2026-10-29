@@ -1,4 +1,5 @@
 import AppKit
+import MailStore
 import MailSync
 
 /// The block over a message, as MailMate draws it (measured at 1x): the header fields, a fading line,
@@ -17,6 +18,8 @@ final class MessageHeaderView: NSView {
     struct Field {
         var label: String
         var value: String
+        /// Whether a search looks at it, so marks what it finds there (not the Date).
+        var searched = true
     }
 
     struct Attachment {
@@ -37,6 +40,13 @@ final class MessageHeaderView: NSView {
     var onBarAction: (MessagePage.Action, NSView) -> Void = { _, _ in }
 
     private var fieldViews: [(label: NSTextField, value: NSTextField)] = []
+    /// The values a search looks at.
+    private var searchedValues: [NSTextField] = []
+
+    /// What the search marks in the values, as MailMate does.
+    var highlights: [SearchHighlight] = [] {
+        didSet { if highlights != oldValue { markValues() } }
+    }
     private var rows: [AttachmentRow] = []
     /// The attachments shown, to keep the selection when the same message is shown again.
     private var attachmentKeys: [String] = []
@@ -75,6 +85,8 @@ final class MessageHeaderView: NSView {
     static let attachmentsBackground = dynamic(dark: rgb(32, 35, 38), light: NSColor(white: 0, alpha: 0.05))
     static let evenRow = dynamic(dark: rgb(42, 46, 47), light: NSColor(white: 0, alpha: 0.04))
     static let attachmentText = dynamic(dark: gray(222), light: rgb(29, 29, 31))
+    /// What the search finds (MailMate's 170 grey on screen, light or dark).
+    static let markBackground = gray(170)
 
     // MARK: Content
 
@@ -82,6 +94,7 @@ final class MessageHeaderView: NSView {
     func update(fields: [Field], attachments: [Attachment], bar: MessagePage.Bar?) {
         // The attachments block stays, so it keeps the focus while the same message is shown again.
         subviews.filter { $0 !== attachmentsBox }.forEach { $0.removeFromSuperview() }
+        searchedValues = []
         fieldViews = fields.filter { !$0.value.isEmpty }.map { field in
             let label = NSTextField(labelWithString: field.label)
             label.font = Self.font
@@ -93,12 +106,14 @@ final class MessageHeaderView: NSView {
             value.isSelectable = true
             value.lineBreakMode = .byWordWrapping
             value.maximumNumberOfLines = 0
+            if field.searched { searchedValues.append(value) }
             return (label, value)
         }
         for pair in fieldViews {
             addSubview(pair.label)
             addSubview(pair.value)
         }
+        markValues()
         line = FadingLine()
         addSubview(line)
 
@@ -127,6 +142,47 @@ final class MessageHeaderView: NSView {
         needsLayout = true
     }
 
+    /// Marks what the search finds in the values: black on grey, as MailMate marks it (and the message's
+    /// text, see MessagePage's `mmj-mark`).
+    private func markValues() {
+        marks = searchedValues.map { value in
+            let text = value.stringValue
+            let marked = NSMutableAttributedString(string: text, attributes: [.font: Self.font, .foregroundColor: Self.valueColor])
+            let ranges = SearchHighlight.ranges(of: highlights, in: text)
+            for range in ranges { marked.addAttribute(.foregroundColor, value: NSColor.black, range: range) }
+            value.attributedStringValue = marked
+            return (value, ranges)
+        }
+        needsDisplay = true
+    }
+
+    /// The marked ranges of each searched value, their boxes drawn under the text (see `draw`).
+    private var marks: [(value: NSTextField, ranges: [NSRange])] = []
+
+    /// A value's marks: 16 px boxes from the top of each line, on whole pixels, as MailMate's. (AppKit's
+    /// own text background follows SF 13's 15.5 pt lines, so it falls half a pixel off.)
+    private func markRects(_ value: NSTextField, _ ranges: [NSRange]) -> [NSRect] {
+        guard !ranges.isEmpty, let cell = value.cell else { return [] }
+        let text = cell.titleRect(forBounds: value.bounds)
+        let storage = NSTextStorage(attributedString: value.attributedStringValue)
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: text.width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 2  // the field's own (its text starts 2 pt in)
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        var rects: [NSRect] = []
+        for range in ranges {
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            layout.enumerateEnclosingRects(
+                forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: container
+            ) { rect, _ in
+                let r = self.convert(rect.offsetBy(dx: text.minX, dy: text.minY), from: value)
+                rects.append(NSRect(x: r.minX.rounded(), y: r.minY.rounded(.down), width: (r.maxX - r.minX).rounded(), height: 16))
+            }
+        }
+        return rects
+    }
+
     /// Shows the round buttons' ⌥ variants (Save As… for Save to Downloads) while ⌥ is held.
     var showsOptionVariants = false {
         didSet { if showsOptionVariants != oldValue { rows.forEach { $0.showOptionVariant(showsOptionVariants) } } }
@@ -140,6 +196,7 @@ final class MessageHeaderView: NSView {
     override func layout() {
         super.layout()
         place(width: bounds.width, apply: true)
+        if marks.contains(where: { !$0.ranges.isEmpty }) { needsDisplay = true }  // the marks follow the values
     }
 
     @discardableResult
@@ -195,6 +252,8 @@ final class MessageHeaderView: NSView {
             Self.bottomBorder.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
+        Self.markBackground.setFill()
+        for (value, ranges) in marks where value.superview === self { markRects(value, ranges).forEach { $0.fill() } }
     }
 
     override func viewDidChangeEffectiveAppearance() {
