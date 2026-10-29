@@ -438,6 +438,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             search.controlSize = .small
             search.font = Self.font
             (search.cell as? NSSearchFieldCell)?.searchButtonCell = nil  // a clear button, no magnifier
+            search.cell?.isScrollable = true  // a long value scrolls to the insertion point (made in code, it doesn't)
             search.placeholderString = ""
             search.sendsSearchStringImmediately = true
             search.stringValue = value
@@ -994,6 +995,29 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
 
         private func debugTreeText(_ row: Row) -> String {
             row.isCompound ? "\(row.match.rawValue)[" + row.children.map(debugTreeText).joined(separator: ", ") + "]" : currentValue(row)
+        }
+
+        /// Types `text` at the end of the first row's text value, key by key as typing does, then logs
+        /// whether the insertion point is in view (the field's editor scrolled to it).
+        func debugType(_ text: String) {
+            guard let field = flatten().compactMap({ $0.valueControl as? NSSearchField }).first, let window else { return }
+            window.makeFirstResponder(field)
+            guard let editor = field.currentEditor() as? NSTextView else { return NSLog("MMJ type: no editor") }
+            editor.moveToEndOfDocument(nil)
+            for character in text {  // to the field's editor (a window in the background passes no keys on)
+                if let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, characters: String(character),
+                    charactersIgnoringModifiers: String(character), isARepeat: false, keyCode: 0)
+                { editor.keyDown(with: event) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                let end = editor.layoutManager.map { layout in
+                    layout.boundingRect(forGlyphRange: NSRange(location: max(0, layout.numberOfGlyphs - 1), length: 1), in: editor.textContainer!).maxX
+                } ?? 0
+                let editing = window.firstResponder === editor && field.currentEditor() === editor
+                NSLog("MMJ type: \(editor.string.count) chars, editing \(editing), insertion point at x \(Int(end)), shown \(Int(editor.visibleRect.minX))–\(Int(editor.visibleRect.maxX))")
+            }
         }
 
         func debugAddRow(text: String) {

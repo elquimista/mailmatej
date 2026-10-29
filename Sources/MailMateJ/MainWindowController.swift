@@ -796,6 +796,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             if text.hasPrefix("!") {
                 let step = String(text.dropFirst())
                 if step.hasPrefix("+") { return searchEditor?.debugAddRow(text: String(step.dropFirst())) ?? () }
+                if step.hasPrefix("type=") { return searchEditor?.debugType(String(step.dropFirst(5))) ?? () }  // "!type=text"
                 if step.hasPrefix("tab"), let count = Int(step.dropFirst(3)), let window {  // "!tab3": Tab 3 times, logged
                     return debugLogTabOrder(in: window, count: count)
                 }
