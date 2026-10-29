@@ -109,13 +109,15 @@ final class DockTileView: NSView {
         }
     }
 
+    /// MailMate's badge colors, as measured in the Dock (sRGB 0–255).
     static func color(for corner: Corner) -> NSColor {
-        switch corner {
-        case .topLeft: NSColor(srgbRed: 0.04, green: 0.48, blue: 1.0, alpha: 1)  // blue
-        case .topRight: NSColor(srgbRed: 1.0, green: 0.23, blue: 0.19, alpha: 1)  // red
-        case .bottomLeft: NSColor(srgbRed: 1.0, green: 0.78, blue: 0.0, alpha: 1)  // yellow
-        case .bottomRight: NSColor(srgbRed: 0.2, green: 0.78, blue: 0.35, alpha: 1)  // green
+        let (red, green, blue): (CGFloat, CGFloat, CGFloat) = switch corner {
+        case .topLeft: (0, 122, 255)  // blue
+        case .topRight: (237, 57, 47)  // red
+        case .bottomLeft: (255, 204, 0)  // yellow
+        case .bottomRight: (40, 205, 65)  // green
         }
+        return NSColor(srgbRed: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
     }
 
     /// Full number below 100,000; compact above ("123K", "1.2M") so the badge stays readable.
