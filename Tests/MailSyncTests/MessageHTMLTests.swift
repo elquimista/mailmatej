@@ -21,6 +21,9 @@ import Testing
         let out = MessageHTML.prepare(html, messageId: 1)
         #expect(out.remoteCount == 5)  // a.css, 1.png, 2.png, 3.png, 4.png — not the <a> link
         #expect(out.strictCount == 0)
+        // In the page's order, with what refers to them, as MailMate lists them.
+        #expect(out.resources.map(\.kind) == ["stylesheet", "img src", "img srcset", "img srcset", "stylesheet"])
+        #expect(out.resources.map(\.url).last == "https://img.example.com/4.png")
     }
 
     @Test func strictTierCoversInsecureTrackersAndPixels() {
@@ -34,6 +37,7 @@ import Testing
         let out = MessageHTML.prepare(html, messageId: 1)
         #expect(out.remoteCount == 5)
         #expect(out.strictCount == 4)
+        #expect(out.resources.map(\.strictType) == [.insecure, .knownTracker, .trackingPixel, .trackingPixel, nil])
         #expect(out.html.contains(#"src="data:," width="1""#))
         #expect(!out.html.contains("hidden.png\""))
     }

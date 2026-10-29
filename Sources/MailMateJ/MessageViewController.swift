@@ -87,6 +87,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         header.menuForAttachment = { [weak self] in self?.attachmentMenu($0) }
         header.dragItem = { [weak self] in self?.draggingItem(forAttachment: $0) }
         header.onBarAction = { [weak self] action, button in self?.perform(action, from: button) }
+        header.onResize = { [weak self] in self?.layoutDocument() }
         // ⌥ changes what the download button does, so its icon and tooltip follow the key.
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.showOptionVariants(event.modifierFlags.contains(.option))
@@ -331,6 +332,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             find(text)
         }
 
+        /// A remote-content bar button's action, as clicking it does.
+        func debugBarAction(_ action: MessagePage.Action) { perform(action) }
+
         /// Escape in the find bar's field, logging what's left.
         func debugFindEscape() {
             findBar.escape()
@@ -449,6 +453,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// and marks what the search finds in it.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if !highlights.isEmpty || findText != nil { markText(revealing: false) }
+        if let bar = shownBar, bar.loaded { countDownloadedPixels(bar) }
         webView.callAsyncJavaScript(
             "const e = document.querySelector('mmj-end'); return e ? Math.ceil(e.getBoundingClientRect().top + window.scrollY) : 0;",
             arguments: [:], in: nil, in: .defaultClient
@@ -582,14 +587,10 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             loadPage(content: MessagePage.plainHTML(body.text ?? ""), bar: nil, plain: true, remote: false)
             return
         }
-        let allowedBy = currentSender.flatMap { try? model.store.remoteContentAllowEntries(email: $0) } ?? []
         // Fail closed: remote content only loads when the strict and script rules are in place.
-        let loadRemote = (loadRemoteForCurrent || !allowedBy.isEmpty) && Self.strictRules != nil && Self.scriptRules != nil
-        let canAlwaysLoad = currentSender != nil
+        let loadRemote = loadRemoteForCurrent && Self.strictRules != nil && Self.scriptRules != nil
         func show(_ prepared: PreparedHTML, page: String) {
-            let bar = prepared.remoteCount == 0 ? nil : MessagePage.Bar(
-                remote: prepared.remoteCount, strict: prepared.strictCount, loaded: loadRemote,
-                canAlwaysLoad: canAlwaysLoad, allowedBy: allowedBy)
+            let bar = prepared.remoteCount == 0 ? nil : MessagePage.Bar(resources: prepared.resources, loaded: loadRemote)
             applyRules(loadRemote: loadRemote)
             loadPage(page, bar: bar)
         }
@@ -621,6 +622,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     private func loadPage(_ html: String, bar: MessagePage.Bar?) {
         webView.resetHover()
+        shownBar = bar
         header.update(fields: headerFields, attachments: attachments.map(Self.headerAttachment), bar: bar)
         (textMatches, findIndex) = (0, 0)  // the text's are counted when the page has loaded
         showsOptionVariants = false
@@ -938,44 +940,37 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     // MARK: Remote-content actions
 
+    /// The remote-content bar shown with the page.
+    private var shownBar: MessagePage.Bar?
+
+    /// Once loaded, the images that turned out 1 by 1 pixel: MailMate's red bar ("An image with a pixel
+    /// size of 1 by 1 has been downloaded").
+    private func countDownloadedPixels(_ bar: MessagePage.Bar) {
+        webView.callAsyncJavaScript(
+            """
+            return [...document.images].filter(i => i.complete && i.naturalWidth === 1 && i.naturalHeight === 1
+              && /^(https?|ftp):/i.test(i.currentSrc || i.src)).length;
+            """, arguments: [:], in: nil, in: .defaultClient
+        ) { [weak self] result in
+            guard let self, let count = (try? result.get()) as? Int, count > 0, shownBar == bar else { return }
+            var downloaded = bar
+            downloaded.downloadedPixels = count
+            shownBar = downloaded
+            header.setBar(downloaded)
+            layoutDocument()
+        }
+    }
+
     private func perform(_ action: MessagePage.Action, from button: NSView? = nil) {
         switch action {
         case .load:
             loadRemoteForCurrent = true
             rerender()
-        case .alwaysLoadMenu:
-            showAlwaysLoadMenu(under: button)
-        case .stopAlwaysLoading:
-            guard let sender = currentSender else { return }
-            for entry in (try? model.store.remoteContentAllowEntries(email: sender)) ?? [] {
-                try? model.store.disallowRemoteContent(entry)
-            }
+        case .reload:
+            // The message as it first showed: its external resources blocked again.
             loadRemoteForCurrent = false
             rerender()
         }
-    }
-
-    private func showAlwaysLoadMenu(under button: NSView?) {
-        guard let sender = currentSender, let anchor = button ?? view.window?.contentView else { return }
-        let menu = NSMenu()
-        menu.addItem(alwaysLoadItem(title: sender, value: sender))
-        if let domain = sender.split(separator: "@").last {
-            menu.addItem(alwaysLoadItem(title: "Anyone at \(domain)", value: "@\(domain)"))
-        }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.isFlipped ? anchor.bounds.height + 2 : -2), in: anchor)
-    }
-
-    private func alwaysLoadItem(title: String, value: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: #selector(alwaysLoadChosen(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = value
-        return item
-    }
-
-    @objc private func alwaysLoadChosen(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String else { return }
-        try? model.store.allowRemoteContent(value)
-        rerender()
     }
 
     /// Loads the blocked remote content of the message on screen, this once (the bar's Load).

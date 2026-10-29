@@ -1119,45 +1119,6 @@ public final class MailStore: Sendable {
         }
     }
 
-    // MARK: Remote content allow-list
-
-    /// Whether remote content from `email` loads automatically (allowed by address or by domain).
-    public func isRemoteContentAllowed(email: String) throws -> Bool {
-        let address = email.lowercased()
-        let domain = address.split(separator: "@").last.map { "@" + $0 } ?? address
-        return try dbPool.read { db in
-            try Bool.fetchOne(
-                db, sql: "SELECT EXISTS (SELECT 1 FROM remote_content_allow WHERE value IN (?, ?))",
-                arguments: [address, domain]) ?? false
-        }
-    }
-
-    /// The allow-list entries matching `email` (its address and/or its "@domain").
-    public func remoteContentAllowEntries(email: String) throws -> [String] {
-        let address = email.lowercased()
-        let domain = address.split(separator: "@").last.map { "@" + $0 } ?? address
-        return try dbPool.read { db in
-            try String.fetchAll(
-                db, sql: "SELECT value FROM remote_content_allow WHERE value IN (?, ?) ORDER BY value",
-                arguments: [address, domain])
-        }
-    }
-
-    /// Adds `"name@domain"` or `"@domain"` to the allow-list.
-    public func allowRemoteContent(_ value: String) throws {
-        try write { db in
-            try db.execute(
-                sql: "INSERT OR REPLACE INTO remote_content_allow (value, addedAt) VALUES (?, ?)",
-                arguments: [value.lowercased(), Date().timeIntervalSince1970])
-        }
-    }
-
-    public func disallowRemoteContent(_ value: String) throws {
-        try write { db in
-            try db.execute(sql: "DELETE FROM remote_content_allow WHERE value = ?", arguments: [value.lowercased()])
-        }
-    }
-
     // MARK: Messages (reads)
 
     /// Ordered IDs for a list. Cheap even for a million messages; rows are fetched separately.

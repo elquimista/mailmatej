@@ -6,36 +6,71 @@ import Foundation
 public enum MessagePage {
     /// What the remote-content bar offers.
     public enum Action: String, Sendable {
-        case load, alwaysLoadMenu, stopAlwaysLoading
+        case load, reload
     }
 
+    /// The remote-content bar, MailMate's: what the message's external resources are and what's blocked.
+    /// Strictly blocked ones (trackers, insecure connections, tracking pixels) are never loaded.
     public struct Bar: Sendable, Equatable {
-        public var remote: Int
-        public var strict: Int
+        public var resources: [RemoteResource]
         public var loaded: Bool
-        public var canAlwaysLoad: Bool
-        public var allowedBy: [String]
+        /// Images that turned out 1 by 1 pixel once loaded (open trackers the HTML didn't give away).
+        public var downloadedPixels: Int
 
-        public init(remote: Int, strict: Int, loaded: Bool, canAlwaysLoad: Bool, allowedBy: [String]) {
-            self.remote = remote
-            self.strict = strict
+        public init(resources: [RemoteResource], loaded: Bool, downloadedPixels: Int = 0) {
+            self.resources = resources
             self.loaded = loaded
-            self.canAlwaysLoad = canAlwaysLoad
-            self.allowedBy = allowedBy
+            self.downloadedPixels = downloadedPixels
         }
 
-        /// "Blocked 5 remote resources · 2 tracker or insecure resources always blocked".
+        public var remote: Int { resources.count }
+        public var strict: Int { resources.filter { $0.strictType != nil }.count }
+
+        /// MailMate's colours by risk: yellow for external resources, orange when some are strictly
+        /// blocked, red once a 1 by 1 image has been downloaded.
+        public enum Level: Sendable { case yellow, orange, red }
+
+        public var level: Level {
+            if loaded, downloadedPixels > 0 { return .red }
+            return strict > 0 ? .orange : .yellow
+        }
+
+        /// MailMate's: "Detected 4 external resources of which 1 is strictly blocked", "An image with a
+        /// pixel size of 1 by 1 has been downloaded".
         public var text: String {
             func plural(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
-            let note = strict > 0 ? " · \(plural(strict, "tracker or insecure resource")) always blocked" : ""
-            return loaded ? "Loaded \(plural(remote - strict, "remote resource"))\(note)" : "Blocked \(plural(remote, "remote resource"))\(note)"
+            switch level {
+            case .red:
+                return downloadedPixels == 1
+                    ? "An image with a pixel size of 1 by 1 has been downloaded"
+                    : "\(downloadedPixels) images with a pixel size of 1 by 1 have been downloaded"
+            case .yellow, .orange:
+                let which = strict > 0 ? " of which \(strict) \(strict == 1 ? "is" : "are") strictly blocked" : ""
+                return "Detected \(plural(remote, "external resource"))\(which)"
+            }
         }
 
-        /// The bar's buttons, in order, with their titles.
+        /// The bar's buttons, in order, with their titles: Download (what isn't strictly blocked), then
+        /// once downloaded, Reload (the message as it first showed, blocked again).
         public var actions: [(title: String, action: Action)] {
-            if loaded { return allowedBy.isEmpty ? [] : [("Stop Always Loading", .stopAlwaysLoading)] }
-            guard remote - strict > 0 else { return [] }
-            return [("Load", .load)] + (canAlwaysLoad ? [("Always Load From ▾", .alwaysLoadMenu)] : [])
+            guard loaded else { return remote - strict > 0 ? [("Download (\(remote - strict))", .load)] : [] }
+            return [("Reload", .reload)]
+        }
+
+        /// The details MailMate shows under the bar, row by row: the risk, then what's strictly blocked
+        /// (by type) and what's blocked (or downloaded), each resource with what refers to it.
+        public var details: [(label: String, lines: [String])] {
+            func line(_ r: RemoteResource) -> String { "\(r.url) (\(r.kind))" }
+            var rows = [("Risk analysis", ["Downloading external resources can reveal to the sender if, when, and where the email was opened."])]
+            if strict > 0 {
+                let types = RemoteResource.StrictType.allCases.filter { type in resources.contains { $0.strictType == type } }
+                rows.append(("Strictly blocked (\(strict))", types.flatMap { type in
+                    ["Type: \(type.rawValue)"] + resources.filter { $0.strictType == type }.map(line)
+                }))
+            }
+            let others = resources.filter { $0.strictType == nil }
+            if !others.isEmpty { rows.append(("\(loaded ? "Downloaded" : "Blocked") (\(others.count))", others.map(line))) }
+            return rows
         }
     }
 

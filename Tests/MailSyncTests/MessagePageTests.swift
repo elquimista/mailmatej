@@ -12,17 +12,52 @@ import Testing
         #expect(!page.contains("https:;"))  // no remote sources unless allowed
     }
 
-    @Test func barOffersActionsOnlyWhenUseful() {
-        let blocked = MessagePage.Bar(remote: 5, strict: 2, loaded: false, canAlwaysLoad: true, allowedBy: [])
-        #expect(blocked.text == "Blocked 5 remote resources · 2 tracker or insecure resources always blocked")
-        #expect(blocked.actions.map(\.action) == [.load, .alwaysLoadMenu])
+    @Test func barSaysWhatMailMateSays() {
+        let image = RemoteResource(url: "https://cdn.x.com/a.png", kind: "img src")
+        let font = RemoteResource(url: "https://cdn.x.com/f.woff2", kind: "stylesheet")
+        let tracker = RemoteResource(url: "https://s.x.com/wf/open?u=1", kind: "img src", strictType: .knownTracker)
 
-        let onlyStrict = MessagePage.Bar(remote: 1, strict: 1, loaded: false, canAlwaysLoad: true, allowedBy: [])
+        let plain = MessagePage.Bar(resources: [image, font], loaded: false)
+        #expect(plain.text == "Detected 2 external resources")
+        #expect(plain.level == .yellow)
+        #expect(plain.actions.map(\.title) == ["Download (2)"])
+
+        let risky = MessagePage.Bar(resources: [tracker, image, font], loaded: false)
+        #expect(risky.text == "Detected 3 external resources of which 1 is strictly blocked")
+        #expect(risky.level == .orange)
+        #expect(risky.actions.map(\.title) == ["Download (2)"])  // strictly blocked ones never load
+        #expect(risky.details.map(\.label) == ["Risk analysis", "Strictly blocked (1)", "Blocked (2)"])
+        #expect(risky.details[1].lines == ["Type: Known tracker", "https://s.x.com/wf/open?u=1 (img src)"])
+        #expect(risky.details[2].lines == ["https://cdn.x.com/a.png (img src)", "https://cdn.x.com/f.woff2 (stylesheet)"])
+
+        let onlyStrict = MessagePage.Bar(resources: [tracker], loaded: false)
         #expect(onlyStrict.actions.isEmpty)
 
-        let loaded = MessagePage.Bar(remote: 3, strict: 0, loaded: true, canAlwaysLoad: true, allowedBy: ["@x.com"])
-        #expect(loaded.text == "Loaded 3 remote resources")
-        #expect(loaded.actions.map(\.action) == [.stopAlwaysLoading])
+    }
+
+    /// Once downloaded: red if a 1 by 1 image came (as MailMate's), otherwise the same yellow or orange
+    /// bar; each with Reload (to block them again).
+    @Test func barAfterDownloading() {
+        let image = RemoteResource(url: "https://cdn.x.com/a.png", kind: "img src")
+        let tracker = RemoteResource(url: "https://s.x.com/wf/open?u=1", kind: "img src", strictType: .knownTracker)
+
+        let pixel = MessagePage.Bar(resources: [image], loaded: true, downloadedPixels: 1)
+        #expect(pixel.level == .red)
+        #expect(pixel.text == "An image with a pixel size of 1 by 1 has been downloaded")
+        #expect(pixel.actions.map(\.action) == [.reload])
+        #expect(MessagePage.Bar(resources: [image], loaded: true, downloadedPixels: 2).text
+            == "2 images with a pixel size of 1 by 1 have been downloaded")
+
+        let strict = MessagePage.Bar(resources: [tracker, image], loaded: true)
+        #expect(strict.level == .orange)
+        #expect(strict.text == "Detected 2 external resources of which 1 is strictly blocked")
+        #expect(strict.actions.map(\.title) == ["Reload"])
+        #expect(strict.details.last?.label == "Downloaded (1)")
+
+        let plain = MessagePage.Bar(resources: [image], loaded: true)
+        #expect(plain.level == .yellow)
+        #expect(plain.text == "Detected 1 external resource")
+        #expect(plain.actions.map(\.action) == [.reload])
     }
 
     @Test func plainTextQuotesBecomeNestedBlocksWithoutMarkers() {

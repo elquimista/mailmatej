@@ -12,7 +12,7 @@ import MailSync
 /// Attachments: a darker block with 5 pt above and below, 23 pt rows, every second row in a lighter box
 /// with 4 pt corners inset 4 pt; 20 pt icon 15 pt in, name, size, then 20 pt round buttons 6 pt apart,
 /// 18 pt from the right. A selected row fills that box with the selection color, its text and buttons
-/// white. The bar: 29 pt, text 14 pt in, buttons 8 pt apart, 10 pt from the right.
+/// white. Then the remote-content bar (see RemoteBar).
 @MainActor
 final class MessageHeaderView: NSView {
     struct Field {
@@ -36,6 +36,8 @@ final class MessageHeaderView: NSView {
     var onSave: (Int, _ option: Bool) -> Void = { _, _ in }
     var menuForAttachment: (Int) -> NSMenu? = { _ in nil }
     var dragItem: (Int) -> NSDraggingItem? = { _ in nil }
+    /// The block's height changed (the remote-content bar's details opened or closed).
+    var onResize: () -> Void = {}
     /// A bar button clicked, and the button (to show a menu under).
     var onBarAction: (MessagePage.Action, NSView) -> Void = { _, _ in }
 
@@ -162,9 +164,20 @@ final class MessageHeaderView: NSView {
         } else if attachmentsBox.superview == nil {
             addSubview(attachmentsBox)
         }
+        setBar(bar)
+        needsLayout = true
+    }
+
+    /// Shows this remote-content bar (or none) in place of the one shown, as when what loaded changes it.
+    func setBar(_ bar: MessagePage.Bar?) {
+        self.bar?.removeFromSuperview()
         self.bar = bar.map { RemoteBar(bar: $0) }
         if let barView = self.bar {
             barView.onAction = { [weak self] action, view in self?.onBarAction(action, view) }
+            barView.onToggle = { [weak self] in
+                self?.needsLayout = true
+                self?.onResize()
+            }
             addSubview(barView)
         }
         needsLayout = true
@@ -262,8 +275,9 @@ final class MessageHeaderView: NSView {
             y += height
         }
         if let bar {
-            if apply { bar.frame = NSRect(x: 0, y: y, width: width, height: RemoteBar.height) }
-            y += RemoteBar.height
+            let height = bar.height(forWidth: width)
+            if apply { bar.frame = NSRect(x: 0, y: y, width: width, height: height) }
+            y += height
         }
         if hasBorder { y += 1 }
         return y
@@ -642,36 +656,41 @@ private final class CircleButton: NSView {
     }
 }
 
-/// The remote-content bar: orange while remote content is blocked, grey once it's loaded, its
-/// buttons on the right.
+/// The remote-content bar, MailMate's (measured at 1x): yellow while external resources are blocked,
+/// orange when some are strictly blocked, red once a 1 by 1 image has been downloaded; 30 pt with buttons,
+/// 28 without (all strictly blocked); a disclosure triangle 6 pt in, the text 22 pt in (SF 13, black, its baseline 20 pt down),
+/// outlined buttons 7 pt from the right, 10 pt apart. Opened (a click on the bar), the details under it on
+/// light grey (see `RemoteDetails`), for every message until closed again.
 private final class RemoteBar: NSView {
-    static let height: CGFloat = 29
     var onAction: (MessagePage.Action, NSView) -> Void = { _, _ in }
-    private let loaded: Bool
+    /// The details opened or closed: the bar's height changed.
+    var onToggle: () -> Void = {}
+    private let level: MessagePage.Bar.Level
+    private var barHeight: CGFloat { buttons.isEmpty ? 28 : 30 }
     private let label: NSTextField
     private let buttons: [BarButton]
+    private let details: RemoteDetails
 
     override var isFlipped: Bool { true }
 
-    private static let blocked = NSColor(srgbRed: 1, green: 159 / 255, blue: 10 / 255, alpha: 1)
-    private static let loadedBackground = NSColor(name: nil) {
-        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 58 / 255, green: 58 / 255, blue: 60 / 255, alpha: 1)
-            : NSColor(srgbRed: 232 / 255, green: 232 / 255, blue: 237 / 255, alpha: 1)
-    }
-    private static let loadedText = NSColor(name: nil) {
-        $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 174 / 255, green: 174 / 255, blue: 178 / 255, alpha: 1)
-            : NSColor(srgbRed: 110 / 255, green: 110 / 255, blue: 115 / 255, alpha: 1)
+    private static let yellow = NSColor(srgbRed: 1, green: 214 / 255, blue: 10 / 255, alpha: 1)
+    private static let orange = NSColor(srgbRed: 1, green: 159 / 255, blue: 10 / 255, alpha: 1)
+    private static let red = NSColor(srgbRed: 1, green: 69 / 255, blue: 58 / 255, alpha: 1)
+
+    /// Whether the details show (kept from message to message, as MailMate does).
+    private static var opened: Bool {
+        get { UserDefaults.standard.bool(forKey: "RemoteContentDetailsShown") }
+        set { UserDefaults.standard.set(newValue, forKey: "RemoteContentDetailsShown") }
     }
 
     init(bar: MessagePage.Bar) {
-        loaded = bar.loaded
+        level = bar.level
         label = NSTextField(labelWithString: bar.text)
         buttons = bar.actions.map { BarButton(title: $0.title, action: $0.action) }
+        details = RemoteDetails(bar.details)
         super.init(frame: .zero)
         label.font = .systemFont(ofSize: 13)
-        label.textColor = loaded ? Self.loadedText : .black
+        label.textColor = .black
         label.lineBreakMode = .byTruncatingTail
         label.cell?.usesSingleLineMode = true
         addSubview(label)
@@ -682,29 +701,128 @@ private final class RemoteBar: NSView {
             }
             addSubview(button)
         }
+        details.isHidden = !Self.opened
+        addSubview(details)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    func height(forWidth width: CGFloat) -> CGFloat {
+        guard !details.isHidden else { return barHeight }
+        return barHeight + details.height(forWidth: width)
+    }
+
     override func layout() {
         super.layout()
-        var x = bounds.width - 10
+        var x = bounds.width - 7
         for button in buttons.reversed() {
             let size = button.intrinsicContentSize
             x -= size.width
-            button.frame = NSRect(x: x, y: (bounds.height - size.height) / 2, width: size.width, height: size.height)
-            x -= 8
+            button.frame = NSRect(x: x, y: (barHeight - size.height) / 2, width: size.width, height: size.height)
+            x -= 10
         }
-        label.frame = NSRect(x: 14 - 2, y: (bounds.height - 16) / 2, width: max(0, x - 12), height: 16)
+        label.frame = NSRect(x: 19, y: 0, width: max(0, x - 19), height: 16)  // its ink 22 pt in
+        label.frame.origin.y = 20 - label.firstBaselineOffsetFromTop
+        details.frame = NSRect(x: 0, y: barHeight, width: bounds.width, height: bounds.height - barHeight)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        (loaded ? Self.loadedBackground : Self.blocked).setFill()
+        let color = switch level {
+        case .yellow: Self.yellow
+        case .orange: Self.orange
+        case .red: Self.red
+        }
+        color.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: barHeight).fill()
+        // MailMate's disclosure triangle, as measured: ▸ closed, ▾ opened (a little to the right).
+        let triangle = NSBezierPath()
+        if details.isHidden {
+            triangle.move(to: NSPoint(x: 6.33, y: 11.9))
+            triangle.line(to: NSPoint(x: 11.7, y: 14.5))
+            triangle.line(to: NSPoint(x: 6.33, y: 17.1))
+        } else {
+            triangle.move(to: NSPoint(x: 7.25, y: 11.92))
+            triangle.line(to: NSPoint(x: 12.61, y: 11.92))
+            triangle.line(to: NSPoint(x: 9.93, y: 17.28))
+        }
+        triangle.close()
+        NSColor.black.setFill()
+        triangle.fill()
+    }
+
+    /// A click on the bar (not its buttons) opens or closes the details.
+    override func mouseDown(with event: NSEvent) {
+        guard convert(event.locationInWindow, from: nil).y < barHeight else { return super.mouseDown(with: event) }
+        details.isHidden.toggle()
+        Self.opened = !details.isHidden
+        needsDisplay = true
+        onToggle()
+    }
+}
+
+/// The bar's details, MailMate's (measured at 1x): on light grey (238), each row's label 6 pt in and its
+/// lines 202 pt in (SF 13, black, 16 pt lines, wrapping 18 pt short of the right, an address anywhere),
+/// rows 10 pt apart, the first line 5 pt down, 4 pt under the last.
+private final class RemoteDetails: NSView {
+    private let rows: [(label: NSTextField, value: NSTextField)]
+
+    override var isFlipped: Bool { true }
+
+    init(_ details: [(label: String, lines: [String])]) {
+        let font = NSFont.systemFont(ofSize: 13)
+        let lines = NSMutableParagraphStyle()
+        lines.minimumLineHeight = 16
+        lines.maximumLineHeight = 16
+        lines.lineBreakMode = .byWordWrapping
+        rows = details.map { title, text in
+            let label = NSTextField(labelWithString: title)
+            label.font = font
+            label.textColor = .black
+            let value = NSTextField(wrappingLabelWithString: "")
+            value.isSelectable = true
+            value.attributedStringValue = NSAttributedString(
+                string: text.joined(separator: "\n"), attributes: [.font: font, .foregroundColor: NSColor.black, .paragraphStyle: lines])
+            return (label, value)
+        }
+        super.init(frame: .zero)
+        for row in rows {
+            addSubview(row.label)
+            addSubview(row.value)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func height(forWidth width: CGFloat) -> CGFloat { place(width: width, apply: false) }
+
+    override func layout() {
+        super.layout()
+        place(width: bounds.width, apply: true)
+    }
+
+    @discardableResult
+    private func place(width: CGFloat, apply: Bool) -> CGFloat {
+        let valueWidth = max(60, width - 200 - 16)
+        var y: CGFloat = 5
+        for (label, value) in rows {
+            let height = ceil(value.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: valueWidth, height: 100_000)).height ?? 16)
+            if apply {
+                label.frame = NSRect(x: 4, y: y, width: 194, height: 16)
+                value.frame = NSRect(x: 200, y: y, width: valueWidth, height: height)
+            }
+            y += height + 10
+        }
+        return y - 10 + 4
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(srgbRed: 238 / 255, green: 238 / 255, blue: 238 / 255, alpha: 1).setFill()
         bounds.fill()
     }
 }
 
-/// The bar's small white buttons: SF 11, 1 pt translucent border, 5 pt corners, 9 pt either side.
+/// The bar's buttons, MailMate's: SF 13 black in a 1 pt black outline with 4 pt corners, 20 pt tall, 7 pt
+/// either side of the text.
 private final class BarButton: NSView {
     let action: MessagePage.Action
     var onClick: () -> Void = {}
@@ -713,30 +831,29 @@ private final class BarButton: NSView {
         didSet { needsDisplay = true }
     }
 
+    override var isFlipped: Bool { true }
+
     init(title: String, action: MessagePage.Action) {
         self.action = action
-        self.title = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor(srgbRed: 29 / 255, green: 29 / 255, blue: 31 / 255, alpha: 1),
-        ])
+        self.title = NSAttributedString(string: title, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.black])
         super.init(frame: .zero)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: (title.size().width + 20).rounded(), height: 19)
-    }
+    override var intrinsicContentSize: NSSize { NSSize(width: (title.size().width + 14).rounded(.up), height: 20) }
 
     override func draw(_ dirtyRect: NSRect) {
-        // The fill runs under the border too, so the border shows grey on any bar.
-        (pressed ? NSColor(white: 229 / 255, alpha: 1) : .white).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
-        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4.5, yRadius: 4.5)
-        NSColor(white: 0, alpha: 0.25).setStroke()
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        if pressed {
+            NSColor(white: 0, alpha: 0.15).setFill()
+            box.fill()
+        }
+        NSColor.black.setStroke()
         box.lineWidth = 1
         box.stroke()
-        let size = title.size()
-        title.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+        // On the bar's text's line (drawn from its line's top, which sits a point above the ascender).
+        title.draw(at: NSPoint(x: (bounds.width - title.size().width) / 2, y: 14 - NSFont.systemFont(ofSize: 13).ascender))
     }
 
     override func mouseDown(with event: NSEvent) {

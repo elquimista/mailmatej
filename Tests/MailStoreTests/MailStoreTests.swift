@@ -791,13 +791,6 @@ import Testing
         ])
         #expect(try store.part(messageId: id, cid: "logo@x")?.part.blobId == "B1")
         #expect(try store.part(messageId: id, cid: "<LOGO@x>")?.accountId == "acc")
-
-        #expect(try !store.isRemoteContentAllowed(email: "news@shop.com"))
-        try store.allowRemoteContent("@Shop.com")
-        #expect(try store.isRemoteContentAllowed(email: "News@shop.com"))
-        #expect(try !store.isRemoteContentAllowed(email: "news@other.com"))
-        try store.disallowRemoteContent("@shop.com")
-        #expect(try !store.isRemoteContentAllowed(email: "news@shop.com"))
     }
 
     @Test func downloadQueueIsNewestFirstAndResetsOnBlobChange() throws {

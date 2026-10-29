@@ -45,13 +45,35 @@ public enum RemoteContentRules {
     }
 }
 
+/// A remote resource a message refers to, as the remote-content bar's details list it (MailMate's).
+public struct RemoteResource: Sendable, Equatable {
+    public var url: String
+    /// What refers to it, as MailMate names it: "img src", "td background", "stylesheet", ...
+    public var kind: String
+    /// Why it's never loaded, if it isn't.
+    public var strictType: StrictType?
+
+    public enum StrictType: String, Sendable, CaseIterable {
+        case knownTracker = "Known tracker"
+        case trackingPixel = "Tracking pixel"
+        case insecure = "Insecure connection"
+    }
+
+    public init(url: String, kind: String, strictType: StrictType? = nil) {
+        self.url = url
+        self.kind = kind
+        self.strictType = strictType
+    }
+}
+
 /// HTML ready to display, plus what was found in it.
 public struct PreparedHTML: Sendable, Equatable {
     public var html: String
-    /// Distinct remote resources referenced (images, stylesheets, fonts, ...), including strict ones.
-    public var remoteCount: Int
-    /// Of those, the ones that are never loaded.
-    public var strictCount: Int
+    /// The remote resources referenced (images, stylesheets, fonts, ...), each once, in the page's order.
+    public var resources: [RemoteResource]
+    public var remoteCount: Int { resources.count }
+    /// How many are never loaded.
+    public var strictCount: Int { resources.filter { $0.strictType != nil }.count }
 }
 
 public enum MessageHTML {
@@ -62,12 +84,12 @@ public enum MessageHTML {
     ///   a crossed placeholder box at their declared size; strictly blocked ones always are.
     public static func prepare(_ html: String, messageId: Int64, blockRemote: Bool = true) -> PreparedHTML {
         let withCIDs = rewriteCIDs(pinGenericSansSerif(html), messageId: messageId)
-        let remote = remoteURLs(in: withCIDs)
         var pixels = Set<String>()
         let output = replaceRemoteImages(withCIDs, blockRemote: blockRemote, pixels: &pixels)
-        let all = remote.union(pixels)
-        let strict = pixels.union(all.filter(RemoteContentRules.isStrict))
-        return PreparedHTML(html: output, remoteCount: all.count, strictCount: strict.count)
+        let resources = remoteResources(in: withCIDs).map { url, kind in
+            RemoteResource(url: url, kind: kind, strictType: strictType(url, pixel: pixels.contains(url)))
+        }
+        return PreparedHTML(html: output, resources: resources)
     }
 
     /// A yellow outlined box with an X (as MailMate draws blocked images), with the image's alt text
@@ -134,25 +156,50 @@ public enum MessageHTML {
 
     // MARK: Remote resources
 
-    static func remoteURLs(in html: String) -> Set<String> {
-        var urls = Set<String>()
+    /// The remote resources the HTML refers to, each once, in its order, with what refers to them as
+    /// MailMate names it: "<tag> <attribute>" ("img src", "td background"), "img srcset", or
+    /// "stylesheet" (a `<link>`, `@import`, or CSS `url()`, a stylesheet's fonts and images too).
+    static func remoteResources(in html: String) -> [(url: String, kind: String)] {
+        var found: [(at: Int, url: String, kind: String)] = []
         let remote = #"(?:https?|ftp|wss?):[^"'\s>)]+"#
+        // An attribute's tag: the name after the nearest "<" before it.
+        let text = html as NSString
+        func tag(before location: Int) -> String {
+            let open = text.range(of: "<", options: .backwards, range: NSRange(location: 0, length: location))
+            guard open.location != NSNotFound else { return "element" }
+            let rest = text.substring(with: NSRange(location: open.location + 1, length: min(40, location - open.location - 1)))
+            let name = rest.prefix { $0.isLetter || $0.isNumber || $0 == "-" }
+            return name.isEmpty ? "element" : name.lowercased()
+        }
+        for (at, groups) in located(#"(?i)\b(src|background|poster|data)\s*=\s*["']?\s*("# + remote + ")", in: html) {
+            found.append((at, groups[2], "\(tag(before: at)) \(groups[1].lowercased())"))
+        }
         for pattern in [
-            #"(?i)\b(?:src|background|poster|data)\s*=\s*["']?\s*("# + remote + ")",
             #"(?i)<link\b[^>]*\bhref\s*=\s*["']?\s*("# + remote + ")",
             #"(?i)url\(\s*["']?\s*("# + remote + ")",
             #"(?i)@import\s+["']("# + remote + ")",
         ] {
-            for match in matches(pattern, in: html) { urls.insert(match[1]) }
+            for (at, groups) in located(pattern, in: html) { found.append((at, groups[1], "stylesheet")) }
         }
-        for match in matches(#"(?i)\bsrcset\s*=\s*["']([^"']*)["']"#, in: html) {
-            for candidate in match[1].split(separator: ",") {
+        for (at, groups) in located(#"(?i)\bsrcset\s*=\s*["']([^"']*)["']"#, in: html) {
+            for candidate in groups[1].split(separator: ",") {
                 if let url = candidate.split(whereSeparator: \.isWhitespace).first, url.contains("://") {
-                    urls.insert(String(url))
+                    found.append((at, String(url), "img srcset"))
                 }
             }
         }
-        return urls
+        var seen = Set<String>()
+        return found.sorted { $0.at < $1.at }.filter { seen.insert($0.url).inserted }.map { ($0.url, $0.kind) }
+    }
+
+    /// Why a resource is never loaded, if it isn't: a known tracker's address, an insecure connection,
+    /// or (failing those) a hidden or 1 px image.
+    static func strictType(_ url: String, pixel: Bool) -> RemoteResource.StrictType? {
+        if RemoteContentRules.isStrict(url) {
+            let insecure = ["http:", "ws:", "wss:", "ftp:"].contains { url.lowercased().hasPrefix($0) }
+            return insecure ? .insecure : .knownTracker
+        }
+        return pixel ? .trackingPixel : nil
     }
 
     /// Rewrites remote `<img>` sources. Hidden or 0–1 px images (classic open-tracking pixels) get an
@@ -217,6 +264,13 @@ public enum MessageHTML {
             let regex = try! NSRegularExpression(pattern: pattern)
             cache[pattern] = regex
             return regex
+        }
+    }
+
+    /// Each match's location (UTF-16 offset) and groups.
+    private static func located(_ pattern: String, in text: String) -> [(Int, [String])] {
+        regex(pattern).matches(in: text, range: NSRange(text.startIndex..., in: text)).map { m in
+            (m.range.location, (0..<m.numberOfRanges).map { i in Range(m.range(at: i), in: text).map { String(text[$0]) } ?? "" })
         }
     }
 

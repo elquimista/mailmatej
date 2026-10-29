@@ -803,6 +803,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step == "findprev" { return findPreviousInMessage(nil) }
                 if step == "finddone" { return messageView.hideFind() }
                 if step == "findesc" { return messageView.debugFindEscape() }
+                if step == "download" { return messageView.loadRemoteContentOnce() }  // the bar's Download
+                if step == "reload" { return messageView.debugBarAction(.reload) }  // the bar's Reload
                 // "!keytab7" / "!keybacktab7": from the sidebar, Tab (⇧Tab) 7 times as the key handler takes it, logged.
                 if step.hasPrefix("keytab") || step.hasPrefix("keybacktab"), let window {
                     let back = step.hasPrefix("keyback"), count = Int(step.drop { !$0.isNumber }) ?? 1
