@@ -211,6 +211,10 @@ final class DockCounters {
         }
     }
     private var cancellable: AnyCancellable?
+    /// A count is under way (off the main thread: each reads its whole scope, tens of milliseconds in a
+    /// big store), and another was asked for meanwhile.
+    private var isCounting = false
+    private var countAgain = false
 
     init(store: MailStore) {
         self.store = store
@@ -231,14 +235,34 @@ final class DockCounters {
         }
     }
 
-    /// Recomputes the counters and redraws the Dock icon if anything changed.
+    /// Recomputes the counters off the main thread and redraws the Dock icon if anything changed. While
+    /// one count is under way, those asked for make one more after it.
     func update() {
+        guard !isCounting else { return countAgain = true }
+        isCounting = true
         var values: [Corner: Int] = [:]
+        var wanted: [(corner: Corner, scope: MessageScope, count: MessageCount)] = []
         for (corner, config) in CounterSettings.shared.counters where config.showInDock || isPreviewing {
             guard config.showInDock else { values[corner] = 0; continue }
             guard let scope = MessageScope(key: config.source) else { continue }
-            values[corner] = (try? store.count(scope: scope, counting: counting(config.count))) ?? 0
+            wanted.append((corner, scope, counting(config.count)))
         }
+        let store = self.store
+        Task {
+            let counted = await Task.detached(priority: .userInitiated) {
+                wanted.map { ($0.corner, (try? store.count(scope: $0.scope, counting: $0.count)) ?? 0) }
+            }.value
+            for (corner, count) in counted { values[corner] = count }
+            show(values)
+            isCounting = false
+            if countAgain {
+                countAgain = false
+                update()
+            }
+        }
+    }
+
+    private func show(_ values: [Corner: Int]) {
         guard values != lastValues else { return }
         lastValues = values
         #if DEBUG
