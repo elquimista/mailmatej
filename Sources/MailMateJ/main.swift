@@ -926,6 +926,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         MailboxEditorWindowController.debugSidebarWidth(set: Double(width).map { CGFloat($0) })
                         try? await Task.sleep(for: .milliseconds(500))
                     }
+                    // MMJ_DEBUG_EDITOR_TOGGLE="main:<key>;editor:<key>": opens or closes a row in either sidebar, as its
+                    // triangle does, logging the rows open in both after each.
+                    if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_TOGGLE"] {
+                        let main = SidebarViewController.main, editor = MailboxEditorWindowController.debugSidebar
+                        NSLog("MMJ sidebar folders: \(main?.debugFolders ?? "-")")
+                        NSLog("MMJ open rows at first: main [\(main?.debugOpenRows ?? "-")] editor [\(editor?.debugOpenRows ?? "-")]")
+                        for step in steps.split(separator: ";") {
+                            let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
+                            (parts[0] == "main" ? main : editor)?.debugToggle(key: parts[1])
+                            try? await Task.sleep(for: .milliseconds(600))
+                            NSLog("MMJ open rows after \(step): main [\(main?.debugOpenRows ?? "-")] editor [\(editor?.debugOpenRows ?? "-")]; selected: main \(main?.selectedNode?.key ?? "-"), editor \(editor?.selectedNode?.key ?? "-")")
+                        }
+                    }
                     if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_DRAG_ROWS"] {
                         MailboxEditorWindowController.debugDrag(steps)  // "from:x:y;..." in the editor
                         try? await Task.sleep(for: .milliseconds(500))

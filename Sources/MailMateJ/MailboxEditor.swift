@@ -55,8 +55,12 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
-        // An open editor's sidebar is current: it follows the main sidebar's every reload.
-        if opened { controller.sidebar.reload() }
+        // An open editor's sidebar is current: it follows the main sidebar's every reload. It starts on
+        // the mailbox, so no other row opens to show a first selection.
+        if opened {
+            controller.sidebar.startKey = key
+            controller.sidebar.reload()
+        }
         // The mailbox opens on `tab` (its pane built once, not first on its default tab).
         controller.wantedTab = tab
         _ = controller.sidebar.select(key: key)
@@ -127,6 +131,8 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
     required init?(coder: NSCoder) { fatalError() }
 
     #if DEBUG
+        static var debugSidebar: SidebarViewController? { shared?.sidebar }
+
         static func debugDumpMailboxMenu() {
             debugEditor?.debugDumpMailboxMenu()
         }

@@ -95,6 +95,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Set while `reload()` re-expands rows, so expansion callbacks don't refresh statuses per row.
     private var isReloading = false
     static let expandedDefaultsKey = "SidebarExpandedKeys"
+    /// A row opened or closed by the user in one sidebar (the object), for the others to follow:
+    /// "key" and "expanded".
+    static let expansionDidChange = Notification.Name("SidebarExpansionDidChange")
+    /// Set while following another sidebar's row, so it isn't passed back.
+    private var following = false
 
     init(model: AppModel) {
         self.model = model
@@ -118,6 +123,30 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         // (the sidebar's rows only hear of it when they had it), they're set again then too.
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(forName: Self.expansionDidChange, object: nil, queue: nil) { [weak self] note in
+            guard let key = note.userInfo?["key"] as? String, let expanded = note.userInfo?["expanded"] as? Bool else { return }
+            let sender = (note.object as AnyObject?).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard let self, sender != ObjectIdentifier(self) else { return }
+                self.follow(key, expanded: expanded)
+            }
+        }
+    }
+
+    /// Another sidebar's row opened or closed by the user: this one's too, so the main window's sidebar
+    /// and the mailbox editor's keep the same rows open. A row holding this sidebar's selection stays
+    /// open, so it doesn't lose the mailbox it shows.
+    private func follow(_ key: String, expanded: Bool) {
+        if expanded { expandedKeys.insert(key) } else { expandedKeys.remove(key) }
+        guard isViewLoaded, let node = find(key, in: roots), outline.isItemExpanded(node) != expanded else { return }
+        following = true
+        defer { following = false }
+        if expanded {
+            outline.expandItem(node)
+            expandRemembered(node.children)
+        } else if !(selectedNode.map { ancestors(of: $0).contains { $0 === node } } ?? false) {
+            outline.collapseItem(node)
         }
     }
 
@@ -528,7 +557,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         let previous = selectedNode?.key
         // At launch, the mailbox chosen last time (the main window's sidebar), else Inbox.
-        let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : nil
+        let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : startKey
         let selectedKey = previous ?? launchKey ?? "unified.inbox"
         let topRow = firstVisibleRow()
         roots = fresh
@@ -626,6 +655,24 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         /// Selects the item with `key` as a click would (fires `onSelect`).
         func debugExpand(key: String) {
             if let node = find(key, in: roots) { outline.expandItem(node) }
+        }
+
+        /// Opens or closes a row, as a click on its triangle does.
+        func debugToggle(key: String) {
+            guard let node = find(key, in: roots) else { return NSLog("MMJ toggle: no row \(key)") }
+            if outline.isItemExpanded(node) { outline.collapseItem(node) } else { outline.expandItem(node) }
+        }
+
+        /// The rows open (with something inside), by key.
+        var debugOpenRows: String {
+            (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? SidebarNode }
+                .filter { $0.kind != .header && !$0.children.isEmpty && outline.isItemExpanded($0) }.map(\.key).joined(separator: " ")
+        }
+
+        /// The rows with something inside, by key.
+        var debugFolders: String {
+            (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? SidebarNode }
+                .filter { $0.kind != .header && !$0.children.isEmpty }.map(\.key).joined(separator: " ")
         }
 
         /// Chooses a Displayed Count for `key` ("inherit" for none) as its menu does, logging how long the
@@ -1403,6 +1450,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Whether the selected mailbox is kept for the next launch (the main window's sidebar).
     var remembersSelection = false
+    /// The mailbox a sidebar with nothing selected yet starts on, instead of Inbox (the mailbox editor's,
+    /// on the mailbox it opens for): starting on Inbox opened the row Inbox was placed in.
+    var startKey: String?
     private static let lastMailboxDefaultsKey = "LastMailbox"
 
     /// The rows above a node, outermost first.
@@ -1420,16 +1470,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
         if revealing { return }  // opened to show a selection, not by the user
-        expandedKeys.insert(node.key)
-        UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
+        remember(node.key, expanded: true)
         if !isReloading { refreshStatusesAfterAnimation() }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode, node.kind != .header else { return }
-        expandedKeys.remove(node.key)
-        UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
+        remember(node.key, expanded: false)
         if !isReloading { refreshStatusesAfterAnimation() }
+    }
+
+    /// Keeps a row open or closed across launches, and tells the other sidebars when the user did it.
+    private func remember(_ key: String, expanded: Bool) {
+        if expanded { expandedKeys.insert(key) } else { expandedKeys.remove(key) }
+        UserDefaults.standard.set(Array(expandedKeys), forKey: Self.expandedDefaultsKey)
+        guard !isReloading, !following else { return }
+        NotificationCenter.default.post(name: Self.expansionDidChange, object: self, userInfo: ["key": key, "expanded": expanded])
     }
 
     private var statusRefreshPending = false
