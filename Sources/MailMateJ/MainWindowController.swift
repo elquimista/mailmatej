@@ -803,6 +803,39 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step == "findprev" { return findPreviousInMessage(nil) }
                 if step == "finddone" { return messageView.hideFind() }
                 if step == "findesc" { return messageView.debugFindEscape() }
+                // "!keytab7" / "!keybacktab7": from the sidebar, Tab (⇧Tab) 7 times as the key handler takes it, logged.
+                if step.hasPrefix("keytab") || step.hasPrefix("keybacktab"), let window {
+                    let back = step.hasPrefix("keyback"), count = Int(step.drop { !$0.isNumber }) ?? 1
+                    window.makeFirstResponder(sidebar.keyView)
+                    func name(_ r: NSResponder?) -> String {
+                        let view = (r as? NSText).flatMap { $0.delegate as? NSView } ?? r as? NSView
+                        if view === sidebar.keyView { return "sidebar" }
+                        if view === list.tableView { return "list" }
+                        if view === correspondence.tableView { return "correspondence" }
+                        if view === messageView.findKeyView { return "find field" }
+                        if view === messageView.messageKeyView { return "message" }
+                        if view === searchField { return "search field" }
+                        return r.map { "\(type(of: $0))" } ?? "nil"
+                    }
+                    var steps = [name(window.firstResponder)]
+                    for _ in 0..<count {
+                        guard let event = NSEvent.keyEvent(
+                            with: .keyDown, location: .zero, modifierFlags: back ? [.shift] : [], timestamp: 0,
+                            windowNumber: window.windowNumber, context: nil, characters: back ? "\u{19}" : "\t",
+                            charactersIgnoringModifiers: back ? "\u{19}" : "\t", isARepeat: false, keyCode: 48)
+                        else { break }
+                        if !handleKey(event) { window.sendEvent(event) }
+                        steps.append(name(window.firstResponder))
+                    }
+                    return NSLog("MMJ tab: \(steps.joined(separator: " → "))")
+                }
+                if step == "esc", let window {  // Escape, as the key handler takes it
+                    let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                        isARepeat: false, keyCode: 53)
+                    let handled = event.map(handleKey) ?? false
+                    return NSLog("MMJ esc: handled \(handled), find bar \(messageView.showsFindBar ? "shown" : "hidden"), searching \(isSearching)")
+                }
                 if step.hasPrefix("tab"), let count = Int(step.dropFirst(3)), let window {  // "!tab3": Tab 3 times, logged
                     return debugLogTabOrder(in: window, count: count)
                 }
@@ -2178,6 +2211,27 @@ extension MainWindowController {
         }
     }
 
+    /// Tab's order, MailMate's: the sidebar, the message list, the Correspondence list, the find bar's
+    /// field, the message, the toolbar's search field, round to the sidebar; what isn't shown is passed over.
+    private var keyViewOrder: [NSView] {
+        [sidebar.keyView, list.tableView, correspondence.tableView, messageView.findKeyView, messageView.messageKeyView, searchField]
+            .compactMap { $0 }
+    }
+
+    /// The view Tab (or ⇧Tab) goes to from `responder`, if it's one in the order (a field being edited
+    /// counts as its field; anything else keeps its own Tab, the search's conditions theirs).
+    private func keyView(after responder: NSResponder?, backward: Bool) -> NSView? {
+        let order = keyViewOrder
+        var view = responder as? NSView
+        if let editor = responder as? NSText { view = editor.delegate as? NSView }
+        guard let view, let index = order.firstIndex(where: { view === $0 || view.isDescendant(of: $0) }) else { return nil }
+        for step in 1..<order.count {
+            let next = order[(index + (backward ? order.count - step : step)) % order.count]
+            if next.window != nil, !next.isHiddenOrHasHiddenAncestor, next.visibleRect.width > 0 { return next }
+        }
+        return nil
+    }
+
     /// Whether the key was a shortcut (and was handled).
     fileprivate func handleKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control])
@@ -2185,6 +2239,21 @@ extension MainWindowController {
         if let compose = event.window?.windowController as? ComposeWindowController {
             guard modifiers == .command, event.keyCode == 36 || event.keyCode == 76 else { return false }
             compose.sendMessage(nil)
+            return true
+        }
+        // Tab and ⇧Tab go round MailMate's order (see `keyViewOrder`).
+        if let window, event.window === window, window.attachedSheet == nil, event.keyCode == 48, modifiers.isEmpty,
+            let next = keyView(after: window.firstResponder, backward: event.modifierFlags.contains(.shift))
+        {
+            window.makeFirstResponder(next)
+            return true
+        }
+        // Escape closes the find bar from anywhere in the window but a text field (its own field's Escape
+        // clears its text first); then, again, the search.
+        if let window, event.window === window, window.attachedSheet == nil, modifiers.isEmpty, event.keyCode == 53,
+            messageView.showsFindBar, !(window.firstResponder is NSText)
+        {
+            messageView.hideFind()
             return true
         }
         // Escape clears the search from anywhere in the window, as in MailMate (other text fields keep it

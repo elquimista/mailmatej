@@ -85,6 +85,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private let model: AppModel
     private let outline = SidebarOutlineView()
+    /// What Tab focuses for the sidebar.
+    var keyView: NSView { outline }
     /// Sections (Mailboxes, Sources) the user hid with the header's Hide, remembered across launches.
     private var hiddenSections = Set(UserDefaults.standard.stringArray(forKey: "SidebarHiddenSections") ?? [])
     private var roots: [SidebarNode] = []

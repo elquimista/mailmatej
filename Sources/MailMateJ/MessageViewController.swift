@@ -316,6 +316,10 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     var showsFindBar: Bool { !findBar.isHidden }
 
+    /// What Tab focuses: the find bar's field (while it's shown), and the message.
+    var findKeyView: NSView { findBar.field }
+    var messageKeyView: NSView { webView }
+
     /// Whether a message is shown (Find has something to look in).
     var showsMessage: Bool { currentID != nil }
 
