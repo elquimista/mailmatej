@@ -61,6 +61,58 @@ struct SmartRuleContext {
         accounts = ((try? model.store.accounts()) ?? []).map { ($0.id, $0.name) }
     }
 
+    /// The accounts the Mailboxes tab brings in (as it is now), following Any, All and None as the smart
+    /// mailbox does; nil when that is every account (or it picks nothing), so any can be meant.
+    func sourceAccounts() -> Set<String>? {
+        let smarts = (try? model.store.smartMailboxes()) ?? []
+        let sources = mailboxKey.map { SmartSources(scopes: [$0]) } ?? smarts.first { $0.id == smartID }?.definition.sources
+        var accountOf: [String: String] = [:]
+        func walk(_ nodes: [SidebarNode]) {
+            for node in nodes {
+                if let key = node.scope?.key, let account = node.accountId { accountOf[key] = account }
+                walk(node.children)
+            }
+        }
+        walk(roots)
+        // A mailbox that isn't one account's (All Messages, Inbox, Flagged) brings in every account:
+        // "Any of Alice's Inbox, All Messages" can be any account's mail.
+        let everyAccount = Set(accounts.map(\.id))
+        func leaf(_ key: String, depth: Int) -> Set<String> {
+            if let account = accountOf[key] { return [account] }
+            // Another smart mailbox: the accounts its own Mailboxes tab brings in.
+            guard depth < 8, case .smart(let id)? = MessageScope(key: key),
+                let inner = smarts.first(where: { $0.id == id })?.definition.sources
+            else { return everyAccount }
+            return inner.namedAccounts { leaf($0, depth: depth + 1) } ?? everyAccount
+        }
+        guard let named = sources?.namedAccounts(bringingIn: { leaf($0, depth: 0) }), named != everyAccount else { return nil }
+        return named
+    }
+
+    /// The » Source pop-up's accounts: those the Mailboxes tab brings in (all when it names none), and
+    /// the one chosen already even if it no longer is.
+    func conditionAccounts(keeping chosen: String? = nil) -> [(id: String, name: String)] {
+        guard let named = sourceAccounts() else { return accounts }
+        return accounts.filter { named.contains($0.id) || $0.id == chosen }
+    }
+
+    /// The sidebar's sections for a Mailbox condition's menu: only the accounts the Mailboxes tab brings
+    /// in and their mailboxes are offered; all of them when it names none.
+    func conditionRoots() -> [SidebarNode] {
+        guard let named = sourceAccounts() else { return roots }
+        // Copies (the sidebar's nodes stay as they are) without other accounts' rows, wherever they are:
+        // under Sources, and each special mailbox's per-account ones (Inbox ‣ Carol).
+        func limited(_ nodes: [SidebarNode]) -> [SidebarNode] {
+            nodes.filter { $0.accountId.map(named.contains) ?? true }.map { node in
+                let copy = SidebarNode(
+                    key: node.key, kind: node.kind, title: node.title, symbol: node.symbol, scope: node.scope, accountId: node.accountId)
+                copy.children = limited(node.children)
+                return copy
+            }
+        }
+        return limited(roots)
+    }
+
     /// Keywords on the mail besides the standard ones (the keyword menu's "Other").
     var otherKeywords: [String] { (try? model.store.otherKeywords()) ?? [] }
 
@@ -354,7 +406,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             onChange(true)
         }
         popup.menu = menu.build(
-            roots: context.roots, selection: selected, disabled: context.disabledKeys,
+            roots: kind == .conditions ? context.conditionRoots() : context.roots, selection: selected, disabled: context.disabledKeys,
             title: { node, path in (path.map(\.title) + [node.title]).joined(separator: " \u{2023} ") })
         popup.menu?.font = .menuFont(ofSize: 0)  // the menu at menu size, as MailMate's
         if let titleItem = popup.itemArray.first {
@@ -378,7 +430,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         case .status:
             return popup(SmartStatus.allCases.map { ($0.title, $0.rawValue) }, selected: value, width: nil, action: #selector(valueChosen(_:)))
         case .account:
-            return popup(context.accounts.map { ($0.name, $0.id) }, selected: value, width: nil, action: #selector(valueChosen(_:)))
+            return popup(context.conditionAccounts(keeping: value).map { ($0.name, $0.id) }, selected: value, width: nil, action: #selector(valueChosen(_:)))
         case .mailbox:
             return mailboxPopup(selected: value, width: 150, for: row)
         case .days where op == .isExactly || op == .isBefore || op == .isAfter:
@@ -793,7 +845,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
         case .status: SmartStatus.unread.rawValue
         case .days: "7"
         case .mailbox: "all"
-        case .account: context.accounts.first?.id ?? ""
+        case .account: context.conditionAccounts().first?.id ?? ""
         case .text: ""
         }
     }
@@ -906,18 +958,21 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
     }
 
     #if DEBUG
-        /// Logs the first mailbox pull-down's menu: title, then items (indented by submenu, [x] when
+        /// Logs the first mailbox pull-down's menu (MMJ_DEBUG_MAILBOX_MENU: "op" the operator's, "value" a
+        /// Source row's mailbox): title, then items (indented by submenu, [x] when
         /// chosen, (off) when disabled).
         func debugDumpMailboxMenu() {
             let index = ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] == "op" ? 2 : 1
             let controls = flatten().first(where: { !$0.isCompound })?.controls ?? []
-            let fieldPopup = kind == .conditions && controls.count > index ? controls[index] as? NSPopUpButton : nil
-            guard let popup = fieldPopup ?? flatten().first(where: { $0.mailboxMenu != nil })?.valueControl as? NSPopUpButton,
+            let wantsValue = ProcessInfo.processInfo.environment["MMJ_DEBUG_MAILBOX_MENU"] == "value"  // a Source row's mailbox
+            let fieldPopup = kind == .conditions && controls.count > index && !wantsValue ? controls[index] as? NSPopUpButton : nil
+            let valuePopup = flatten().first(where: { $0.mailboxMenu != nil || (wantsValue && !$0.isCompound) })?.valueControl
+            guard let popup = fieldPopup ?? valuePopup as? NSPopUpButton,
                 let menu = popup.menu
             else { return NSLog("MMJ menu: none") }
             var lines: [String] = ["title: \(popup.titleOfSelectedItem ?? popup.itemArray.first?.title ?? "")"]
             func walk(_ menu: NSMenu, _ depth: Int) {
-                for item in menu.items.dropFirst(depth == 0 ? 1 : 0) {
+                for item in menu.items.dropFirst(depth == 0 && popup.menu?.items.first?.isHidden == true ? 1 : 0) {
                     let mark = item.state == .on ? "[x] " : ""
                     let off = item.isEnabled ? "" : " (off)"
                     lines.append(String(repeating: "  ", count: depth) + mark + (item.isSeparatorItem ? "---" : item.title) + off
@@ -927,6 +982,7 @@ final class SmartRuleEditor: NSView, NSComboBoxDelegate, NSComboBoxDataSource, N
             }
             walk(menu, 0)
             NSLog("MMJ menu:\n\(lines.joined(separator: "\n"))")
+            NSLog("MMJ source accounts: \(context.sourceAccounts().map { $0.sorted() } ?? ["(any)"])")
             for row in flatten() {
                 if let combo = row.valueControl as? NSComboBox, let values = comboValues[ObjectIdentifier(combo)] {
                     NSLog("MMJ combo \(row.field.rawValue): \(values.all.count) values, first \(values.all.prefix(6))")
