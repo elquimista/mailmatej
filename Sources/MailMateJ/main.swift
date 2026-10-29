@@ -1137,6 +1137,7 @@ enum MainMenu {
         let mailbox = submenu(main, "Mailbox")
         mailbox.addItem(withTitle: "New Smart Mailbox", action: #selector(MainWindowController.newSmartMailbox(_:)), keyEquivalent: "n")
             .keyEquivalentModifierMask = [.command, .control]
+        mailbox.addItem(MailboxMenu.shared.applyRules)
         mailbox.addItem(withTitle: "Synchronize", action: #selector(MainWindowController.synchronize(_:)), keyEquivalent: "N")
         mailbox.delegate = MailboxMenu.shared
 
@@ -1195,8 +1196,30 @@ enum MainMenu {
     /// Fills the Mailbox menu with the selected mailbox's commands each time it opens, between New Smart
     /// Mailbox and Synchronize (which stay, for their shortcuts), naming the mailbox in Synchronize.
     @MainActor
-    final class MailboxMenu: NSObject, NSMenuDelegate {
+    final class MailboxMenu: NSObject, NSMenuDelegate, NSMenuItemValidation {
         static let shared = MailboxMenu()
+
+        /// Apply Rules of “…”, kept too for its submenu's shortcuts: put in place of the one made for the
+        /// selected mailbox, taking its title. Its own action, so validation can grey it out for a mailbox
+        /// without rules (a submenu's item is otherwise always enabled), which turns the shortcuts off too.
+        lazy var applyRules: NSMenuItem = {
+            let item = NSMenuItem(title: "Apply Rules", action: nil, keyEquivalent: "")
+            item.submenu = SidebarViewController.applyRulesMenu(for: nil)
+            item.target = self
+            item.action = #selector(applyRulesParent(_:))
+            return item
+        }()
+
+        @objc private func applyRulesParent(_ sender: Any?) {}  // never sent: the item opens its submenu
+
+        func validateMenuItem(_ item: NSMenuItem) -> Bool {
+            item.action != #selector(applyRulesParent(_:)) || controller?.shownMailboxHasRules == true
+        }
+
+        private var controller: MainWindowController? {
+            NSApp.mainWindow?.windowController as? MainWindowController
+                ?? NSApp.windows.lazy.compactMap { $0.windowController as? MainWindowController }.first
+        }
 
         func menuNeedsUpdate(_ menu: NSMenu) {
             guard let newSmart = menu.items.first(where: { $0.action == #selector(MainWindowController.newSmartMailbox(_:)) }),
@@ -1204,12 +1227,18 @@ enum MainMenu {
             else { return }
             menu.removeAllItems()
             menu.addItem(newSmart)
-            let controller = NSApp.mainWindow?.windowController as? MainWindowController
-                ?? NSApp.windows.lazy.compactMap { $0.windowController as? MainWindowController }.first
+            let controller = self.controller
             let groups = controller?.mailboxMenuGroups ?? []
             for group in groups {
                 menu.addItem(.separator())
-                group.forEach(menu.addItem)
+                for item in group {
+                    if item.identifier == SidebarViewController.applyRulesID {
+                        applyRules.title = item.title
+                        menu.addItem(applyRules)
+                    } else {
+                        menu.addItem(item)
+                    }
+                }
             }
             menu.addItem(.separator())
             synchronize.title = controller?.synchronizeTitle ?? "Synchronize"

@@ -723,6 +723,42 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             case "reply": reply(nil)
             case "replyAll": replyAll(nil)
             case "forward": forward(nil)
+            case _ where name.hasPrefix("select@"): _ = sidebar.select(key: String(name.dropFirst("select@".count)))
+            case _ where name.hasPrefix("applyRules"):
+                // "applyRules" / "applyRulesAll": Mailbox › Apply Rules of “…” ▸ Selected Messages / All
+                // Messages, as the menu bar has them; "…@<key>": as that sidebar row's context menu has them.
+                let parts = name.split(separator: "@", maxSplits: 1).map(String.init)
+                var apply: NSMenuItem?
+                if parts.count > 1 {
+                    apply = sidebar.node(forKey: parts[1]).flatMap { sidebar.menuGroups(for: $0).joined().first { $0.title.hasPrefix("Apply Rules") } }
+                } else if let menu = NSApp.mainMenu?.item(withTitle: "Mailbox")?.submenu {
+                    menu.delegate?.menuNeedsUpdate?(menu)  // as opening it does
+                    apply = menu.items.first { $0.title.hasPrefix("Apply Rules") }
+                    NSLog("MMJ Mailbox menu: \(menu.items.map { $0.isSeparatorItem ? "—" : $0.title }.joined(separator: " | "))")
+                }
+                let items = apply?.submenu?.items ?? []
+                func shown(_ item: NSMenuItem) -> String {
+                    let keys = item.keyEquivalentModifierMask
+                    return (keys.contains(.control) ? "⌃" : "") + (keys.contains(.option) ? "⌥" : "") + "⌘" + item.keyEquivalent.uppercased()
+                }
+                // Greyed out as the menu shows it: no submenu, or its own validation (the menu bar's).
+                let on = apply.map { $0.submenu != nil && (($0.target as? NSMenuItemValidation)?.validateMenuItem($0) ?? true) } ?? false
+                NSLog("MMJ apply rules menu: \(apply?.title ?? "none")=\(on) [\(items.map { "\($0.title) \(shown($0))=\(validateMenuItem($0))" }.joined(separator: ", "))]")
+                let wanted = items.first { $0.title == (parts[0] == "applyRules" ? "Selected Messages" : "All Messages") }
+                if on, let wanted, validateMenuItem(wanted), let action = wanted.action { NSApp.sendAction(action, to: self, from: wanted) }
+            case "keyApplyRules", "keyApplyRulesAll":
+                // ⌥⌘L / ⌃⌥⌘L through the menu bar, as pressing them does (before the Mailbox menu has opened).
+                var flags: NSEvent.ModifierFlags = [.command, .option]
+                if name == "keyApplyRulesAll" { flags.insert(.control) }
+                let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window?.windowNumber ?? 0, context: nil, characters: name == "keyApplyRulesAll" ? "\u{0C}" : "¬",
+                    charactersIgnoringModifiers: "l", isARepeat: false, keyCode: 37)
+                // A run in the background has no key or main window for the items to reach: aimed at this one.
+                let items = NSApp.mainMenu?.item(withTitle: "Mailbox")?.submenu?.items.first { $0.title.hasPrefix("Apply Rules") }?.submenu?.items ?? []
+                items.forEach { $0.target = self }
+                defer { items.forEach { $0.target = nil } }
+                NSLog("MMJ key \(name) handled: \(event.map { NSApp.mainMenu?.performKeyEquivalent(with: $0) ?? false } ?? false)")
             default: break
             }
         }
@@ -1100,6 +1136,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return sidebar.selectedNode?.isGenerated != true
         case #selector(synchronize(_:)):
             return sidebar.canSynchronize(sidebar.selectedNode)
+        case #selector(applyRulesToSelection(_:)), #selector(applyRulesToList(_:)):
+            guard let key = rulesKey(item), model.hasRules(mailboxKey: key) else { return false }
+            return item.action == #selector(applyRulesToSelection(_:)) ? !ids.isEmpty : messageCount > 0
         default:
             return true
         }
@@ -1741,6 +1780,28 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     @objc func markUnread(_ sender: Any?) { perform(.markUnread, on: targetIDs) }
     @objc func flagMessages(_ sender: Any?) { perform(.flag, on: menuIDs(sender)) }
     @objc func unflagMessages(_ sender: Any?) { perform(.unflag, on: menuIDs(sender)) }
+    /// Mailbox › Apply Rules of “…” ▸ Selected Messages (⌥⌘L; also in the list's context menu) and All
+    /// Messages (⌃⌥⌘L): a mailbox's rules on the list's selected messages or on all of it, as if they had
+    /// just arrived; a beep if none meets a rule's conditions.
+    @objc func applyRulesToSelection(_ sender: Any?) { applyRules(sender, to: menuIDs(sender)) }
+    @objc func applyRulesToList(_ sender: Any?) {
+        applyRules(sender, to: (try? model.store.messageIDs(scope: shownScope, search: searchCondition)) ?? [])
+    }
+
+    private func applyRules(_ sender: Any?, to ids: [Int64]) {
+        #if DEBUG
+            NSLog("MMJ apply rules of \(rulesKey(sender) ?? "-") to \(ids.count) messages")
+        #endif
+        guard let key = rulesKey(sender), model.applyRules(mailboxKey: key, to: ids) > 0 else { return NSSound.beep() }
+    }
+
+    /// The mailbox whose rules an Apply Rules item applies: a sidebar row's (its menu), else the one shown.
+    private func rulesKey(_ sender: Any?) -> String? {
+        ((sender as? NSMenuItem)?.representedObject as? SidebarNode ?? sidebar.selectedNode)?.scope?.key
+    }
+
+    /// Whether the mailbox shown has rules to apply (else Mailbox › Apply Rules is greyed out).
+    var shownMailboxHasRules: Bool { rulesKey(nil).map(model.hasRules) ?? false }
     /// Message → Mark as Unread (Mark as Read when every selected message is unread).
     @objc func toggleReadState(_ sender: Any?) {
         let ids = menuIDs(sender)
@@ -1791,12 +1852,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         flagItem.submenu = flags
         let read = item("Mark as Unread", #selector(toggleReadState(_:)))  // its title follows the messages (validation)
 
+        // Apply Rules, of the mailbox shown (greyed out when it has none).
+        let rules = sidebar.selectedNode.map { [item("Apply Rules of “\($0.title)”", #selector(applyRulesToSelection(_:)))] } ?? []
+
         let attachments = [
             item("Save Attachments…", #selector(saveAttachments(_:))),
             item("Quick Look Attachments…", #selector(quickLookAttachments(_:))),
             item("Open Attachments", #selector(openAttachments(_:))),
         ]
-        for (index, group) in [findGroup, actions, [flagItem, read], attachments].filter({ !$0.isEmpty }).enumerated() {
+        for (index, group) in [findGroup, actions, [flagItem, read], rules, attachments].filter({ !$0.isEmpty }).enumerated() {
             if index > 0 { menu.addItem(.separator()) }
             group.forEach(menu.addItem)
         }

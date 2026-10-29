@@ -391,6 +391,8 @@ import Testing
         // Only the inbox message from that domain: not the one in Sent, not another sender.
         #expect(try store.rows(ids: try store.messages(ids, matching: record)).map(\.subject) == ["Your GO2bank statement"])
         #expect(try store.messages(ids, matching: record).count == 1)
+        // Applied to another list (Apply Rules to Current List): wherever they are, the one in Sent too.
+        #expect(try store.messages(ids, matching: record, anywhere: true).count == 2)
         // Subrules: duplicated with their rule, deleted with it.
         let sub = try store.createRule(mailboxKey: "role:inbox", parentId: id, definition: RuleDefinition(name: "Sub"))
         #expect(try store.rules().first { $0.id == sub }?.parentId == id)
@@ -402,6 +404,17 @@ import Testing
         try store.deleteRule(id: id)
         try store.deleteRule(id: copy)
         #expect(try store.rules().isEmpty)
+    }
+
+    /// Apply Rules ▸ All Messages hands a rule a whole mailbox: more messages than one query can name.
+    @Test func rulesMatchAWholeMailbox() throws {
+        try upsert((1...1200).map { message("\($0)", from: $0.isMultiple(of: 3) ? "a@speedify.com" : "b@other.com", at: Double($0)) })
+        let ids = try store.messageIDs(scope: .role("inbox"))
+        #expect(ids.count == 1200)
+        let rule = RuleDefinition(name: "False positives", condition: .rule(.fromDomain, .is, "speedify.com"))
+        _ = try store.createRule(mailboxKey: "role:inbox", definition: rule)
+        let record = try #require(try store.rules(mailboxKey: "role:inbox").first)
+        #expect(try store.messages(ids, matching: record).count == 400)
     }
 
     @Test func specialMailboxConditionsNarrowThemAndTheirSubmailboxes() throws {

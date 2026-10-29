@@ -162,15 +162,21 @@ extension MailStore {
         try write { db in try db.execute(sql: "DELETE FROM rule WHERE id = ?", arguments: [id]) }
     }
 
-    /// Of `messageIds`, those in the rule's mailbox that meet its conditions.
-    public func messages(_ messageIds: [Int64], matching rule: RuleRecord) throws -> [Int64] {
+    /// Of `messageIds`, those in the rule's mailbox that meet its conditions; with `anywhere`, those
+    /// meeting them wherever they are (Apply Rules of “…” to Current List).
+    public func messages(_ messageIds: [Int64], matching rule: RuleRecord, anywhere: Bool = false) throws -> [Int64] {
         guard !messageIds.isEmpty, let scope = MessageScope(key: rule.mailboxKey) else { return [] }
-        let (inMailbox, mailboxArgs) = filterParts(scope: scope, search: nil)
+        let (inMailbox, mailboxArgs) = anywhere ? ("1", []) : filterParts(scope: scope, search: nil)
         let (condition, conditionArgs) = sql(rule.definition.condition)
-        let marks = Array(repeating: "?", count: messageIds.count).joined(separator: ", ")
-        let query = "SELECT m.id FROM message m WHERE m.id IN (\(marks)) AND (\(inMailbox)) AND (\(condition))"
-        let args: [(any DatabaseValueConvertible)?] = messageIds.map { $0 } + mailboxArgs + conditionArgs
-        return try dbPool.read { db in try Int64.fetchAll(db, sql: query, arguments: StatementArguments(args)) }
+        // A few hundred at a time: Apply Rules ▸ All Messages hands over a whole mailbox.
+        return try dbPool.read { db in
+            try messageIds.chunked(500).flatMap { chunk in
+                let marks = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
+                let query = "SELECT m.id FROM message m WHERE m.id IN (\(marks)) AND (\(inMailbox)) AND (\(condition))"
+                let args: [(any DatabaseValueConvertible)?] = chunk.map { $0 } + mailboxArgs + conditionArgs
+                return try Int64.fetchAll(db, sql: query, arguments: StatementArguments(args))
+            }
+        }
     }
 
     /// The keywords on any message other than the standard ones (MailMate's "Other"), A to Z with

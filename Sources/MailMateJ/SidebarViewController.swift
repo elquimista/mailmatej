@@ -1496,7 +1496,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         if node.kind != .header {
             groups.append(messageItems(node))
-            groups.append([item("Edit Rules…", #selector(editRulesClicked(_:)))])
+            groups.append((applyRulesItem(node).map { [$0] } ?? []) + [item("Edit Rules…", #selector(editRulesClicked(_:)))])
         }
         return groups.filter { !$0.isEmpty }
     }
@@ -1528,6 +1528,36 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @objc private func editRulesClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }
         MailboxEditorWindowController.show(key: node.key, model: model, over: view.window, tab: .rules)
+    }
+
+    /// MailMate's Apply Rules of “…” ▸ Selected Messages / All Messages: the mailbox's rules on the list
+    /// shown, so for another mailbox than the one shown, “to Current List”. Greyed out for a mailbox
+    /// without rules.
+    private func applyRulesItem(_ node: SidebarNode) -> NSMenuItem? {
+        guard let scope = node.scope else { return nil }
+        let other = node.key != selectedNode?.key
+        let item = NSMenuItem(title: "Apply Rules of “\(node.title)”\(other ? " to Current List" : "")", action: nil, keyEquivalent: "")
+        item.identifier = Self.applyRulesID
+        if model.hasRules(mailboxKey: scope.key) { item.submenu = Self.applyRulesMenu(for: node) }
+        return item
+    }
+
+    /// Marks the Apply Rules item, which the Mailbox menu swaps for the one it keeps.
+    static let applyRulesID = NSUserInterfaceItemIdentifier("applyRules")
+
+    /// Selected Messages (⌥⌘L) and All Messages (⌃⌥⌘L), done by the window, which knows the list (and
+    /// greys them out for a mailbox without rules): `node`'s rules, or with none, the shown mailbox's.
+    static func applyRulesMenu(for node: SidebarNode?) -> NSMenu {
+        let menu = NSMenu()
+        for (title, action, modifiers) in [
+            ("Selected Messages", #selector(MainWindowController.applyRulesToSelection(_:)), NSEvent.ModifierFlags([.command, .option])),
+            ("All Messages", #selector(MainWindowController.applyRulesToList(_:)), [.command, .option, .control]),
+        ] {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "l")
+            item.keyEquivalentModifierMask = modifiers
+            item.representedObject = node
+        }
+        return menu
     }
 
     /// What goes under Synchronize, as in MailMate: Take “account” Offline for an account (then why its

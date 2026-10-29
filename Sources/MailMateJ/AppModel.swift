@@ -713,30 +713,55 @@ final class AppModel {
         guard let rules = try? store.rules(), rules.contains(where: \.definition.enabled),
             let ids = try? store.messageIDs(accountId: accountId, remoteIds: remoteIds), !ids.isEmpty
         else { return }
-        var remaining = Set(ids)
+        run(rules, on: ids)
+    }
+
+    /// Mailbox › Apply Rules of “…”, as MailMate's: a mailbox's own rules on messages of the list shown
+    /// (its own, or another's: “to Current List”), as if they had just arrived, so on those meeting the
+    /// conditions wherever they are. Returns how many of `ids` some rule matched.
+    @discardableResult
+    func applyRules(mailboxKey: String, to ids: [Int64]) -> Int {
+        guard let rules = try? store.rules(mailboxKey: mailboxKey), !ids.isEmpty else { return 0 }
+        return run(rules, on: ids, anywhere: true)
+    }
+
+    /// Whether the mailbox has a rule to apply.
+    func hasRules(mailboxKey: String) -> Bool {
+        ((try? store.rules(mailboxKey: mailboxKey)) ?? []).contains { $0.parentId == nil && $0.definition.enabled }
+    }
+
+    /// Each top-level rule of `rules`, in order, on those of `ids` an earlier one didn't move away.
+    @discardableResult
+    private func run(_ rules: [RuleRecord], on ids: [Int64], anywhere: Bool = false) -> Int {
+        var remaining = Set(ids), matched = Set<Int64>()
         for rule in rules where rule.parentId == nil && rule.definition.enabled && !remaining.isEmpty {
-            let result = runRule(rule, on: Array(remaining), all: rules)
+            let result = runRule(rule, on: Array(remaining), all: rules, anywhere: anywhere)
             remaining.subtract(result.moved)
+            matched.formUnion(result.matched)
             #if DEBUG
-                NSLog("MMJ rules: \(rule.definition.name) matched \(result.matched.count) of \(ids.count) new")
+                NSLog("MMJ rules: \(rule.definition.name) matched \(result.matched.count) of \(ids.count)")
             #endif
         }
+        return matched.count
     }
 
     /// Runs one rule on those of `ids` its mailbox and conditions take: its tags and copies at once, then
     /// its subrules on the messages it matched (MailMate's subrules), then — after any Redirect or Forward
     /// has been sent, since they read the message — its first move or delete on what the subrules didn't
-    /// move. Returns what it matched and what it (or a subrule) moved away.
+    /// move. Returns what it matched and what it (or a subrule) moved away. With `anywhere`, the rule's
+    /// mailbox doesn't narrow the messages (Apply Rules).
     @discardableResult
-    func runRule(_ rule: RuleRecord, on ids: [Int64], all: [RuleRecord]? = nil) -> (matched: [Int64], moved: Set<Int64>) {
-        guard let matched = try? store.messages(ids, matching: rule), !matched.isEmpty else { return ([], []) }
+    func runRule(_ rule: RuleRecord, on ids: [Int64], all: [RuleRecord]? = nil, anywhere: Bool = false)
+        -> (matched: [Int64], moved: Set<Int64>)
+    {
+        guard let matched = try? store.messages(ids, matching: rule, anywhere: anywhere), !matched.isEmpty else { return ([], []) }
         let actions = rule.definition.actions.filter(\.enabled)
         let sends = actions.filter { $0.kind == .redirect || $0.kind == .forward }
         for action in actions where !action.kind.moves && !sends.contains(action) { apply(action, to: matched) }
         var moved = Set<Int64>()
         let rules = all ?? ((try? store.rules()) ?? [])
         for child in rules where child.parentId == rule.id && child.definition.enabled {
-            moved.formUnion(runRule(child, on: matched.filter { !moved.contains($0) }, all: rules).moved)
+            moved.formUnion(runRule(child, on: matched.filter { !moved.contains($0) }, all: rules, anywhere: anywhere).moved)
         }
         let rest = matched.filter { !moved.contains($0) }
         if let move = actions.first(where: \.kind.moves), !rest.isEmpty {
