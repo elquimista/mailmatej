@@ -1117,8 +1117,18 @@ enum MainMenu {
         edit.addItem(.separator())
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
-        edit.addItem(withTitle: "Find…", action: #selector(MainWindowController.focusSearch(_:)), keyEquivalent: "f")
-            .keyEquivalentModifierMask = [.command, .option]
+        // MailMate's Edit ▸ Find: the toolbar's search, and finding in the message shown.
+        let find = NSMenu(title: "Find")
+        for (title, action, key, modifiers) in [
+            ("Search All Messages", #selector(MainWindowController.focusSearch(_:)), "f", NSEvent.ModifierFlags([.command, .option])),
+            ("Find…", #selector(MainWindowController.findInMessage(_:)), "f", [.command]),
+            ("Find Next", #selector(MainWindowController.findNextInMessage(_:)), "g", [.command]),
+            ("Find Previous", #selector(MainWindowController.findPreviousInMessage(_:)), "g", [.command, .shift]),
+            ("Use Selection for Find", #selector(MainWindowController.useSelectionForFind(_:)), "e", [.command]),
+        ] {
+            find.addItem(withTitle: title, action: action, keyEquivalent: key).keyEquivalentModifierMask = modifiers
+        }
+        edit.addItem(withTitle: "Find", action: nil, keyEquivalent: "").submenu = find
 
         let view = submenu(main, "View")
         view.addItem(withTitle: "Organize by Thread", action: #selector(MainWindowController.toggleThreads(_:)), keyEquivalent: "T")

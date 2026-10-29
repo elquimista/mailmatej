@@ -25,6 +25,9 @@ import Testing
             == ["J.P. Morgan Workplace Solutions"])
         #expect(marked("morgan solutions", in: "J.P. Morgan Workplace Solutions") == ["Morgan", "Solutions"])
         #expect(marked("sale update", in: "Sale, update") == ["Sale", "update"])  // a comma parts them
+        // Find counts each match, side by side too, anywhere in a word.
+        let find = SearchHighlight.ranges(of: [SearchHighlight("sen", wordStart: false)], in: "Jensen sen sen", joiningSpaced: false)
+        #expect(find.map(\.location) == [3, 7, 11])
     }
 
     @Test func aCustomSearchMarksWhatItsContainsRowsLookFor() {

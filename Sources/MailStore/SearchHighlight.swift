@@ -35,7 +35,8 @@ public struct SearchHighlight: Hashable, Sendable {
     /// Where any of `highlights` shows in `string`, in order: overlapping ones, and ones of the same text
     /// only spaces part (the words of "J.P. Morgan Workplace" side by side), merged into one. A merged
     /// mark keeps every text found in it, so two rows with the same words still mark them as one.
-    public static func ranges(of highlights: [SearchHighlight], in string: String) -> [NSRange] {
+    /// Without `joiningSpaced` (Find, which counts each), only overlapping ones merge.
+    public static func ranges(of highlights: [SearchHighlight], in string: String, joiningSpaced: Bool = true) -> [NSRange] {
         let text = string as NSString
         var found: [(range: NSRange, group: Int)] = []
         for highlight in highlights {
@@ -57,7 +58,7 @@ public struct SearchHighlight: Hashable, Sendable {
         var merged: [(range: NSRange, groups: Set<Int>)] = []
         for (range, group) in found.sorted(by: { $0.range.location < $1.range.location }) {
             if let last = merged.last, range.location <= NSMaxRange(last.range)
-                || (last.groups.contains(group) && onlySpaces(NSMaxRange(last.range), range.location))
+                || (joiningSpaced && last.groups.contains(group) && onlySpaces(NSMaxRange(last.range), range.location))
             {
                 merged[merged.count - 1] = (NSUnionRange(last.range, range), last.groups.union([group]))
             } else {

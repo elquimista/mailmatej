@@ -797,6 +797,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 let step = String(text.dropFirst())
                 if step.hasPrefix("+") { return searchEditor?.debugAddRow(text: String(step.dropFirst())) ?? () }
                 if step.hasPrefix("type=") { return searchEditor?.debugType(String(step.dropFirst(5))) ?? () }  // "!type=text"
+                // "!find=text": ⌘F and typing text; "!findnext", "!findprev", "!finddone": ⌘G, ⇧⌘G, Done.
+                if step.hasPrefix("find=") { return messageView.debugFind(String(step.dropFirst(5))) }
+                if step == "findnext" { return findNextInMessage(nil) }
+                if step == "findprev" { return findPreviousInMessage(nil) }
+                if step == "finddone" { return messageView.hideFind() }
+                if step == "findesc" { return messageView.debugFindEscape() }
                 if step.hasPrefix("tab"), let count = Int(step.dropFirst(3)), let window {  // "!tab3": Tab 3 times, logged
                     return debugLogTabOrder(in: window, count: count)
                 }
@@ -1142,6 +1148,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return sidebar.selectedNode?.isGenerated != true
         case #selector(synchronize(_:)):
             return sidebar.canSynchronize(sidebar.selectedNode)
+        case #selector(findInMessage(_:)), #selector(findNextInMessage(_:)), #selector(findPreviousInMessage(_:)),
+            #selector(useSelectionForFind(_:)):
+            return messageView.showsMessage
         case #selector(applyRulesToSelection(_:)), #selector(applyRulesToList(_:)):
             guard let key = rulesKey(item), model.hasRules(mailboxKey: key) else { return false }
             return item.action == #selector(applyRulesToSelection(_:)) ? !ids.isEmpty : messageCount > 0
@@ -1185,6 +1194,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         guard let searchField else { return }
         window?.makeFirstResponder(searchField)
     }
+
+    /// Edit ▸ Find ▸ Find… (⌘F), Find Next (⌘G), Find Previous (⇧⌘G), Use Selection for Find (⌘E): in
+    /// the message shown, as MailMate's.
+    @objc func findInMessage(_ sender: Any?) { messageView.showFind() }
+    @objc func findNextInMessage(_ sender: Any?) { messageView.findNext(forward: true) }
+    @objc func findPreviousInMessage(_ sender: Any?) { messageView.findNext(forward: false) }
+    @objc func useSelectionForFind(_ sender: Any?) { messageView.useSelectionForFind() }
 
     private func clearSearch() {
         searchField?.stringValue = ""

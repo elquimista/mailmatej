@@ -43,9 +43,35 @@ final class MessageHeaderView: NSView {
     /// The values a search looks at.
     private var searchedValues: [NSTextField] = []
 
-    /// What the search marks in the values, as MailMate does.
-    var highlights: [SearchHighlight] = [] {
-        didSet { if highlights != oldValue { markValues() } }
+    /// What's marked in the values, as MailMate marks it: the search's terms in the fields it looks at, or
+    /// Find's text in all of them (each match its own, see `mark`).
+    private var markTerms: [SearchHighlight] = []
+    private var finding = false
+
+    /// Marks `terms` in the values: the search's, or with `finding`, Find's (in the Date too, and matches
+    /// side by side kept apart, each counted).
+    func mark(_ terms: [SearchHighlight], finding: Bool) {
+        guard terms != markTerms || finding != self.finding else { return }
+        (markTerms, self.finding) = (terms, finding)
+        markValues()
+    }
+
+    /// Find's current match among the header's, in order (yellow); nil for none here.
+    var currentMark: Int? {
+        didSet { if currentMark != oldValue { needsDisplay = true } }
+    }
+
+    /// How many matches the header shows.
+    var markCount: Int { marks.reduce(0) { $0 + $1.ranges.count } }
+
+    /// Where match `index` (counted as `currentMark`) is in this view.
+    func markRect(_ index: Int) -> NSRect? {
+        var next = 0
+        for (value, ranges) in marks {
+            if index < next + ranges.count { return markRects(value, ranges)[index - next].reduce(NSRect.null) { $0.union($1) } }
+            next += ranges.count
+        }
+        return nil
     }
     private var rows: [AttachmentRow] = []
     /// The attachments shown, to keep the selection when the same message is shown again.
@@ -87,6 +113,8 @@ final class MessageHeaderView: NSView {
     static let attachmentText = dynamic(dark: gray(222), light: rgb(29, 29, 31))
     /// What the search finds (MailMate's 170 grey on screen, light or dark).
     static let markBackground = gray(170)
+    /// Find's current match (MailMate's yellow).
+    static let currentMarkBackground = rgb(255, 255, 0)
 
     // MARK: Content
 
@@ -142,26 +170,28 @@ final class MessageHeaderView: NSView {
         needsLayout = true
     }
 
-    /// Marks what the search finds in the values: black on grey, as MailMate marks it (and the message's
-    /// text, see MessagePage's `mmj-mark`).
+    /// Marks what the search (or Find) finds in the values: black on grey, as MailMate marks it (and the
+    /// message's text, see MessagePage's `mmj-mark`).
     private func markValues() {
-        marks = searchedValues.map { value in
+        let marked = finding ? fieldViews.map(\.value) : searchedValues
+        marks = fieldViews.map(\.value).map { value in
             let text = value.stringValue
-            let marked = NSMutableAttributedString(string: text, attributes: [.font: Self.font, .foregroundColor: Self.valueColor])
-            let ranges = SearchHighlight.ranges(of: highlights, in: text)
-            for range in ranges { marked.addAttribute(.foregroundColor, value: NSColor.black, range: range) }
-            value.attributedStringValue = marked
+            let shown = NSMutableAttributedString(string: text, attributes: [.font: Self.font, .foregroundColor: Self.valueColor])
+            let ranges = marked.contains(value) ? SearchHighlight.ranges(of: markTerms, in: text, joiningSpaced: !finding) : []
+            for range in ranges { shown.addAttribute(.foregroundColor, value: NSColor.black, range: range) }
+            value.attributedStringValue = shown
             return (value, ranges)
         }
+        currentMark = nil
         needsDisplay = true
     }
 
     /// The marked ranges of each searched value, their boxes drawn under the text (see `draw`).
     private var marks: [(value: NSTextField, ranges: [NSRange])] = []
 
-    /// A value's marks: 16 px boxes from the top of each line, on whole pixels, as MailMate's. (AppKit's
-    /// own text background follows SF 13's 15.5 pt lines, so it falls half a pixel off.)
-    private func markRects(_ value: NSTextField, _ ranges: [NSRange]) -> [NSRect] {
+    /// A value's marks, each its boxes (one a line): 16 px from the top of each line, on whole pixels, as
+    /// MailMate's. (AppKit's own text background follows SF 13's 15.5 pt lines, so it falls half a pixel off.)
+    private func markRects(_ value: NSTextField, _ ranges: [NSRange]) -> [[NSRect]] {
         guard !ranges.isEmpty, let cell = value.cell else { return [] }
         let text = cell.titleRect(forBounds: value.bounds)
         let storage = NSTextStorage(attributedString: value.attributedStringValue)
@@ -170,8 +200,8 @@ final class MessageHeaderView: NSView {
         container.lineFragmentPadding = 2  // the field's own (its text starts 2 pt in)
         layout.addTextContainer(container)
         storage.addLayoutManager(layout)
-        var rects: [NSRect] = []
-        for range in ranges {
+        return ranges.map { range in
+            var rects: [NSRect] = []
             let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             layout.enumerateEnclosingRects(
                 forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: container
@@ -179,8 +209,8 @@ final class MessageHeaderView: NSView {
                 let r = self.convert(rect.offsetBy(dx: text.minX, dy: text.minY), from: value)
                 rects.append(NSRect(x: r.minX.rounded(), y: r.minY.rounded(.down), width: (r.maxX - r.minX).rounded(), height: 16))
             }
+            return rects
         }
-        return rects
     }
 
     /// Shows the round buttons' ⌥ variants (Save As… for Save to Downloads) while ⌥ is held.
@@ -252,8 +282,14 @@ final class MessageHeaderView: NSView {
             Self.bottomBorder.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
-        Self.markBackground.setFill()
-        for (value, ranges) in marks where value.superview === self { markRects(value, ranges).forEach { $0.fill() } }
+        var index = 0
+        for (value, ranges) in marks {
+            for rects in markRects(value, ranges) {
+                (index == currentMark ? Self.currentMarkBackground : Self.markBackground).setFill()
+                rects.forEach { $0.fill() }
+                index += 1
+            }
+        }
     }
 
     override func viewDidChangeEffectiveAppearance() {

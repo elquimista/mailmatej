@@ -139,6 +139,8 @@ public enum MessagePage {
           padding: 0 !important; border: 0 !important; position: static !important; }
         /* What the search finds, as MailMate marks it: black on grey (170 on screen), light or dark. */
         mmj-mark { background-color: #aaa !important; color: #000 !important; }
+        /* Find's current match (Edit ▸ Find), MailMate's yellow. */
+        mmj-mark[current] { background-color: #ff0 !important; }
         """
 
     static let htmlCSS = """

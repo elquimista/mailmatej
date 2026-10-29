@@ -118,12 +118,20 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
         let root = NSView()
         linkPreview.isHidden = true
-        for v in [scroll, placeholder, linkPreview] as [NSView] {
+        findBar.isHidden = true
+        findBar.onChange = { [weak self] in self?.find($0) }
+        findBar.onNext = { [weak self] in self?.findNext(forward: true) }
+        findBar.onPrevious = { [weak self] in self?.findNext(forward: false) }
+        findBar.onDone = { [weak self] in self?.hideFind() }
+        for v in [scroll, placeholder, linkPreview, findBar] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: root.topAnchor),
+            findBar.topAnchor.constraint(equalTo: root.topAnchor),
+            findBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            findBar.heightAnchor.constraint(equalToConstant: MessageFindBar.height),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -135,6 +143,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             linkPreview.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
             linkPreview.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -12),
         ])
+        scrollTop = scroll.topAnchor.constraint(equalTo: root.topAnchor)
+        scrollTop?.isActive = true
         view = root
         showPlaceholder("No Message Selected")
     }
@@ -161,14 +171,25 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         })();
         """
 
-    /// `mmjMark(terms)`, in the app's own script world: marks where the message's text shows the search's
-    /// terms (`SearchHighlight`s: a word, or a phrase whose words any spacing separates; ignoring case and
-    /// accents; only where a word starts unless `wordStart` is false), wrapping them in `mmj-mark`, which
-    /// the page's CSS colors. The marks made before go first. Elements that start a block (and `br`) part
-    /// words, as on screen (a U+2029 in the text searched). Marks of the same `group` only spaces part
-    /// are joined into one, within a block. Returns how many places it marked.
+    /// `mmjMark(terms, joinSpaced)`, in the app's own script world: marks where the message's text shows
+    /// the search's terms (`SearchHighlight`s: a word, or a phrase whose words any spacing separates;
+    /// ignoring case and accents; only where a word starts unless `wordStart` is false), wrapping them in
+    /// `mmj-mark`, which the page's CSS colors. The marks made before go first. Elements that start a
+    /// block (and `br`) part words, as on screen (a U+2029 in the text searched). With `joinSpaced`,
+    /// marks of the same `group` only spaces part are joined into one, within a block. Returns how many
+    /// places it marked; each place's marks are numbered (`data-n`) for `mmjCurrent(n)`, which makes
+    /// place `n` Find's current one (yellow; -1 for none) and returns its top and bottom on the page.
     private static let markScript = """
-        window.mmjMark = (terms) => {
+        window.mmjCurrent = (n) => {
+          let top = Infinity, bottom = -Infinity;
+          for (const mark of document.querySelectorAll('mmj-mark')) {
+            const on = mark.dataset.n === String(n);
+            mark.toggleAttribute('current', on);
+            if (on) { const b = mark.getBoundingClientRect(); top = Math.min(top, b.top + window.scrollY); bottom = Math.max(bottom, b.bottom + window.scrollY); }
+          }
+          return top === Infinity ? null : [top, bottom];
+        };
+        window.mmjMark = (terms, joinSpaced) => {
           const parents = new Set();
           for (const mark of document.querySelectorAll('mmj-mark')) { parents.add(mark.parentNode); mark.replaceWith(...mark.childNodes); }
           parents.forEach(p => p.normalize());
@@ -218,7 +239,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
           const merged = [], spaces = /^[^\\S\\u2029]*$/;
           for (const r of found) {
             const last = merged[merged.length - 1];
-            if (last && (r[0] <= last[1] || (last[2].has(r[2]) && spaces.test(text.slice(last[1], r[0]))))) {
+            if (last && (r[0] <= last[1] || (joinSpaced && last[2].has(r[2]) && spaces.test(text.slice(last[1], r[0]))))) {
               last[1] = Math.max(last[1], r[1]);
               last[2].add(r[2]);  // every row found in it, so two rows with the same words still mark them as one
             } else merged.push([r[0], r[1], new Set([r[2]])]);
@@ -237,6 +258,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
               const part = x > 0 ? node.splitText(x) : node;
               if (y - x < part.data.length) part.splitText(y - x);
               const mark = document.createElement('mmj-mark');
+              mark.dataset.n = r;
               part.replaceWith(mark);
               mark.appendChild(part);
             }
@@ -249,21 +271,159 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     var highlights: [SearchHighlight] = [] {
         didSet {
             guard highlights != oldValue else { return }
-            header.highlights = highlights
-            markHighlights()
+            markAll(revealing: false)
         }
     }
 
-    private func markHighlights() {
+    /// Marks, in the headers and the text, Find's matches while the find bar has text (each its own, the
+    /// current one yellow), else the search's.
+    private func markAll(revealing: Bool) {
+        header.mark(findText.map { [SearchHighlight($0, wordStart: false)] } ?? highlights, finding: findText != nil)
+        markText(revealing: revealing)
+    }
+
+    private func markText(revealing: Bool) {
+        let terms = findText.map { [SearchHighlight($0, wordStart: false)] } ?? highlights
         webView.callAsyncJavaScript(
-            "return typeof mmjMark === 'function' ? mmjMark(terms) : -1;",
-            arguments: ["terms": highlights.map { ["text": $0.text, "wordStart": $0.wordStart, "group": $0.group] }], in: nil,
-            in: .defaultClient
-        ) { result in
+            "return typeof mmjMark === 'function' ? mmjMark(terms, join) : -1;",
+            arguments: ["terms": terms.map { ["text": $0.text, "wordStart": $0.wordStart, "group": $0.group] }, "join": findText == nil],
+            in: nil, in: .defaultClient
+        ) { [weak self] result in
+            let marked = (try? result.get()) as? Int ?? 0
             #if DEBUG
-                NSLog("MMJ marked: \((try? result.get()).map { "\($0)" } ?? "error \(result)")")
+                NSLog("MMJ marked: \(marked)")
             #endif
+            guard let self, findText != nil else { return }
+            textMatches = max(0, marked)
+            showCurrentMatch(revealing: revealing)
         }
+    }
+
+    // MARK: Find (Edit ▸ Find)
+
+    /// The find bar's text while it's open and has some.
+    private var findText: String?
+    /// Find's current match: the headers' first, in order, then the text's.
+    private var findIndex = 0
+    /// How many matches the page's text has (the headers count their own).
+    private var textMatches = 0
+    /// What had the keyboard before the find bar, which gets it back after Done.
+    private weak var beforeFind: NSResponder?
+
+    /// Over the message, which moves down under it (the scroll view's top, `scrollTop`).
+    private let findBar = MessageFindBar()
+    private var scrollTop: NSLayoutConstraint?
+
+    var showsFindBar: Bool { !findBar.isHidden }
+
+    /// Whether a message is shown (Find has something to look in).
+    var showsMessage: Bool { currentID != nil }
+
+    #if DEBUG
+        /// ⌘F, then `text` as typed in the bar.
+        func debugFind(_ text: String) {
+            showFind()
+            findBar.field.stringValue = text
+            find(text)
+        }
+
+        /// Escape in the find bar's field, logging what's left.
+        func debugFindEscape() {
+            findBar.escape()
+            NSLog("MMJ find escape: bar \(findBar.isHidden ? "hidden" : "shown"), text \"\(findBar.field.stringValue)\", finding \(findText ?? "-")")
+        }
+    #endif
+
+    /// Edit ▸ Find ▸ Find… (⌘F), as MailMate's: the find bar over the message, its text selected to type over.
+    func showFind() {
+        if findBar.isHidden {
+            beforeFind = view.window?.firstResponder
+            findBar.isHidden = false
+            scrollTop?.constant = MessageFindBar.height
+        }
+        view.window?.makeFirstResponder(findBar.field)
+        findBar.field.currentEditor()?.selectAll(nil)
+        find(findBar.field.stringValue)
+    }
+
+    /// Done (or Escape): the bar goes, the search's marks come back, the keyboard goes back where it was.
+    func hideFind() {
+        guard !findBar.isHidden else { return }
+        let hadKeyboard = findBar.field.currentEditor() != nil
+        findBar.isHidden = true
+        scrollTop?.constant = 0
+        find("")
+        // Back to what had it, if it's still in the window (a view, or a field's editor).
+        let back = (beforeFind as? NSView).flatMap { $0.window === view.window ? $0 : nil } ?? webView
+        if hadKeyboard { view.window?.makeFirstResponder(back) }
+    }
+
+    /// Find Next (⌘G) and Find Previous (⇧⌘G), or ‹ › and Return: the match after (before) the current
+    /// one, round to the first (last), brought into view.
+    func findNext(forward: Bool) {
+        if findBar.isHidden { showFind() }
+        let total = header.markCount + textMatches
+        guard total > 0 else { return NSSound.beep() }
+        findIndex = (findIndex + (forward ? 1 : total - 1)) % total
+        showCurrentMatch(revealing: true)
+    }
+
+    /// Use Selection for Find (⌘E): the text selected in the message, as the text to find.
+    func useSelectionForFind() {
+        func use(_ text: String) {
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return NSSound.beep() }
+            findBar.field.stringValue = text
+            findBar.rememberText()
+            if !findBar.isHidden { find(text) }
+        }
+        // A header value's selection (its field editor), else the page's.
+        if let editor = view.window?.firstResponder as? NSTextView, editor.isFieldEditor,
+            (editor.delegate as? NSView)?.isDescendant(of: header) == true
+        {
+            return use((editor.string as NSString).substring(with: editor.selectedRange()))
+        }
+        webView.callAsyncJavaScript("return window.getSelection().toString();", arguments: [:], in: nil, in: .defaultClient) { result in
+            use((try? result.get()) as? String ?? "")
+        }
+    }
+
+    /// Finds `text` anew (the first match current); "" leaves the search's marks.
+    private func find(_ text: String) {
+        let text: String? = text.isEmpty ? nil : text
+        guard text != findText else { return }
+        (findText, findIndex) = (text, 0)
+        findBar.showCount(nil)
+        if text == nil { header.currentMark = nil }
+        markAll(revealing: true)
+    }
+
+    /// Shows how many matches there are and makes the current one yellow, bringing it into view.
+    private func showCurrentMatch(revealing: Bool) {
+        guard findText != nil else { return findBar.showCount(nil) }
+        let total = header.markCount + textMatches
+        findBar.showCount(total)
+        findIndex = total == 0 ? 0 : min(findIndex, total - 1)
+        let inHeader = total > 0 && findIndex < header.markCount
+        header.currentMark = inHeader ? findIndex : nil
+        if inHeader, revealing, let rect = header.markRect(findIndex) { reveal(header.convert(rect, to: document)) }
+        let inText = total > 0 && !inHeader ? findIndex - header.markCount : -1
+        webView.callAsyncJavaScript(
+            "return typeof mmjCurrent === 'function' ? mmjCurrent(n) : null;", arguments: ["n": inText], in: nil, in: .defaultClient
+        ) { [weak self] result in
+            guard let self, revealing, inText >= 0, let edges = (try? result.get()) as? [Double], edges.count == 2 else { return }
+            let scale = webView.magnification
+            reveal(NSRect(x: 0, y: webView.frame.minY + edges[0] * scale, width: 1, height: (edges[1] - edges[0]) * scale))
+        }
+    }
+
+    /// Scrolls the message so `rect` (in the document) shows, centred if it was out of view.
+    private func reveal(_ rect: NSRect) {
+        let visible = scroll.contentView.bounds
+        guard rect.minY < visible.minY || rect.maxY > visible.maxY else { return }
+        let y = min(max(rect.midY - visible.height / 2, 0), max(0, document.frame.height - visible.height))
+        scroll.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     nonisolated func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -284,7 +444,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// Measures the content once more when the page has loaded (the script reports changes after that),
     /// and marks what the search finds in it.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if !highlights.isEmpty { markHighlights() }
+        if !highlights.isEmpty || findText != nil { markText(revealing: false) }
         webView.callAsyncJavaScript(
             "const e = document.querySelector('mmj-end'); return e ? Math.ceil(e.getBoundingClientRect().top + window.scrollY) : 0;",
             arguments: [:], in: nil, in: .defaultClient
@@ -458,6 +618,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     private func loadPage(_ html: String, bar: MessagePage.Bar?) {
         webView.resetHover()
         header.update(fields: headerFields, attachments: attachments.map(Self.headerAttachment), bar: bar)
+        (textMatches, findIndex) = (0, 0)  // the text's are counted when the page has loaded
         showsOptionVariants = false
         header.showsOptionVariants = NSEvent.modifierFlags.contains(.option)
         contentHeight = 0  // until the new page reports its own
