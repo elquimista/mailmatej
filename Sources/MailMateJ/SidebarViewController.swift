@@ -509,6 +509,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         // At launch, the mailbox chosen last time (the main window's sidebar), else Inbox.
         let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : nil
         let selectedKey = previous ?? launchKey ?? "unified.inbox"
+        let topRow = firstVisibleRow()
         roots = fresh
         isReloading = true
         defer { isReloading = false }
@@ -518,6 +519,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.expandItem(root)
             expandRemembered(root.children)
         }
+        // The reload collapsed every row a moment, which scrolled to the top: back to the rows shown.
+        if let topRow { scroll(backTo: topRow) }
         // The last mailbox (or Inbox) at launch; after the selected mailbox is deleted, nothing (as MailMate does).
         if let node = find(selectedKey, in: roots) ?? (previous == nil ? find("unified.inbox", in: roots) : nil) {
             var row = outline.row(forItem: node)
@@ -541,6 +544,40 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         suppressSelection = false
         if previous != nil, selectedNode == nil { onSelectNone?() }
         refreshStatuses()
+    }
+
+    /// The topmost row in view (under the toolbar), how far it starts from the scrolled-to top, and that top.
+    private struct TopRow { let key: String; let offset: CGFloat; let origin: NSPoint }
+
+    private func firstVisibleRow() -> TopRow? {
+        guard let clip = outline.enclosingScrollView?.contentView, outline.numberOfRows > 0 else { return nil }
+        let visible = outline.convert(clip.bounds, from: clip)
+        let rows = outline.rows(in: visible)
+        let first = (rows.location..<(rows.location + rows.length)).first {
+            outline.rect(ofRow: $0).minY >= visible.minY + clip.contentInsets.top
+        }
+        guard let first, let node = outline.item(atRow: first) as? SidebarNode else { return nil }
+        return TopRow(key: node.key, offset: outline.rect(ofRow: first).minY - visible.minY, origin: clip.bounds.origin)
+    }
+
+    /// Scrolls so `top`'s row is where it was; gone, to where the rows were scrolled.
+    private func scroll(backTo top: TopRow) {
+        guard let scrollView = outline.enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        var bounds = clip.bounds
+        bounds.origin = top.origin
+        if let node = find(top.key, in: roots), case let row = outline.row(forItem: node), row >= 0 {
+            bounds.origin.y = outline.convert(outline.rect(ofRow: row), to: clip).minY - top.offset
+        }
+        let origin = clip.constrainBoundsRect(bounds).origin
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_SIDEBAR_SCROLL"] != nil {
+                NSLog("MMJ sidebar reload: top row \(top.key) at \(top.offset), scrolled \(top.origin.y) → \(origin.y) (the reload left \(clip.bounds.minY))")
+            }
+        #endif
+        guard origin != clip.bounds.origin else { return }
+        clip.scroll(to: origin)
+        scrollView.reflectScrolledClipView(clip)
     }
 
     #if DEBUG
@@ -674,6 +711,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         func debugRefreshStatuses() { refreshStatuses() }
         func debugScrollToTop() { outline.scrollRowToVisible(0) }
+
+        /// Scrolls the rows by `points`, as the wheel would; logs the top row in view.
+        func debugScroll(by points: CGFloat) {
+            guard let scrollView = outline.enclosingScrollView else { return }
+            let clip = scrollView.contentView
+            clip.scroll(to: clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: points)).origin)
+            scrollView.reflectScrolledClipView(clip)
+            NSLog("MMJ sidebar scrolled to \(clip.bounds.minY), top row \(firstVisibleRow()?.key ?? "-")")
+        }
 
         func debugDuplicate(key: String) {
             guard let node = find(key, in: roots) else { return NSLog("MMJ duplicate: no \(key)") }

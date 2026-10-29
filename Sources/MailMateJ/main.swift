@@ -560,13 +560,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(1))
                 }
                 // MMJ_SNAPSHOT_SCROLL=<points>[,<points>…]: scroll the list by each in turn, as the wheel would
-                // (h<points>: the window that much taller, or shorter, at its bottom edge, as dragging it would).
+                // (h<points>: the window that much taller, or shorter, at its bottom edge, as dragging it would;
+                // s<points>: the sidebar scrolled instead).
                 for step in (ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SCROLL"] ?? "").split(separator: ",") {
                     if step.hasPrefix("h"), let points = Double(step.dropFirst()), let window = windowController?.window {
                         var frame = window.frame
                         frame.origin.y -= points
                         frame.size.height += points
                         window.setFrame(frame, display: true)
+                    } else if step.hasPrefix("s"), let points = Double(step.dropFirst()) {
+                        windowController?.debugScrollSidebar(by: points)
                     } else if let points = Double(step) {
                         windowController?.debugScrollList(by: points)
                     }
