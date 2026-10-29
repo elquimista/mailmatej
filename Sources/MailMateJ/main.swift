@@ -82,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugDuplicateSidebar(key)
                     try? await Task.sleep(for: .milliseconds(500))
                 }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_TINTS"] != nil {
+                    NSLog("MMJ selected tints: \(windowController?.debugListSelectedTints ?? "-")")
+                }
                 // MMJ_DEBUG_ABOUT=<png>: About MailMateJ opened and its panel captured.
                 if let path = ProcessInfo.processInfo.environment["MMJ_DEBUG_ABOUT"] {
                     (NSApp.delegate as? AppDelegate)?.showAbout(nil)

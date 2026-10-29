@@ -691,6 +691,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             if unread { return iconCell(tableView, column, image: Self.unreadDot, tint: .controlAccentColor) }
             return iconCell(tableView, column, image: row.isAnswered ? Self.repliedArrow : nil, tint: .labelColor)
         case .flag:
+            // Red on a selected row too, as MailMate's (see `rowFlag`).
             if row.isFlagged { return iconCell(tableView, column, image: Self.rowFlag, tint: .systemRed) }
             // A folded thread with a flagged reply: MailMate's hollow flag, in the text's color.
             return iconCell(tableView, column, image: showsFlaggedReply(row) ? Self.replyFlag : nil, tint: .labelColor)
@@ -820,6 +821,30 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     #if DEBUG
         /// The context menu of a row as a right-click builds it; runs the item titled `run`, if any.
+        /// The flag and the unread dot as drawn on a selected row of the focused list (emphasized): each
+        /// cell rendered on the selection color, with its icon's commonest colors (the pixels, not the tint).
+        var debugSelectedTints: String {
+            func drawn(_ column: Column, _ image: NSImage?, _ color: NSColor, selected: Bool = true) -> String {
+                guard let cell = iconCell(tableView, column, image: image, tint: color) as? IconCellView else { return "-" }
+                cell.frame = NSRect(x: 0, y: 0, width: 16, height: 17)
+                cell.appearance = tableView.effectiveAppearance
+                cell.backgroundStyle = selected ? .emphasized : .normal
+                cell.layoutSubtreeIfNeeded()
+                guard let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) else { return "-" }
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+                var counts: [String: Int] = [:]
+                for y in 0..<rep.pixelsHigh {
+                    for x in 0..<rep.pixelsWide {
+                        guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), c.alphaComponent > 0.9 else { continue }
+                        counts[String(format: "%.0f,%.0f,%.0f", c.redComponent * 255, c.greenComponent * 255, c.blueComponent * 255), default: 0] += 1
+                    }
+                }
+                return counts.sorted { $0.value > $1.value }.prefix(2).map { "\($0.key)×\($0.value)" }.joined(separator: " ")
+            }
+            return "selected: flag \(drawn(.flag, Self.rowFlag, .systemRed)), unread dot \(drawn(.unread, Self.unreadDot, .controlAccentColor)); "
+                + "not selected: flag \(drawn(.flag, Self.rowFlag, .systemRed, selected: false))"
+        }
+
         func debugContextMenu(row: Int, run: String?) -> [String] {
             let menu = NSMenu()
             fillContextMenu(menu, row: row)
@@ -1037,15 +1062,19 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     /// Measured on screen against MailMate: the ink from 2 px below the row's top, 26 px before the sender.
-    private static let rowFlag = flagImage("flag.fill", accessibilityDescription: "Flagged", top: 1)
+    /// Drawn in red, whatever the row: a selected row whitens a template image whatever its tint, and
+    /// MailMate's flag stays red there.
+    private static let rowFlag = flagImage("flag.fill", accessibilityDescription: "Flagged", top: 1, color: .systemRed)
     /// MailMate's hollow flag on a folded thread with a flagged reply (measured at 1x): 12 × 13 px, rows
     /// 2–14 of the row counting its faint top edge (1 px lower than the flag as placed), across where the
     /// flag is.
     private static let replyFlag = flagImage("flag", accessibilityDescription: "Flagged reply", top: 2)
 
-    private static func flagImage(_ name: String, accessibilityDescription: String, top: CGFloat) -> NSImage? {
+    private static func flagImage(_ name: String, accessibilityDescription: String, top: CGFloat, color: NSColor? = nil) -> NSImage? {
+        var configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        if let color { configuration = configuration.applying(.init(paletteColors: [color])) }
         guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+            .withSymbolConfiguration(configuration)
         else { return nil }
         let ink = inkBounds(of: symbol, integral: false)
         let size = NSSize(width: 16, height: 17)  // The flag column's cell.
@@ -1055,7 +1084,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
             symbol.draw(at: shift, from: .zero, operation: .sourceOver, fraction: 1)
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = color == nil
         return image
     }
 
@@ -1116,7 +1145,8 @@ final class IconHeaderCell: NSTableHeaderCell {
     }
 }
 
-/// An icon that turns white on a selected row while the list is focused, as MailMate's unread dot does.
+/// An icon that turns white on a selected row while the list is focused, as MailMate's unread dot does
+/// (an image drawn in its own color, as the red flag is, stays as it is).
 final class IconCellView: NSTableCellView {
     var tint: NSColor = .controlAccentColor {
         didSet { updateTint() }

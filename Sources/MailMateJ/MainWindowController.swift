@@ -1002,6 +1002,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
         func debugRender(html: String) { messageView.debugRender(html: html) }
 
+        var debugListSelectedTints: String { list.debugSelectedTints }
+
         func debugContextMenu(row: Int, run: String?) -> [String] {
             let id = row < list.ids.count ? list.ids[row] : -1
             let before = list.selectedIDs
