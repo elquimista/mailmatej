@@ -99,12 +99,25 @@ public struct GmailClient: Sendable {
     // MARK: Changes
 
     /// Adds and removes labels on up to 1,000 messages at once (messages already without a label to
-    /// remove are fine).
+    /// remove are fine), in as many requests as the labels need (see `labelBatches`).
     public func modify(_ ids: [String], add: [String], remove: [String]) async throws {
         for chunk in stride(from: 0, to: ids.count, by: 1000).map({ Array(ids[$0..<min($0 + 1000, ids.count)]) }) {
-            _ = try await send("POST", "messages/batchModify", json: [
-                "ids": chunk, "addLabelIds": add, "removeLabelIds": remove,
-            ], cost: 50)
+            for labels in Self.labelBatches(add: add, remove: remove) {
+                _ = try await send("POST", "messages/batchModify", json: [
+                    "ids": chunk, "addLabelIds": labels.add, "removeLabelIds": labels.remove,
+                ], cost: 50)
+            }
+        }
+    }
+
+    /// Gmail refuses more than 100 labels added and removed in one request ("Too many label modifications
+    /// in one request": a move takes a message off every other label, and an account can have hundreds),
+    /// so they go 100 at a time, those added first (a message moved is in its new place from the first).
+    static func labelBatches(add: [String], remove: [String]) -> [(add: [String], remove: [String])] {
+        let changes = add.map { (label: $0, on: true) } + remove.map { (label: $0, on: false) }
+        return stride(from: 0, to: max(changes.count, 1), by: 100).map { start in
+            let batch = changes[start..<min(start + 100, changes.count)]
+            return (batch.filter(\.on).map(\.label), batch.filter { !$0.on }.map(\.label))
         }
     }
 
