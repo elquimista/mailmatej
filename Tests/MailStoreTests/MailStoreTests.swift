@@ -159,8 +159,12 @@ import Testing
             MailStore.ThreadInput(id: 2, account: "a", at: 200, seen: false, messageId: "b@z", inReplyTo: "ticket@z"),
             MailStore.ThreadInput(id: 4, account: "a", at: 400, seen: false, messageId: "d@z", inReplyTo: "other@z"),
         ]
-        #expect(MailStore.parents(rows) == [2: 1, 3: 2])
-        let threaded = MailStore.thread(rows, expanded: ["a:1"], opened: [2])
+        let parent = MailStore.Threads(rows).parent
+        let parents = Dictionary(uniqueKeysWithValues: rows.indices.compactMap { i in
+            parent[i] >= 0 ? (rows[i].id, rows[Int(parent[i])].id) : nil
+        })
+        #expect(parents == [2: 1, 3: 2])
+        let threaded = MailStore.thread(rows, expanded: [MailStore.threadKeys(rows)[1]!], opened: [2])
         #expect(threaded.first { $0.id == 1 }?.size == 3)
         #expect(threaded.map { "\($0.id):\($0.depth)" }.contains("3:2"))
     }

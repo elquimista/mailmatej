@@ -331,7 +331,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let result = self.result.map { ($0.kind, $0.anchor, $0.condition, $0.opening) }
         let started = Date()
         Task {
-            let (rows, messages, newest, stages, scope, expanded, opened) = await Task.detached(priority: .userInitiated) {
+            let (rows, messages, newest, stages, scope, expanded, opened, threadRows, listed) = await Task.detached(priority: .userInitiated) {
                 let began = Date()
                 var (scope, expanded, opened) = (scope, savedExpanded, savedOpened)
                 if let (kind, anchor, condition, opening) = result {
@@ -366,8 +366,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
                 let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
                 let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
+                // Looked up by id on the main thread, made here (hundreds of thousands in a big mailbox).
+                let threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
+                let rowIDs = Set(rows.map(\.id))
                 // Every message of the list, collapsed threads' replies included (threadOf has each one).
-                return (rows, list?.threadOf.count ?? rows.count, newest, stages, scope, expanded, opened)
+                return (rows, list?.threadOf.count ?? rows.count, newest, stages, scope, expanded, opened, threadRows, rowIDs)
             }.value
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
@@ -389,12 +392,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 }
             }
             let ids = rows.map(\.id)
-            // Selections can be tens of thousands: looked up in a set, not the list.
-            let listed = Set(ids)
+            // Selections can be tens of thousands: looked up in a set (`listed`), not the list.
             list.showsThreads = threaded
             list.expandedThreads = expanded
             list.openedMessages = opened
-            list.threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
+            list.threadRows = threadRows
             let before = list.selectedIDs
             var restoredDisplay: Int64?
             // Where the newest mail is: the list's end when sorted by date (with threads, the newest
