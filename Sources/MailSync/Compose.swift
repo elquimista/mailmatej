@@ -74,6 +74,8 @@ public struct OutgoingMessage: Sendable {
 public struct SavedDraft: Sendable {
     /// The From address, lowercased.
     public var from: String?
+    /// The From's name (a From of the user's own keeps it).
+    public var fromName: String?
     public var to: [EmailAddress] = []
     public var cc: [EmailAddress] = []
     public var bcc: [EmailAddress] = []

@@ -721,8 +721,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     { debugLogTabOrder(in: window, count: count) }
                     try? await Task.sleep(for: .milliseconds(500))
                     writeSnapshot(of: ComposeWindowController.debugSnapshotFrontmost(), to: path.replacingOccurrences(of: ".png", with: "-compose.png"))
-                    // Also a real screen capture of just that window (what the display shows).
-                    if let number = ComposeWindowController.debugSnapshotFrontmost()?.windowNumber {
+                    // Also a real screen capture of just that window (what the display shows); it takes the
+                    // focus, so not with MMJ_DEBUG_NO_ACTIVATE.
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_NO_ACTIVATE"] == nil,
+                        let number = ComposeWindowController.debugSnapshotFrontmost()?.windowNumber
+                    {
                         NSApp.activate()
                         ComposeWindowController.debugSnapshotFrontmost()?.makeKeyAndOrderFront(nil)
                         try? await Task.sleep(for: .seconds(1))

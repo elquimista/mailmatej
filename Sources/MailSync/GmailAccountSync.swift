@@ -1433,6 +1433,7 @@ extension GmailAccountSync {
         let (body, parts) = BodyStructure(raw).render(blobId: remoteId)
         var draft = SavedDraft()
         draft.from = addresses("From").first?.email?.lowercased()
+        draft.fromName = addresses("From").first?.name
         draft.to = addresses("To")
         draft.cc = addresses("Cc")
         draft.bcc = addresses("Bcc")

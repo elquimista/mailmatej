@@ -885,6 +885,7 @@ public actor JMAPAccountSync {
         }
         var draft = SavedDraft()
         draft.from = addresses("from").first?.email?.lowercased()
+        draft.fromName = addresses("from").first?.name
         draft.to = addresses("to")
         draft.cc = addresses("cc")
         draft.bcc = addresses("bcc")

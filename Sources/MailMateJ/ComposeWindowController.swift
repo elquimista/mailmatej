@@ -30,7 +30,18 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         var isMarkdown: Bool?
         /// The draft it was opened from (Drafts): kept as it was until the message is saved or sent.
         var openedDraft: AppModel.DraftRef?
+        /// A From of the user's own (Customize…), sent through `identity`'s account.
+        var customFrom: EmailAddress?
     }
+
+    /// A From typed in Customize…, sent through `identity`'s account (an item of the From menu).
+    private struct CustomFrom: Hashable {
+        var identity: IdentityRecord
+        var address: EmailAddress
+    }
+
+    /// The From menu's last item, MailMate's Customize….
+    private static let customizeItem = "customize"
 
     /// Open compose windows; each removes itself when closed.
     private static var open: Set<ComposeWindowController> = []
@@ -38,6 +49,8 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let model: AppModel
     private var setup: Setup
     private let fromPopup = NSPopUpButton()
+    /// The From menu's item chosen last (not Customize…, which only opens its sheet).
+    private var fromIndex = 0
     private let toField = AddressTokenField()
     private let ccField = AddressTokenField()
     private let bccField = AddressTokenField()
@@ -427,6 +440,12 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             let index = fromPopup.indexOfItem(withRepresentedObject: identity)
             if index >= 0 { fromPopup.selectItem(at: index) }
         }
+        // MailMate's Customize…: any From, at the very bottom.
+        fromPopup.menu?.addItem(.separator())
+        fromPopup.addItem(withTitle: "Customize\u{2026}")
+        fromPopup.lastItem?.representedObject = Self.customizeItem
+        fromIndex = fromPopup.indexOfSelectedItem
+        if let custom = setup.customFrom { showCustomFrom(custom) }
         toField.addresses = setup.draft.to
         ccField.addresses = setup.draft.cc
         subjectField.stringValue = setup.draft.subject
@@ -449,7 +468,61 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         draftState = savedState
     }
 
-    @objc private func popupChanged(_ sender: Any?) { updateEdited() }
+    @objc private func popupChanged(_ sender: Any?) {
+        if sender as? NSPopUpButton === fromPopup {
+            if fromPopup.selectedItem?.representedObject as? String == Self.customizeItem { return customizeFrom() }
+            fromIndex = fromPopup.indexOfSelectedItem
+        }
+        updateEdited()
+    }
+
+    /// The identity sending the message: the one chosen, or the one a custom From goes through.
+    private var chosenIdentity: IdentityRecord? {
+        let chosen = fromPopup.selectedItem?.representedObject
+        return (chosen as? CustomFrom)?.identity ?? chosen as? IdentityRecord
+    }
+
+    /// The From as chosen: the identity's, or the one typed in Customize….
+    private var chosenFrom: EmailAddress? {
+        let chosen = fromPopup.selectedItem?.representedObject
+        if let custom = chosen as? CustomFrom { return custom.address }
+        return (chosen as? IdentityRecord).map { EmailAddress(name: $0.name, email: $0.email) }
+    }
+
+    /// MailMate's Customize…: a sheet to type the From as "Name <address>", starting from the one chosen.
+    /// Cancel goes back to it.
+    private func customizeFrom() {
+        fromPopup.selectItem(at: fromIndex)
+        let current = chosenFrom.map(Compose.format) ?? ""
+        fromPopup.selectItem(at: fromPopup.indexOfItem(withRepresentedObject: Self.customizeItem))  // shown meanwhile
+        guard let window else { return fromPopup.selectItem(at: fromIndex) }
+        CustomFromSheet.ask(over: window, value: current) { [weak self] address in
+            guard let self else { return }
+            fromPopup.selectItem(at: fromIndex)
+            guard let address else { return }
+            showCustomFrom(address)
+            updateEdited()
+        }
+    }
+
+    /// Makes `address` the From: an identity's own (name and address) is simply chosen; anything else is
+    /// shown above Customize… and sent through the identity with that address, if there's one, else
+    /// through the account of the identity chosen before.
+    private func showCustomFrom(_ address: EmailAddress) {
+        let same = { (identity: IdentityRecord) in identity.email.caseInsensitiveCompare(address.email ?? "") == .orderedSame }
+        if let identity = setup.identities.first(where: { same($0) && $0.name == (address.name ?? "") }) {
+            fromPopup.selectItem(at: fromPopup.indexOfItem(withRepresentedObject: identity))
+            fromIndex = fromPopup.indexOfSelectedItem
+            return
+        }
+        guard let base = setup.identities.first(where: { same($0) }) ?? chosenIdentity, let menu = fromPopup.menu else { return }
+        for item in menu.items where item.representedObject is CustomFrom { menu.removeItem(item) }
+        let item = NSMenuItem(title: Compose.format(address), action: nil, keyEquivalent: "")
+        item.representedObject = CustomFrom(identity: base, address: address)
+        menu.insertItem(item, at: max(0, fromPopup.indexOfItem(withRepresentedObject: Self.customizeItem) - 1))  // above the line
+        fromPopup.select(item)
+        fromIndex = fromPopup.indexOfSelectedItem
+    }
 
     // MARK: Attachments
 
@@ -529,7 +602,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         let pictures = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
         attach(urls)
         guard !pictures.isEmpty else { return }
-        let domain = (fromPopup.selectedItem?.representedObject as? IdentityRecord)?.email.split(separator: "@").last
+        let domain = chosenFrom?.email?.split(separator: "@").last
             .map(String.init) ?? "mailmatej.local"
         let references = pictures.map { url -> String in
             let cid = contentIDs[url] ?? "\(UUID().uuidString)@\(domain)"
@@ -789,7 +862,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// The message as written, from the chosen identity's account: to send, or (`asDraft`) to save as a
     /// draft, which needn't be complete and keeps Markdown as typed.
     private func outgoing(asDraft: Bool) throws -> (message: OutgoingMessage, accountId: String) {
-        guard let identity = fromPopup.selectedItem?.representedObject as? IdentityRecord else {
+        guard let identity = chosenIdentity, let from = chosenFrom else {
             throw Problem(message: "Choose who the message is from.")
         }
         let to = toField.addresses
@@ -808,7 +881,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             }
         }
         var message = OutgoingMessage(
-            identityId: identity.remoteId, from: EmailAddress(name: identity.name, email: identity.email),
+            identityId: identity.remoteId, from: from,
             to: to, cc: cc, bcc: bcc, subject: subjectField.stringValue, text: textView.string,
             attachments: partsUsable ? setup.attachments : [], inReplyTo: setup.inReplyTo, references: setup.references)
         if isMarkdown {
@@ -820,7 +893,8 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             }
         }
         message.replyTo = replyTo
-        message.mailFrom = identity.envelopeEmail
+        // The envelope sender is the identity's own address, whatever the From says (Customize…).
+        message.mailFrom = identity.envelopeEmail ?? identity.email
         do {
             let shown = isMarkdown ? MarkdownMail.imageContentIDs(textView.string) : []
             message.files = try files.map { url in
@@ -972,7 +1046,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         let addresses = [toField, ccField, bccField, replyToField].map { field in
             "\(field.objectValue ?? "")|\(field.currentEditor()?.string ?? "")"
         }
-        let popups = "\(fromPopup.indexOfSelectedItem)|\(formatPopup.indexOfSelectedItem)"
+        let popups = "\(fromPopup.titleOfSelectedItem ?? "")|\(formatPopup.indexOfSelectedItem)"
         let shown = HeaderRow.allCases.map { rows[$0]?.isHidden == false ? "1" : "0" }.joined()
         return ([subjectField.stringValue, textView.string, popups, shown] + addresses + files.map(\.path))
             .joined(separator: "\u{1}")
@@ -1066,6 +1140,27 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                 let identity = c.setup.identities.first(where: { $0.email == from.lowercased() })
             {
                 c.fromPopup.selectItem(at: c.fromPopup.indexOfItem(withRepresentedObject: identity))
+            }
+            if let custom = env["MMJ_DEBUG_CUSTOM_FROM"] {
+                // Customize… chosen, its sheet answered with `custom` ("show": left up and captured to
+                // <snapshot>-sheet.png, nothing sent).
+                c.fromPopup.selectItem(at: c.fromPopup.indexOfItem(withRepresentedObject: Self.customizeItem))
+                c.popupChanged(c.fromPopup)
+                NSLog("MMJ custom from: sheet starts from \"\(CustomFromSheet.debugValue ?? "-")\"")
+                if custom == "show" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        guard let path = env["MMJ_SNAPSHOT"], let sheet = c.window?.attachedSheet else { return NSLog("MMJ custom from: no sheet") }
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(sheet.windowNumber)", path.replacingOccurrences(of: ".png", with: "-sheet.png")]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                        NSLog("MMJ custom from: sheet \(NSStringFromRect(sheet.frame)), pop-up shows \(c.fromPopup.titleOfSelectedItem ?? "-")")
+                    }
+                    return
+                }
+                CustomFromSheet.debugFinish(custom)
+                NSLog("MMJ custom from: menu ends \(c.fromPopup.itemTitles.suffix(4)), shows \(c.fromPopup.titleOfSelectedItem ?? "-")")
             }
             if let to = env["MMJ_DEBUG_TO"] { c.toField.addresses = Compose.parseAddresses(to) }
             if let bcc = env["MMJ_DEBUG_BCC"] {

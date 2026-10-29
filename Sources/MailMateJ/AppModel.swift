@@ -1210,6 +1210,10 @@ final class AppModel {
                     draft: Compose.Draft(to: saved.to, cc: saved.cc, subject: saved.subject, text: saved.text))
                 setup.bcc = saved.bcc
                 setup.replyTo = saved.replyTo
+                // A From of the user's own (Customize…): not an identity's address, or under another name.
+                if let from = saved.from, !identities.contains(where: { $0.email == from && $0.name == (saved.fromName ?? $0.name) }) {
+                    setup.customFrom = EmailAddress(name: saved.fromName, email: from)
+                }
                 setup.isMarkdown = saved.isMarkdown
                 setup.attachments = saved.attachments
                 setup.attachmentsAccountId = ref.accountId
