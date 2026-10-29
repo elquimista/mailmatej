@@ -1363,6 +1363,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case Self.searchItem:
             let item = NSSearchToolbarItem(itemIdentifier: id)
             item.searchField.placeholderString = "Search All Messages"
+            // Its text otherwise shows grey (156 on screen) while the field isn't being edited, like a
+            // placeholder; MailMate's is the label colour (235).
+            item.searchField.textColor = .labelColor
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
             // As MailMate: searches on Return (and when cleared), not on every keystroke.
