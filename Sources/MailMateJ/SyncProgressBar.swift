@@ -1,14 +1,14 @@
 import AppKit
 
 /// The sidebar's bottom strip while the selected mailbox downloads, in the place, size and green of
-/// MailMate's storage bar (measured at 1x): a 22 pt strip under a 1 pt line, its bar 16 pt tall, 3 pt
-/// below the line and 8 pt in from the left, over a grey track; its corners rounded (4 pt), the fill's
-/// leading end too. What's under way is written across the bar in 10 pt digits that don't jitter,
+/// MailMate's storage bar (measured at 1x): a 23 pt strip from a 1 pt line to the window's edge (which
+/// covers its last point), its bar 16 pt tall, 3 pt below the line, 2 pt above the edge and 8 pt in from
+/// the left, over a grey track; its corners rounded (2.5 pt), the fill's leading end too. What's under way is written across the bar in 10 pt digits that don't jitter,
 /// dark over the green and in the text color over the track, so it reads on both; in a narrow sidebar
 /// a shorter wording is used. The fill eases to each new amount.
 final class SyncProgressBar: NSView {
-    static let height: CGFloat = 22
-    private static let radius: CGFloat = 4
+    static let height: CGFloat = 23
+    private static let radius: CGFloat = 2.5
 
     /// Done so far, 0...1.
     var fraction = 0.0 {
@@ -65,15 +65,12 @@ final class SyncProgressBar: NSView {
         let width = shown > 0 ? max(Self.radius * 2, (bar.width * min(shown, 1)).rounded()) : 0
         let fill = NSRect(x: bar.minX, y: bar.minY, width: width, height: bar.height)
         if width > 0 {
-            let path = NSBezierPath(roundedRect: fill, xRadius: Self.radius, yRadius: Self.radius)
+            // MailMate's fill has a 1 pt rim a shade darker than its inside: the whole shape in that, the
+            // inside over it (a stroke over the fill would draw the corners' edge twice, more square).
+            (Self.green.blended(withFraction: 0.12, of: .black) ?? Self.green).setFill()
+            NSBezierPath(roundedRect: fill, xRadius: Self.radius, yRadius: Self.radius).fill()
             Self.green.setFill()
-            path.fill()
-            // MailMate's fill has a 1 pt rim a shade darker than its inside.
-            (Self.green.blended(withFraction: 0.12, of: .black) ?? Self.green).setStroke()
-            let rim = NSBezierPath(
-                roundedRect: fill.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.radius - 0.5, yRadius: Self.radius - 0.5)
-            rim.lineWidth = 1
-            rim.stroke()
+            NSBezierPath(roundedRect: fill.insetBy(dx: 1, dy: 1), xRadius: Self.radius - 1, yRadius: Self.radius - 1).fill()
         }
         drawText(in: bar, track: track, fill: width > 0 ? NSBezierPath(roundedRect: fill, xRadius: Self.radius, yRadius: Self.radius) : nil)
     }
