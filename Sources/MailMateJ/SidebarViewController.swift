@@ -2156,7 +2156,11 @@ final class SidebarCell: NSTableCellView {
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
+        // At the symbol's own size, centred on an 18 pt column, as MailMate draws them: shrunk to fit the
+        // column, the wider ones (person.2 is 22 pt with its margins, folder and tray 19) came out up to a
+        // fifth smaller than MailMate's, and soft.
         let image = NSImageView()
+        image.imageScaling = .scaleNone
         // Solid text, as MailMate's (254 on the dark sidebar, not 240): the sidebar's frosted material
         // blends vibrant label colours with what's behind the window, which made the names look washed out.
         let field = SolidLabel(labelWithString: "")
@@ -2170,12 +2174,11 @@ final class SidebarCell: NSTableCellView {
         textField = field
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-        titleAfterIcon = field.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 5)
-        titleInIconsPlace = field.leadingAnchor.constraint(equalTo: image.leadingAnchor)
+        titleAfterIcon = field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2 + 18 + 5)
+        titleInIconsPlace = field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2)
         NSLayoutConstraint.activate([
-            image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            image.centerXAnchor.constraint(equalTo: leadingAnchor, constant: 2 + 18 / 2),
             image.centerYAnchor.constraint(equalTo: centerYAnchor),
-            image.widthAnchor.constraint(equalToConstant: 18),
             titleAfterIcon,
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: field.trailingAnchor, constant: 6),

@@ -289,10 +289,9 @@ enum MailboxSymbols {
 
     /// A source's symbol, `size` points square in the sidebar. MailMate's G is 12 pt beside the 13 pt
     /// name, a point beyond its ascenders above and below (measured at 1x); the network globe, and
-    /// Fastmail's mark with it, are a point bigger, as MailMate draws SF Symbols bigger than ours (its
-    /// folder 15 by 12 pt, ours 14 by 11). A template, so it takes the row's tint. For the sidebar the
-    /// image is 16 pt wide, the symbol ending 3 pt from its right: centred in the sidebar's 18 pt icon
-    /// box, the symbol ends 9 pt before the name, as MailMate's do.
+    /// Fastmail's mark with it, are a point bigger, as MailMate's globe. A template, so it takes the row's
+    /// tint. For the sidebar the image is 16 pt wide, the symbol ending 3 pt from its right: centred in
+    /// the sidebar's 18 pt icon column, the symbol ends 9 pt before the name, as MailMate's do.
     private static func sourceImage(
         _ size: CGFloat, _ scale: CGFloat, _ sidebar: Bool, _ draw: @escaping @Sendable (CGFloat) -> Void
     ) -> NSImage {
