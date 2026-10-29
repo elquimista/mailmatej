@@ -766,6 +766,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
         var debugSelection: [Int64] { list.selectedIDs }
 
+        /// The keyboard in the message list.
+        func debugFocusList() { window?.makeFirstResponder(list.tableView) }
+
 
         /// Selects the newest list row with this subject.
         func debugSelect(subject: String) {

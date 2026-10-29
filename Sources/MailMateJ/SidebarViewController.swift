@@ -114,6 +114,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         NotificationCenter.default.addObserver(forName: MailboxColors.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.restyleVisibleRows() }
         }
+        // The window's focus changing redraws the names (see SidebarCell.titleColor); whatever has the keyboard
+        // (the sidebar's rows only hear of it when they had it), they're set again then too.
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: name, object: nil)
+        }
+    }
+
+    @objc private func windowFocusChanged(_ note: Notification) {
+        guard isViewLoaded, note.object as? NSWindow === view.window else { return }
+        restyleVisibleTitles()
+        DispatchQueue.main.async { [weak self] in self?.restyleVisibleTitles() }  // and once AppKit has redrawn
+    }
+
+    /// Sets the visible rows' names again (see SidebarCell.restyleTitle).
+    private func restyleVisibleTitles() {
+        guard isViewLoaded else { return }
+        let rows = outline.rows(in: outline.visibleRect)
+        for row in rows.location..<(rows.location + rows.length) {
+            (outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell)?.restyleTitle()
+        }
     }
 
     /// Shows changed mailbox colors without rebuilding the tree.
@@ -2190,8 +2210,13 @@ final class SidebarCell: NSTableCellView {
 
     private func styleTitle() {
         textField?.textColor = isOffline ? .systemRed
-            : backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .textColor
+            : backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : Self.titleColor
     }
+
+    /// A name's color: the text color's own values (white on dark, black on light), as a color of our own
+    /// rather than the system's, which AppKit draws grey in the sidebar while the window is inactive
+    /// (MailMate's names stay solid).
+    private static let titleColor = NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : .black }
 
     /// `plain`: icon and name only (the mailbox editor's sidebar).
     func configure(_ node: SidebarNode, plain: Bool = false) {

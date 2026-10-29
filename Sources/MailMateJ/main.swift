@@ -96,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         capture.waitUntilExit()
                     }
                     windowController?.debugScrollSidebarToTop()
+                    // MMJ_DEBUG_INACTIVE_FOCUS=list: the keyboard in the message list rather than the sidebar.
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_INACTIVE_FOCUS"] == "list" { windowController?.debugFocusList() }
                     NSLog("MMJ inactive: waiting for focus")
                     var waited = 0
                     while !NSApp.isActive && waited < 300 { try? await Task.sleep(for: .milliseconds(100)); waited += 1 }
