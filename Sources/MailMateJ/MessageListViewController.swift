@@ -1121,10 +1121,11 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         return true
     }
 
-    /// Measured on screen against MailMate: the ink from 2 px below the row's top, 26 px before the sender.
+    /// The ink 3 px below the row's top, 26 px before the sender: a pixel lower than MailMate's, as the
+    /// flag's weight is its cloth at the top (2 px down, the 12 px glyph looked high in the 17 px row).
     /// Drawn in red, whatever the row: a selected row whitens a template image whatever its tint, and
     /// MailMate's flag stays red there.
-    private static let rowFlag = flagImage("flag.fill", accessibilityDescription: "Flagged", top: 1, color: .systemRed)
+    private static let rowFlag = flagImage("flag.fill", accessibilityDescription: "Flagged", top: 2, color: .systemRed)
     /// MailMate's hollow flag on a folded thread with a flagged reply (measured at 1x): 12 × 13 px, rows
     /// 2–14 of the row counting its faint top edge (1 px lower than the flag as placed), across where the
     /// flag is.
