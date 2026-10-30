@@ -906,6 +906,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step.hasPrefix("tab"), let count = Int(step.dropFirst(3)), let window {  // "!tab3": Tab 3 times, logged
                     return debugLogTabOrder(in: window, count: count)
                 }
+                // "!newbox=account.dev-alice": New Mailbox in that row; "!newname=X" names it (Return), "!newname"
+                // leaves it (Escape); "!rows=key": the rows inside a row.
+                if step.hasPrefix("newbox=") { return sidebar.debugNewMailbox(in: String(step.dropFirst(7))) }
+                if step.hasPrefix("newname") { return sidebar.debugFinishRename(step.hasPrefix("newname=") ? String(step.dropFirst(8)) : nil) }
+                if step.hasPrefix("selecttitle=") { return sidebar.debugSelect(title: String(step.dropFirst(12))) }
+                if step.hasPrefix("renamerow=") { return sidebar.debugRename(String(step.dropFirst(10))) }  // Rename on that row
+                if step.hasPrefix("rows=") {
+                    return NSLog("MMJ rows under \(step.dropFirst(5)):\n\(sidebar.debugRows(under: String(step.dropFirst(5))))")
+                }
                 if step.hasPrefix("name=") { return MailboxNameSheet.debugFinish(name: String(step.dropFirst(5)), edit: false) }
                 if step.hasPrefix("edit=") { return MailboxNameSheet.debugFinish(name: String(step.dropFirst(5)), edit: true) }
                 if step == "name" { return MailboxNameSheet.debugFinish(name: nil, edit: false) }

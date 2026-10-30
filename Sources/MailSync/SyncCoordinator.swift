@@ -344,10 +344,15 @@ public actor SyncCoordinator {
         return try await engine.ensureIdentities(addresses, name: name)
     }
 
-    public func createMailbox(accountId: String, name: String, role: String?, parentRemoteId: String? = nil) async throws {
-        if let gmail = gmailEngines[accountId] { return try await gmail.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId) }
+    /// Makes a mailbox on the server; `pending`: the stand-in shown meanwhile (see `MailStore.addPendingMailbox`).
+    public func createMailbox(
+        accountId: String, name: String, role: String?, parentRemoteId: String? = nil, replacing pending: String? = nil
+    ) async throws {
+        if let gmail = gmailEngines[accountId] {
+            return try await gmail.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId, replacing: pending)
+        }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }
-        try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId)
+        try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId, replacing: pending)
     }
 
     /// Copies a whole message into a mailbox of `accountId` (see `JMAPAccountSync.importMessage`).

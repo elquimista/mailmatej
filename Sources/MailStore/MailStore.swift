@@ -301,7 +301,8 @@ public final class MailStore: Sendable {
                 let keep = Set(upserts.map(\.remoteId))
                 let existing = try String.fetchAll(
                     db, sql: "SELECT remoteId FROM mailbox WHERE accountId = ?", arguments: [accountId])
-                for remoteId in existing where !keep.contains(remoteId) {
+                // One made here stays while its server makes it (see `addPendingMailbox`).
+                for remoteId in existing where !keep.contains(remoteId) && !remoteId.hasPrefix(Self.pendingMailboxPrefix) {
                     try db.execute(
                         sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
                 }
@@ -311,6 +312,53 @@ public final class MailStore: Sendable {
                     sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId])
             }
             try Self.inferArchive(db, accountId: accountId, serverArchive: upserts.first { $0.role == "archive" }?.remoteId)
+        }
+    }
+
+    /// The start of a mailbox's remote id while its server is making it (see `addPendingMailbox`).
+    public static let pendingMailboxPrefix = "pending:"
+
+    /// A new mailbox, here at once while its server makes it: it has a stand-in remote id
+    /// (`pendingMailboxPrefix`) until `confirmPendingMailbox` gives it the server's. It sorts as the
+    /// account's other mailboxes of its own do (their sort order).
+    public func addPendingMailbox(accountId: String, parentRemoteId: String?, name: String) throws -> MailboxRecord {
+        try write { db in
+            let order = try Int.fetchOne(
+                db, sql: "SELECT MAX(sortOrder) FROM mailbox WHERE accountId = ? AND role IS NULL", arguments: [accountId]) ?? 0
+            let remoteId = Self.pendingMailboxPrefix + UUID().uuidString
+            try db.execute(
+                sql: """
+                    INSERT INTO mailbox (accountId, remoteId, parentRemoteId, name, role, sortOrder, totalEmails, unreadEmails)
+                    VALUES (?, ?, ?, ?, NULL, ?, 0, 0)
+                    """,
+                arguments: [accountId, remoteId, parentRemoteId, name, order])
+            return MailboxRecord(
+                id: db.lastInsertedRowID, accountId: accountId, remoteId: remoteId, parentRemoteId: parentRemoteId,
+                name: name, role: nil, sortOrder: order, totalEmails: 0, unreadEmails: 0)
+        }
+    }
+
+    /// Removes the pending mailboxes (left by quitting before their servers made them).
+    public func removePendingMailboxes() throws {
+        try write { db in
+            try db.execute(sql: "DELETE FROM mailbox WHERE remoteId LIKE ?", arguments: [Self.pendingMailboxPrefix + "%"])
+        }
+    }
+
+    /// Its server made a pending mailbox: it takes the server's id, keeping its row. If a sync already
+    /// brought the server's in, the stand-in goes instead.
+    public func confirmPendingMailbox(accountId: String, pendingRemoteId: String, remoteId: String) throws {
+        try write { db in
+            if try Bool.fetchOne(
+                db, sql: "SELECT 1 FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, remoteId]) == true
+            {
+                try db.execute(
+                    sql: "DELETE FROM mailbox WHERE accountId = ? AND remoteId = ?", arguments: [accountId, pendingRemoteId])
+            } else {
+                try db.execute(
+                    sql: "UPDATE mailbox SET remoteId = ? WHERE accountId = ? AND remoteId = ?",
+                    arguments: [remoteId, accountId, pendingRemoteId])
+            }
         }
     }
 

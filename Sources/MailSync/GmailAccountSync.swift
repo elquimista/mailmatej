@@ -881,12 +881,19 @@ public actor GmailAccountSync {
     }
 
     /// Makes a label (inside `parentRemoteId`'s, "Parent/Name"); Archive's role makes MailMate's archive label.
-    public func createMailbox(name: String, role: String?, parentRemoteId: String? = nil) async throws {
+    /// `pending`: the stand-in shown meanwhile (see `MailStore.addPendingMailbox`), which takes the label's id.
+    public func createMailbox(name: String, role: String?, parentRemoteId: String? = nil, replacing pending: String? = nil)
+        async throws
+    {
         if role == "archive" {
             _ = try await label(for: Self.archive)
         } else {
             let parent = parentRemoteId.flatMap { labelNames[$0] }
-            _ = try await client.createLabel(parent.map { "\($0)/\(name)" } ?? name)
+            if parentRemoteId != nil, parent == nil {
+                throw JMAPAccountSync.MailboxRefused(reason: "Gmail’s own mailboxes can’t have mailboxes inside them.")
+            }
+            let made = try await client.createLabel(parent.map { "\($0)/\(name)" } ?? name)
+            if let pending { try store.confirmPendingMailbox(accountId: account.id, pendingRemoteId: pending, remoteId: made.id) }
         }
         storedLabels = nil  // so the new label is stored
         _ = try await syncLabels()

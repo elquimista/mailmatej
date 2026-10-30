@@ -594,20 +594,26 @@ public actor JMAPAccountSync {
             && error["description"]?.stringValue?.localizedCaseInsensitiveContains("try again") == true
     }
 
-    /// Creates a top-level mailbox (Mailbox/set), with `role` if the server accepts it, and syncs the
-    /// mailbox list so it's in the store.
-    public func createMailbox(name: String, role: String?, parentRemoteId: String? = nil) async throws {
+    /// Creates a mailbox (Mailbox/set), inside `parentRemoteId`'s or at the top level, with `role` if the
+    /// server accepts it, and syncs the mailbox list so it's in the store. `pending`: the stand-in shown
+    /// meanwhile (see `MailStore.addPendingMailbox`), which takes the new mailbox's id.
+    public func createMailbox(name: String, role: String?, parentRemoteId: String? = nil, replacing pending: String? = nil)
+        async throws
+    {
         let accountId = try remoteAccountId(try await client.currentSession())
-        func create(withRole: Bool) async throws -> JSONValue? {
+        func create(withRole: Bool) async throws -> (id: String?, error: JSONValue?) {
             var mailbox: [String: JSONValue] = ["name": .string(name), "parentId": parentRemoteId.map { .string($0) } ?? .null]
             if withRole, let role { mailbox["role"] = .string(role) }
             var request = JMAPRequest()
             let set = request.call("Mailbox/set", ["accountId": .string(accountId), "create": ["new": .object(mailbox)]])
-            return try await client.send(request).arguments(set)["notCreated"]?["new"]
+            let result = try await client.send(request).arguments(set)
+            return (result["created"]?["new"]?["id"]?.stringValue, result["notCreated"]?["new"])
         }
-        if var error = try await create(withRole: role != nil) {
-            if role != nil { error = try await create(withRole: false) ?? .null }  // Some servers won't set roles.
-            if error != .null { throw SendError.rejected(Self.setErrorText(error)) }
+        var made = try await create(withRole: role != nil)
+        if made.error != nil, role != nil { made = try await create(withRole: false) }  // Some servers won't set roles.
+        if let error = made.error { throw MailboxRefused(error) }
+        if let pending, let id = made.id {
+            try store.confirmPendingMailbox(accountId: account.id, pendingRemoteId: pending, remoteId: id)
         }
         _ = try await syncMailboxes(accountId)
     }
@@ -620,7 +626,7 @@ public actor JMAPAccountSync {
             "accountId": .string(accountId), "update": .object([remoteId: ["name": .string(name)]]),
         ])
         if let error = try await client.send(request).arguments(set)["notUpdated"]?[remoteId] {
-            throw SendError.rejected(Self.setErrorText(error))
+            throw MailboxRefused(error)
         }
         _ = try await syncMailboxes(accountId)
     }
@@ -965,6 +971,20 @@ public actor JMAPAccountSync {
     private static func setErrorText(_ error: JSONValue) -> String {
         let type = error["type"]?.stringValue ?? "unknown"
         return error["description"]?.stringValue.map { "\(type): \($0)" } ?? type
+    }
+
+    /// The server wouldn't make or rename a mailbox (Mailbox/set notCreated or notUpdated): its
+    /// SetError's description ("A mailbox with name 'Work' already exists."), else its type.
+    public struct MailboxRefused: Error, LocalizedError {
+        public var reason: String
+
+        public init(reason: String) { self.reason = reason }
+
+        init(_ error: JSONValue) {
+            reason = error["description"]?.stringValue ?? "The server refused it (\(error["type"]?.stringValue ?? "unknown"))."
+        }
+
+        public var errorDescription: String? { reason }
     }
 
     /// The server answered but wouldn't make a change (Email/set notUpdated or notDestroyed).

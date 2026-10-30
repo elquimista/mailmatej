@@ -558,7 +558,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let previous = selectedNode?.key
         // At launch, the mailbox chosen last time (the main window's sidebar), else Inbox.
         let launchKey = remembersSelection ? UserDefaults.standard.string(forKey: Self.lastMailboxDefaultsKey) : startKey
-        let selectedKey = previous ?? launchKey ?? "unified.inbox"
+        var selectedKey = previous ?? launchKey ?? "unified.inbox"
+        // A mailbox made here a moment ago has a new key once its server made it: the same row.
+        if let previous, previous.contains(MailStore.pendingMailboxPrefix), find(previous, in: fresh) == nil,
+            case .mailbox(let id)? = selectedNode?.scope, let made = Self.node(scope: .mailbox(id), in: fresh)
+        {
+            selectedKey = made.key
+        }
         let topRow = firstVisibleRow()
         roots = fresh
         isReloading = true
@@ -910,6 +916,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             steps += 1
         }
         return false
+    }
+
+    private static func node(scope: MessageScope, in nodes: [SidebarNode]) -> SidebarNode? {
+        for node in nodes {
+            if node.scope == scope { return node }
+            if let hit = Self.node(scope: scope, in: node.children) { return hit }
+        }
+        return nil
     }
 
     private func find(_ key: String, in nodes: [SidebarNode]) -> SidebarNode? {
@@ -1545,11 +1559,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return item
         }
         var groups: [[NSMenuItem]] = []
-        if node.kind == .account, let accountId = node.accountId {
-            // MailMate's "Edit IMAP Account…", naming the account's type.
-            let kind = (try? model.store.account(id: accountId))?.isGmail == true ? "Gmail" : "JMAP"
-            groups.append([item("Edit \(kind) Account…", #selector(editAccountClicked(_:)), accountId)])
+        // MailMate's "New IMAP Mailbox in “…”…" (without the account's type: "Smart" tells the other apart)
+        // and "Edit IMAP Account…", naming it.
+        let kind = node.accountId.map { (try? model.store.account(id: $0))?.isGmail == true ? "Gmail" : "JMAP" }
+        var account: [NSMenuItem] = []
+        if kind != nil, canHoldMailboxes(node) {
+            let new = item("New Mailbox in “\(node.title)”…", #selector(newMailboxClicked(_:)))
+            if node.accountId.map(model.isOffline) == true || node.key.contains(MailStore.pendingMailboxPrefix) { new.action = nil }
+            account.append(new)
         }
+        if node.kind == .account, let kind, let accountId = node.accountId {
+            account.append(item("Edit \(kind) Account…", #selector(editAccountClicked(_:)), accountId))
+        }
+        groups.append(account)
         if node.kind != .header {
             let count = NSMenuItem(title: "Displayed Count", action: nil, keyEquivalent: "")
             count.submenu = countMenu(for: node)
@@ -1984,6 +2006,55 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     #if DEBUG
         func debugNewSmartMailbox(inside key: String) { newSmartMailbox(inside: find(key, in: roots)) }
 
+        /// New Mailbox in `key`'s row, as its menu item does (its name then waits to be edited).
+        func debugNewMailbox(in key: String) {
+            guard let node = find(key, in: roots) else { return NSLog("MMJ new mailbox: no row \(key)") }
+            newMailbox(in: node)
+        }
+
+        /// Starts renaming `key`'s row, as Rename does.
+        func debugRename(_ key: String) {
+            if !beginRename(key: key, thenEdit: false) { NSLog("MMJ rename: can't rename \(key)") }
+        }
+
+        /// The name being edited: `name` typed over it, then Return; nil: Escape. Logs what was edited.
+        func debugFinishRename(_ name: String?) {
+            guard let renaming, let node = find(renaming.key, in: roots), case let row = outline.row(forItem: node), row >= 0,
+                let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell)?.textField,
+                let editor = field.currentEditor() as? NSTextView
+            else { return NSLog("MMJ rename: not editing") }
+            NSLog("MMJ rename: editing \(renaming.key), field \"\(editor.string)\" selected \(editor.selectedRange())")
+            guard let name else { return editor.doCommand(by: #selector(NSResponder.cancelOperation(_:))) }
+            editor.insertText(name, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            editor.insertNewline(nil)
+        }
+
+        /// Selects the first row titled `title`, as a click does.
+        func debugSelect(title: String) {
+            func first(_ nodes: [SidebarNode]) -> SidebarNode? {
+                for n in nodes { if n.title == title { return n }; if let hit = first(n.children) { return hit } }
+                return nil
+            }
+            guard let node = first(roots) else { return NSLog("MMJ select: no row titled \(title)") }
+            select(key: node.key)
+        }
+
+        /// The rows inside `key`, indented by level, each with its key (and "[shown]" when it's in view).
+        func debugRows(under key: String) -> String {
+            guard let node = find(key, in: roots) else { return "no row \(key)" }
+            var lines: [String] = []
+            func walk(_ nodes: [SidebarNode], _ depth: Int) {
+                for n in nodes {
+                    let row = outline.row(forItem: n)
+                    let shown = row >= 0 && outline.visibleRect.intersects(outline.rect(ofRow: row))
+                    lines.append(String(repeating: "  ", count: depth) + "\(n.title) <\(n.key)>\(shown ? " [shown]" : "")")
+                    walk(n.children, depth + 1)
+                }
+            }
+            walk(node.children, 0)
+            return lines.joined(separator: "\n")
+        }
+
         /// Logs the Symbol submenu for `key` ([x] when checked) and writes its first items' icons, side
         /// by side, to `path`.
         /// Opens the mailbox's Color menu, captures its window as the screen shows it, then closes it.
@@ -2051,6 +2122,50 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if select(key: key) { beginRename(key: key, thenEdit: false) }
     }
 
+    /// An account, and its mailboxes, except one of Gmail's own (Inbox, Sent Mail, ...: Gmail nests only
+    /// its labels) and one a Submailboxes tab makes.
+    private func canHoldMailboxes(_ node: SidebarNode) -> Bool {
+        if node.kind == .account { return true }
+        guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope, !node.isGenerated, let accountId = node.accountId
+        else { return false }
+        return node.role == nil || (try? model.store.account(id: accountId))?.isGmail != true
+    }
+
+    @objc private func newMailboxClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode else { return }
+        newMailbox(in: node)
+    }
+
+    /// MailMate's New Mailbox: "Untitled" in the account or mailbox, here at once (see
+    /// `AppModel.addMailbox`), selected with its name ready to edit, the rows above it opened (and kept
+    /// open, as a click on their triangles keeps them). Its server makes it once it's named.
+    func newMailbox(in node: SidebarNode) {
+        guard let accountId = node.accountId else { return }
+        let parentId: Int64? = if case .mailbox(let id)? = node.scope { id } else { nil }
+        if renaming != nil { view.window?.makeFirstResponder(outline) }  // a name being edited is done first
+        #if DEBUG
+            let started = ContinuousClock.now
+        #endif
+        guard let made = model.addMailbox(accountId: accountId, inside: parentId) else { return }
+        // Once the rows are rebuilt with it (the store change).
+        DispatchQueue.main.async { [weak self] in
+            let key = "mailbox.\(accountId).\(made.remoteId)"
+            guard let self, let row = find(key, in: roots) else { return }
+            for ancestor in ancestors(of: row) where ancestor.kind != .header { outline.expandItem(ancestor) }
+            unnamed = key
+            guard select(key: key), beginRename(key: key, thenEdit: false) else {
+                unnamed = nil
+                return model.createOnServer(mailboxId: made.id, named: made.name)
+            }
+            #if DEBUG
+                NSLog("MMJ new mailbox: \(made.name) being named after \(started.duration(to: .now))")
+            #endif
+        }
+    }
+
+    /// The new mailbox whose name is being edited: its server makes it once that's done (see `newMailbox`).
+    private var unnamed: String?
+
     @objc private func renameClicked(_ sender: NSMenuItem) {
         guard let node = sender.representedObject as? SidebarNode else { return }
         beginRename(key: node.key, thenEdit: false)
@@ -2063,16 +2178,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func canRename(_ node: SidebarNode) -> Bool {
         if node.kind == .smart || node.kind == .account { return true }
         guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
-        return node.role != "inbox"
+        return node.role != "inbox" && !node.key.contains(MailStore.pendingMailboxPrefix)  // not while its server makes it
     }
 
-    /// Edits a smart mailbox's, account's or folder's name in its row.
-    private func beginRename(key: String, thenEdit: Bool) {
-        guard let node = find(key, in: roots) else { return }
+    /// Edits a smart mailbox's, account's or folder's name in its row; false if the row isn't shown.
+    @discardableResult
+    private func beginRename(key: String, thenEdit: Bool) -> Bool {
+        guard let node = find(key, in: roots) else { return false }
         let row = outline.row(forItem: node)
         guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarCell,
             let field = cell.textField
-        else { return }
+        else { return false }
         renaming = (key, thenEdit)
         field.stringValue = node.title  // without " (offline)"
         field.textColor = .textColor
@@ -2080,6 +2196,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         field.delegate = self
         view.window?.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
+        return true
     }
 
     /// Escape cancels the rename, keeping the old name.
@@ -2103,7 +2220,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let node = find(renaming.key, in: roots) else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
-        if !name.isEmpty, name != node.title, movement != .cancel {
+        if renaming.key == unnamed, case .mailbox(let id)? = node.scope {
+            // A new mailbox: made on its server now, as named ("Untitled" left as it is, or after Escape).
+            unnamed = nil
+            if !name.isEmpty, name != node.title, movement != .cancel {
+                node.title = name
+                onRename?(node)
+            }
+            model.createOnServer(mailboxId: id, named: node.title)
+        } else if !name.isEmpty, name != node.title, movement != .cancel {
             node.title = name
             switch node.scope {
             case .smart(let id)?: model.updateSmartMailbox(id: id, name: name)

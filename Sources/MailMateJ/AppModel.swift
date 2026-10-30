@@ -80,6 +80,7 @@ final class AppModel {
     }
 
     func start() {
+        try? store.removePendingMailboxes()  // new ones the app quit before their servers made
         observation = store.observeChanges {
             let committed = ContinuousClock.now  // called as the commit ends, before any refresh that follows it
             Task { @MainActor in AppModel.shared?.scheduleRefresh(committed: committed) }
@@ -515,6 +516,7 @@ final class AppModel {
             guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
                 throw MessageActionError.noMailbox(role: "")
             }
+            if target.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) { throw MessageActionError.notMadeYet(target.name) }
             let current = try store.mailboxIDs(messageIds: ids)
             try store.setMailboxes(Dictionary(
                 ids.filter { !(current[$0] ?? []).contains(target.id) }.map { ($0, (current[$0] ?? []) + [target.id]) },
@@ -559,6 +561,7 @@ final class AppModel {
             guard let target = try store.mailboxes().first(where: { $0.id == mailboxId && $0.accountId == accountId }) else {
                 throw MessageActionError.noMailbox(role: "")
             }
+            if target.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) { throw MessageActionError.notMadeYet(target.name) }
             try move(refs, to: target)
         case .moveToRole(let role):
             guard let target = try store.mailbox(accountId: accountId, role: role) else {
@@ -856,6 +859,9 @@ final class AppModel {
     /// Copies messages into a mailbox of another account (a rule's Copy to Mailbox), keeping the originals.
     func copyAcrossAccounts(_ refs: [MailStore.MessageRef], toMailboxId mailboxId: Int64) {
         guard let target = try? store.mailboxes().first(where: { $0.id == mailboxId }) else { return }
+        if target.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) {
+            return report(MessageActionError.notMadeYet(target.name), count: refs.count)
+        }
         inBackground { [self] in
             for ref in refs {
                 do {
@@ -984,12 +990,16 @@ final class AppModel {
 
     enum MessageActionError: LocalizedError {
         case noMailbox(role: String)
+        /// Made here a moment ago, it isn't on its server yet (see `createMailbox`).
+        case notMadeYet(String)
 
         var errorDescription: String? {
             switch self {
             case .noMailbox(let role):
                 let name = ["archive": "Archive", "junk": "Junk", "trash": "Deleted Messages"][role] ?? "matching"
                 return "This account has no \(name) mailbox."
+            case .notMadeYet(let name):
+                return "“\(name)” isn’t on the server yet. Try again in a moment."
             }
         }
     }
@@ -1000,6 +1010,9 @@ final class AppModel {
     /// A message that fails to copy comes back where it was.
     func moveAcrossAccounts(_ refs: [MailStore.MessageRef], toMailboxId mailboxId: Int64) {
         guard let target = try? store.mailboxes().first(where: { $0.id == mailboxId }) else { return }
+        if target.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) {
+            return report(MessageActionError.notMadeYet(target.name), count: refs.count)
+        }
         struct Pending { var ref: MailStore.MessageRef; var blobId: String; var keywords: [String]; var receivedAt: Date }
         let pending: [Pending] = refs.compactMap { ref in
             guard let detail = try? store.detail(id: ref.id) else { return nil }
@@ -1046,6 +1059,56 @@ final class AppModel {
             alert.informativeText = Self.describe(error) + (failed.count == 1
                 ? "\n\nIt’s back where it was." : "\n\nThey’re back where they were.")
             present(alert)
+        }
+    }
+
+    /// MailMate's New IMAP Mailbox: "Untitled" ("Untitled 2", ... if that's taken) in the account, inside
+    /// `parentId`'s mailbox or at its top level, here at once. Its server makes it once it's named
+    /// (`createOnServer`); until then it's only here.
+    func addMailbox(accountId: String, inside parentId: Int64?) -> MailboxRecord? {
+        let boxes = (try? store.mailboxes()) ?? []
+        let parent = parentId.flatMap { id in boxes.first { $0.id == id } }
+        guard parentId == nil || parent != nil, parent?.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) != true else {
+            NSSound.beep()
+            return nil
+        }
+        let taken = Set(boxes.filter { $0.accountId == accountId && $0.parentRemoteId == parent?.remoteId }.map { $0.name.lowercased() })
+        var name = "Untitled", number = 1
+        while taken.contains(name.lowercased()) {
+            number += 1
+            name = "Untitled \(number)"
+        }
+        guard let made = try? store.addPendingMailbox(accountId: accountId, parentRemoteId: parent?.remoteId, name: name) else {
+            NSSound.beep()
+            return nil
+        }
+        refreshNow(countsUnchanged: true)
+        return made
+    }
+
+    /// Makes a mailbox added with `addMailbox` on its server, named `name`, in the background; it takes
+    /// the server's id. If the server refuses, it goes again and the reason shows.
+    func createOnServer(mailboxId: Int64, named name: String) {
+        guard let made = try? store.mailboxes().first(where: { $0.id == mailboxId }),
+            made.remoteId.hasPrefix(MailStore.pendingMailboxPrefix)
+        else { return }
+        if name != made.name {
+            try? store.renameMailbox(id: mailboxId, to: name)
+            refreshNow(countsUnchanged: true)
+        }
+        inBackground { [self] in
+            do {
+                try await coordinator.createMailbox(
+                    accountId: made.accountId, name: name, role: nil, parentRemoteId: made.parentRemoteId,
+                    replacing: made.remoteId)
+            } catch {
+                try? store.applyMailboxes(accountId: made.accountId, upserts: [], destroyed: [made.remoteId], replaceAll: false)
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t create “\(name)”."
+                alert.informativeText = Self.describe(error)
+                present(alert)
+            }
+            refreshNow(countsUnchanged: true)
         }
     }
 
