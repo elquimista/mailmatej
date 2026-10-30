@@ -1,15 +1,49 @@
 import AppKit
 import JMAPKit
 import MailSync
+import OSLog
 
 /// "MailMateJ" for release builds, "MailMateJ Dev" for debug builds (set by scripts/bundle.sh).
 let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "MailMateJ"
+
+/// How long after the process started each step of launching was done, in the system log (category
+/// "launch"), so a slow launch can be looked into; with MMJ_DEBUG_LAUNCH, on the console too.
+nonisolated(unsafe) let launchStarted = ContinuousClock.now
+private let launchLogger = Logger(subsystem: "app.mailmatej", category: "launch")
+#if DEBUG
+    /// MMJ_DEBUG_LAUNCH_SLEEP="<stage>:<seconds>": that long a pause at a stage of launching ("main",
+    /// "will", "did"), to see where the Dock stops bouncing.
+    func debugLaunchSleep(_ stage: String) {
+        let spec = (ProcessInfo.processInfo.environment["MMJ_DEBUG_LAUNCH_SLEEP"] ?? "").split(separator: ":")
+        guard spec.count == 2, spec[0] == stage, let seconds = Double(spec[1]) else { return }
+        launchLog("pausing at \(stage)")
+        Thread.sleep(forTimeInterval: seconds)
+        launchLog("paused at \(stage)")
+    }
+#endif
+
+func launchLog(_ step: String) {
+    let time = launchStarted.duration(to: .now).components
+    let ms = Int((Double(time.seconds) * 1000 + Double(time.attoseconds) / 1e15).rounded())
+    launchLogger.notice("Launch: \(step, privacy: .public) at \(ms) ms")
+    #if DEBUG
+        if ProcessInfo.processInfo.environment["MMJ_DEBUG_LAUNCH"] != nil { NSLog("MMJ launch: %@ at %d ms", step, ms) }
+    #endif
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    /// Everything the window shows is made ready before launching finishes, as in MailMate: AppKit
+    /// tells the Dock the app is ready once this returns (before `applicationDidFinishLaunching`), so
+    /// the icon bounces until then, the Dock counters showing as before meanwhile, and the window
+    /// comes up as the bouncing stops, rather than seconds after.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        launchLog("will finish launching")
+        #if DEBUG
+            debugLaunchSleep("will")
+        #endif
         NSApp.mainMenu = MainMenu.build()
         #if DEBUG
             // MMJ_APPEARANCE=light|dark: the app in that appearance, whatever the system's.
@@ -26,20 +60,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        Task {
-            await MessageViewController.prepareBlockRules()
-            AppModel.shared.start()
-            #if DEBUG
-                if ProcessInfo.processInfo.environment["MMJ_DEBUG_WRITE_WAIT"] != nil { startWriteWaitProbe() }
-            #endif
-            let controller = MainWindowController(model: AppModel.shared)
-            windowController = controller
-            controller.showWindow(nil)
-            NSApp.activate()
-            #if DEBUG
-                scheduleDebugSnapshot()
-            #endif
-        }
+        launchLog("store open")
+        MessageViewController.prepareBlockRules()  // messages wait for them
+        AppModel.shared.start()
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_WRITE_WAIT"] != nil { startWriteWaitProbe() }
+        #endif
+        windowController = MainWindowController(model: AppModel.shared)
+        launchLog("window built")
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launchLog("did finish launching")
+        #if DEBUG
+            debugLaunchSleep("did")
+        #endif
+        guard let windowController else { return }
+        windowController.showWindow(nil)
+        NSApp.activate()
+        launchLog("window shown")
+        DispatchQueue.main.async { launchLog("first turn after launching") }
+        #if DEBUG
+            scheduleDebugSnapshot()
+        #endif
     }
 
     #if DEBUG
@@ -1370,4 +1413,7 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
+#if DEBUG
+    debugLaunchSleep("main")
+#endif
 app.run()

@@ -226,6 +226,21 @@ final class DockCounters {
             // `$counters` fires before the property changes; update on the next turn.
             DispatchQueue.main.async { self?.update() }
         }
+        // The counts as the Dock showed them last, at once, as MailMate's show while its icon still
+        // bounces: nothing has synced since, and counting them again waits for the window to be built.
+        if let saved = UserDefaults.standard.dictionary(forKey: Self.shownKey), saved["counters"] as? String == Self.countersKey,
+            let values = saved["values"] as? [String: Int]
+        {
+            show(Dictionary(uniqueKeysWithValues: values.compactMap { key, value in Corner(rawValue: key).map { ($0, value) } }))
+        }
+    }
+
+    /// The counts last shown, with the counters they were for (`countersKey`).
+    private static let shownKey = "DockCountersShown"
+    private static var countersKey: String {
+        CounterSettings.shared.counters.sorted { $0.key.rawValue < $1.key.rawValue }.map { corner, config in
+            "\(corner.rawValue):\(config.showInDock):\(config.source):\(config.count.rawValue)"
+        }.joined(separator: ";")
     }
 
     private func counting(_ kind: CountKind) -> MessageCount {
@@ -267,11 +282,19 @@ final class DockCounters {
     private func show(_ values: [Corner: Int]) {
         guard values != lastValues else { return }
         lastValues = values
+        if !isPreviewing {
+            let shown = Dictionary(uniqueKeysWithValues: values.map { ($0.key.rawValue, $0.value) })
+            UserDefaults.standard.set(["counters": Self.countersKey, "values": shown], forKey: Self.shownKey)
+        }
         #if DEBUG
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_DOCK"] != nil {
                 NSLog("MMJ dock counters: \(values.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.key.rawValue)=\($0.value)" })")
             }
         #endif
+        if !Self.shownOnce {
+            Self.shownOnce = true
+            launchLog("dock badges shown")
+        }
         let tile = NSApp.dockTile
         tile.badgeLabel = nil
         if isPreviewing || values.values.contains(where: { $0 > 0 }) {
@@ -283,6 +306,8 @@ final class DockCounters {
         }
         tile.display()
     }
+
+    private static var shownOnce = false
 
     #if DEBUG
         /// Renders the Dock icon as it would look into a PNG at `path`.

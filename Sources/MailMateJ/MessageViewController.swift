@@ -580,6 +580,20 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     private func render(_ body: MessageBody) {
         renderGeneration += 1
+        // The window comes up while the rules are compiled: a message waits for them (nothing would
+        // block its remote content yet).
+        if let preparing = Self.preparingRules {
+            #if DEBUG
+                launchLog("message waits for block rules")
+            #endif
+            let generation = renderGeneration
+            Task {
+                await preparing.value
+                guard generation == renderGeneration else { return }
+                render(body)
+            }
+            return
+        }
         currentBody = body
         attachments = currentID.map { Self.attachments(messageId: $0, html: body.html, store: model.store) } ?? []
         guard let html = body.html, let id = currentID else {
@@ -587,6 +601,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             loadPage(content: MessagePage.plainHTML(body.text ?? ""), bar: nil, plain: true, remote: false)
             return
         }
+        #if DEBUG
+            launchLog("message rendered, rules \(Self.blockAllRules != nil && Self.strictRules != nil && Self.scriptRules != nil ? "ready" : "missing")")
+        #endif
         // Fail closed: remote content only loads when the strict and script rules are in place.
         let loadRemote = loadRemoteForCurrent && Self.strictRules != nil && Self.scriptRules != nil
         func show(_ prepared: PreparedHTML, page: String) {
@@ -645,8 +662,25 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         if !loadRemote, let all = Self.blockAllRules { controller.add(all) }
     }
 
-    /// Compiles the content-rule lists. Call once at launch, before showing messages.
-    static func prepareBlockRules() async {
+    /// Compiles the content-rule lists, in the background: call once at launch. Messages shown before
+    /// they're ready wait for them.
+    static func prepareBlockRules() {
+        preparingRules = Task {
+            #if DEBUG
+                if let seconds = Double(ProcessInfo.processInfo.environment["MMJ_DEBUG_SLOW_RULES"] ?? "") {
+                    try? await Task.sleep(for: .seconds(seconds))  // as if compiling took that long
+                }
+            #endif
+            await compileBlockRules()
+            preparingRules = nil
+            launchLog("block rules compiled")
+        }
+    }
+
+    /// The rules being compiled, until they're ready.
+    private static var preparingRules: Task<Void, Never>?
+
+    private static func compileBlockRules() async {
         let store = WKContentRuleListStore.default()
         do {
             blockAllRules = try await store?.compileContentRuleList(
