@@ -2280,8 +2280,9 @@ final class SidebarCell: NSTableCellView {
     /// `plain`: icon and name only (the mailbox editor's sidebar).
     func configure(_ node: SidebarNode, plain: Bool = false) {
         isOffline = node.isOffline && !plain
-        // A name being typed stays as typed: rows are refreshed all the while mail downloads.
-        if textField?.currentEditor() == nil {
+        // A name being typed stays as typed: rows are refreshed all the while mail downloads. One just typed
+        // is no longer editable, though its field keeps the editor until the end of editing is told.
+        if textField?.isEditable != true || textField?.currentEditor() == nil {
             textField?.stringValue = isOffline ? node.title + " (offline)" : node.title
             // A long name gives way in the middle, so " (offline)" still shows.
             textField?.lineBreakMode = isOffline ? .byTruncatingMiddle : .byTruncatingTail
