@@ -309,8 +309,10 @@ public actor GmailAccountSync {
         do {
             let (folders, entries) = try await index(imap)
             let known = try store.remoteIDs(accountId: account.id)
-            var done = 0
-            await progress(0, entries.count)
+            // Those already here count from the start: each round lists everything again, and starting
+            // from nothing sent the progress bar back to the start until its first batch was in.
+            var done = refetchKnown ? 0 : entries.reduce(0) { known.contains($1.id) ? $0 + 1 : $0 }
+            await progress(done, entries.count)
             for folder in [folders.all, folders.spam, folders.trash].compactMap({ $0 }) {
                 let here = entries.filter { $0.folder == folder }.sorted { $0.uid > $1.uid }  // newest first
                 guard !here.isEmpty else { continue }
@@ -318,7 +320,6 @@ public actor GmailAccountSync {
                 let stored = { (id: String) in self.store.blobs.contains(accountId: self.account.id, blobId: id) }
                 let relabel = refetchKnown ? here.filter { known.contains($0.id) && stored($0.id) } : []
                 let whole = here.filter { !known.contains($0.id) || (refetchKnown && !stored($0.id)) }
-                done += here.count - relabel.count - whole.count  // already here
                 for chunk in relabel.chunked(500) {
                     let fetched = try await imap.fetch(chunk.map(\.uid), bodies: false)
                     var incoming: [IncomingMessage] = []

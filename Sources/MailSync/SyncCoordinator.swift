@@ -699,6 +699,9 @@ public actor SyncCoordinator {
     /// A full sync's progress, as the engine downloads message headers (called in order, from within
     /// its sync, so it never comes after `endHeaders`).
     private func reportHeaders(_ accountId: String, downloaded: Int, total: Int, whole: Bool = false) {
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL"] != nil { NSLog("MMJ header progress \(accountId): \(downloaded) of \(total)") }
+        #endif
         var status = statuses[accountId] ?? AccountSyncStatus(accountId: accountId, phase: .syncing, lastSuccess: nil)
         status.isDownloadingHeaders = true
         status.headersAreWholeMessages = whole
