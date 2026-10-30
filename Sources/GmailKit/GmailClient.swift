@@ -140,10 +140,11 @@ public struct GmailClient: Sendable {
     }
 
     /// Adds a whole raw message to the account with these labels, as if it had arrived (dated by its
-    /// Date header).
+    /// Date header). Gmail's spam filter is left out: the message goes where it was put (as an IMAP
+    /// append does), not into Spam as well.
     public func importMessage(_ raw: Data, labels: [String]) async throws {
         _ = try await upload("messages/import", metadata: ["labelIds": labels], raw: raw, query: [
-            URLQueryItem(name: "internalDateSource", value: "dateHeader"),
+            URLQueryItem(name: "internalDateSource", value: "dateHeader"), URLQueryItem(name: "neverMarkSpam", value: "true"),
         ], cost: 25)
     }
 
