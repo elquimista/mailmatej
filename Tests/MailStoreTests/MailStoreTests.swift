@@ -202,6 +202,39 @@ import Testing
         #expect(try matching(.headersOrUnquoted) == [ids[1]])
     }
 
+    @Test func aSmartMailboxOfSubmailboxesListsFromItsCounterAndSearchesThemAll() throws {
+        try upsert([
+            message("1", from: "a@bank.com", at: 100, subject: "Invoice paid"), message("2", from: "b@bank.com", at: 200, subject: "Hello"),
+            message("3", from: "c@shop.com", at: 300, subject: "Invoice due"), message("4", from: "d@other.com", at: 400, subject: "Invoice"),
+        ])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2", "3", "4"])
+        // A container (no mailboxes or conditions of its own) of two smart mailboxes, as Credit and Debit are.
+        let money = try store.createSmartMailbox(name: "Money", parentId: nil)
+        try store.updateSmartMailbox(id: money, definition: SmartDefinition(sources: SmartSources(scopes: [], includeSubmailboxes: true)))
+        for domain in ["bank.com", "shop.com"] {
+            let child = try store.createSmartMailbox(name: domain, parentId: money)
+            try store.updateSmartMailbox(id: child, definition: SmartDefinition(condition: .compound(.all, [.rule(.fromDomain, .is, domain)])))
+        }
+        func listed(search: SmartCondition? = nil) throws -> Set<Int64> {
+            let flat = try store.messageIDs(scope: .smart(money), search: search)
+            #expect(Set(try store.threadedMessages(scope: .smart(money), search: search).threadOf.keys) == Set(flat))
+            return Set(flat)
+        }
+        // A search narrows every submailbox's messages, not just the last's.
+        #expect(try listed() == [ids["1"]!, ids["2"]!, ids["3"]!])
+        #expect(try listed(search: .quickSearch("invoice")) == [ids["1"]!, ids["3"]!])
+        // From the counter, as the sidebar keeps it, the same, and following changes made since.
+        let counter = try SmartCounter(store: store)
+        try counter.refresh()
+        #expect(try listed(search: .quickSearch("invoice")) == [ids["1"]!, ids["3"]!])
+        try store.upsertMessages(accountId: "acc", [message("5", from: "e@shop.com", at: 500, subject: "Invoice again")])
+        let five = try #require(try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["5"])["5"])
+        try store.setDownloadState(1, messageIds: [five])
+        #expect(try listed() == [ids["1"]!, ids["2"]!, ids["3"]!, five])
+        try store.deleteMessages(accountId: "acc", remoteIds: ["1"])
+        #expect(try listed(search: .quickSearch("invoice")) == [ids["3"]!, five])
+    }
+
     @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
         try upsert([
             message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),

@@ -13,6 +13,8 @@ public final class MailStore: Sendable {
     }
 
     let smartCatalog = SmartCatalog()
+    /// The store's `SmartCounter`, once one is made: smart mailboxes are listed from it.
+    let counterSlot = CounterSlot()
 
     public init(directory: URL = MailStore.defaultDirectory) throws {
         self.directory = directory
@@ -1238,7 +1240,7 @@ public final class MailStore: Sendable {
         scope: MessageScope, sort: MessageSort = .newestFirst, search: SmartCondition? = nil, expanded: Set<String> = [],
         opened: Set<Int64> = []
     ) throws -> ThreadedList {
-        let (filter, args) = self.filter(scope: scope, search: search)
+        let (filter, args) = listingFilter(scope: scope, search: search)
         let sql = "SELECT \(Self.threadColumns) FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         let rows = try dbPool.read { db in try Self.threadInputs(db, sql: sql, arguments: args) }
         // Parents and threads worked out once, for the rows and for `threadOf` alike.
@@ -1473,7 +1475,7 @@ public final class MailStore: Sendable {
     public func messageIDs(scope: MessageScope, sort: MessageSort = .newestFirst, search: SmartCondition? = nil) throws
         -> [Int64]
     {
-        let (filter, args) = self.filter(scope: scope, search: search)
+        let (filter, args) = listingFilter(scope: scope, search: search)
         let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY \(Self.orderBy(sort))"
         return try dbPool.read { db in try Int64.fetchAll(db, sql: sql, arguments: args) }
     }
@@ -1543,9 +1545,40 @@ public final class MailStore: Sendable {
 
     /// The most recently received message in a list, whatever the list's sort order.
     public func newestMessageID(scope: MessageScope, search: SmartCondition? = nil) throws -> Int64? {
-        let (filter, args) = self.filter(scope: scope, search: search)
+        let (filter, args) = listingFilter(scope: scope, search: search)
         let sql = "SELECT m.id FROM message m WHERE \(filter) ORDER BY m.receivedAt DESC, m.id DESC LIMIT 1"
         return try dbPool.read { db in try Int64.fetchOne(db, sql: sql, arguments: args) }
+    }
+
+    /// `filter`, for listing: a smart mailbox (or its messages in one account) as its `SmartCounter`
+    /// has it, when it can tell now, rather than every message tested against its conditions (400 ms for
+    /// one made of nine smart mailboxes, in a store of 108k messages).
+    func listingFilter(scope: MessageScope, search: SmartCondition?) -> (String, StatementArguments) {
+        let id: Int64, account: String?
+        switch scope {
+        case .smart(let smart): (id, account) = (smart, nil)
+        case .smartAccount(let smart, let accountId): (id, account) = (smart, accountId)
+        default: return filter(scope: scope, search: search)
+        }
+        let members = counterSlot.counter?.members(listing: id)
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
+                NSLog("MMJ timing: smart mailbox \(id) listed \(members.map { "from the counter (\($0.count))" } ?? "by its conditions")")
+            }
+        #endif
+        guard let members else { return filter(scope: scope, search: search) }
+        var clauses = ["m.id IN (SELECT value FROM json_each(?))"]
+        var args: [(any DatabaseValueConvertible)?] = ["[" + members.map(String.init).joined(separator: ",") + "]"]
+        if let account {
+            clauses.append("m.accountId = ?")
+            args.append(account)
+        }
+        if let search {
+            let (clause, searchArgs) = sql(search)
+            clauses.append("(\(clause))")
+            args += searchArgs
+        }
+        return ("(\(clauses.joined(separator: " AND "))) AND \(Self.shown)", StatementArguments(args))
     }
 
     /// WHERE clause (on a table aliased `m`) and arguments selecting a list's messages (the ones shown).
@@ -1970,19 +2003,20 @@ public final class MailStore: Sendable {
     /// ORDER BY terms for `sort`, on a table aliased `m`.
     static func orderBy(_ sort: MessageSort) -> String {
         let direction = sort.ascending ? "ASC" : "DESC"
+        // Ties end with the id, so a list comes out in one order however the query reads it.
         return switch sort.key {
         case .receivedAt: "m.receivedAt \(direction), m.id \(direction)"
-        case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC"
+        case .from: "m.fromDisplay COLLATE NOCASE \(direction), m.receivedAt DESC, m.id DESC"
         case .to:  // by the first recipient, as the column shows it
             """
             (SELECT coalesce(nullif(t.name, ''), t.email) FROM address t
              WHERE t.messageId = m.id AND t.role = \(AddressRole.to.rawValue) ORDER BY t.position LIMIT 1)
-             COLLATE NOCASE \(direction), m.receivedAt DESC
+             COLLATE NOCASE \(direction), m.receivedAt DESC, m.id DESC
             """
-        case .subject: "m.sortSubject \(direction), m.receivedAt DESC"
-        case .size: "m.size \(direction), m.receivedAt DESC"
-        case .unread: "NOT m.isSeen \(direction), m.receivedAt DESC"  // descending: unread first
-        case .flagged: "m.isFlagged \(direction), m.receivedAt DESC"
+        case .subject: "m.sortSubject \(direction), m.receivedAt DESC, m.id DESC"
+        case .size: "m.size \(direction), m.receivedAt DESC, m.id DESC"
+        case .unread: "NOT m.isSeen \(direction), m.receivedAt DESC, m.id DESC"  // descending: unread first
+        case .flagged: "m.isFlagged \(direction), m.receivedAt DESC, m.id DESC"
         }
     }
 

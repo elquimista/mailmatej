@@ -586,16 +586,17 @@ extension MailStore {
         let inside = visited.union([id])
         var (clause, args) = ownFilter(smart, visited: inside)
         if smart.definition.sources.includeSubmailboxes {
+            // Each OR in parentheses: what's added after (a search, an account) applies to all of it.
             for child in smartCatalog.children(of: id) {
                 let (childClause, childArgs) = smartFilter(id: child.id, visited: inside)
-                clause = "(\(clause)) OR (\(childClause))"
+                clause = "((\(clause)) OR (\(childClause)))"
                 args += childArgs
             }
             // Special mailboxes placed inside it are its submailboxes too.
             for key in smartCatalog.placed(in: id) {
                 guard let scope = MessageScope(key: key) else { continue }
                 let (childClause, childArgs) = filterParts(scope: scope, search: nil)
-                clause = "(\(clause)) OR (\(childClause))"
+                clause = "((\(clause)) OR (\(childClause)))"
                 args += childArgs
             }
         }

@@ -61,32 +61,59 @@ public final class SmartCounter: @unchecked Sendable {
     public init(store: MailStore) throws {
         self.store = store
         try store.noteChangedMessages()
+        store.counterSlot.counter = self  // the store lists smart mailboxes from here
     }
 
     /// Brings the counts up to date with the store.
     public func refresh() throws {
         try lock.withLock {
             do {
-                let generation = store.smartCatalog.generation
-                let changed = try store.takeChangedMessages()  // before reading: what follows is in the next
-                if let counted, counted.generation == generation, !changed.mailboxesChanged,
-                    changed.ids.count <= Self.retestLimit, counted.at.duration(to: .now) < Self.recountInterval
-                {
-                    try retest(Set(changed.ids))
-                } else {
-                    try recount(generation: generation)
-                }
+                _ = try update(recounting: true)
                 let rows = try store.dbPool.read { db in try Row.fetchAll(db, sql: "SELECT id, name FROM account") }
                 let names: [String: String] = Dictionary(rows.map { ($0["id"], $0["name"]) }, uniquingKeysWith: { a, _ in a })
                 if names != accountNames { values = [:] }  // values by Mailbox name their accounts
                 accountNames = names
-                values = values.filter { !touched.contains($0.key.id) }
-                accountCounts = accountCounts.filter { !touched.contains($0.key) }
             } catch {
                 counted = nil  // changes taken but not counted: anew next time
                 throw error
             }
         }
+    }
+
+    /// A smart mailbox's messages as of now, for listing it (the changes since the last refresh taken in
+    /// first), or nil when that would take counting everything anew (left to the next refresh then), or
+    /// on the main thread while a refresh is under way (a list there doesn't wait for one).
+    public func members(listing id: Int64) -> Set<Int64>? {
+        guard Thread.isMainThread ? lock.try() : lock.lock(before: Date(timeIntervalSinceNow: 1)) else { return nil }
+        defer { lock.unlock() }
+        guard counted != nil else { return nil }
+        do {
+            guard try update(recounting: false) else { return nil }
+        } catch {
+            counted = nil
+            return nil
+        }
+        return members(id)
+    }
+
+    /// Takes the changes since the last update in: tests them, or counts everything anew when that's
+    /// due and `recounting` (else leaves it to the next refresh, returning false).
+    private func update(recounting: Bool) throws -> Bool {
+        let generation = store.smartCatalog.generation
+        let changed = try store.takeChangedMessages()  // before reading: what follows is in the next
+        if let counted, counted.generation == generation, !changed.mailboxesChanged,
+            changed.ids.count <= Self.retestLimit, counted.at.duration(to: .now) < Self.recountInterval
+        {
+            try retest(Set(changed.ids))
+        } else if recounting {
+            try recount(generation: generation)
+        } else {
+            counted = nil  // what was taken is counted anew, at the next refresh
+            return false
+        }
+        values = values.filter { !touched.contains($0.key.id) }
+        accountCounts = accountCounts.filter { !touched.contains($0.key) }
+        return true
     }
 
     // MARK: Results (as of the last refresh)
@@ -324,5 +351,16 @@ public final class SmartCounter: @unchecked Sendable {
         accountIDs.append(account)
         accountIndex[account] = index
         return index
+    }
+}
+
+/// Where a store keeps its `SmartCounter` (weakly: the sidebar owns it).
+final class CounterSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var current: SmartCounter?
+
+    var counter: SmartCounter? {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
     }
 }
