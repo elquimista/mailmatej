@@ -104,7 +104,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
         wireUp()
         installKeyBindings()
+        // Laid out first, so the list loaded at once below is scrolled where it will show (built before,
+        // the newest message sat cut off at the bottom until the next load scrolled it into view).
+        window.layoutIfNeeded()
+        loadsListAtOnce = true
         sidebar.selectInitial()
+        loadsListAtOnce = false
         NotificationCenter.default.addObserver(
             forName: .mailStoreDidChange, object: nil, queue: .main
         ) { [weak self] note in
@@ -313,6 +318,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// List loads under way, and whether a sync's change came in meanwhile (see `reloadList`).
     private var listLoads = 0
     private var listLoadAgain = false
+    /// Set while the window is built at launch: the first list loads on the spot (see `reloadList`).
+    private var loadsListAtOnce = false
+    private var firstListShown = false
+
+    /// A list load's result, made off the main thread.
+    private struct LoadedList: Sendable {
+        let rows: [MailStore.ThreadedRow]
+        let messages: Int
+        let newest: Int64?
+        let stages: String
+        let scope: MessageScope
+        let expanded: Set<String>
+        let opened: Set<Int64>
+        let threadRows: [Int64: MailStore.ThreadedRow]
+        let listed: Set<Int64>
+    }
 
     /// Loads the list off the main thread. With `coalescing` (a change a sync brought), no load starts
     /// while one runs (each one threads the whole mailbox; during a sync they piled up): one more
@@ -332,48 +353,53 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let (threaded, savedExpanded, savedOpened) = (showsThreads, expandedThreads, openedMessages)
         let result = self.result.map { ($0.kind, $0.anchor, $0.condition, $0.opening) }
         let started = Date()
-        Task {
-            let (rows, messages, newest, stages, scope, expanded, opened, threadRows, listed) = await Task.detached(priority: .userInitiated) {
-                let began = Date()
-                var (scope, expanded, opened) = (scope, savedExpanded, savedOpened)
-                if let (kind, anchor, condition, opening) = result {
-                    // Found again on each load, so new mail in the conversation shows up: the thread, or
-                    // All Messages narrowed by the result's condition (what its Details shows), with the
-                    // message it was opened for wherever that is.
-                    var ids = kind == .thread
-                        ? (try? store.threadMemberIDs(of: anchor)) ?? [anchor]
-                        : (try? store.messageIDs(scope: .allMessages, search: condition)) ?? []
-                    if !ids.contains(anchor) { ids.append(anchor) }
-                    scope = .messages(ids)
-                    // The message's own conversation shown whole (the thread result is just that one), so
-                    // the message itself is in view to select, as MailMate opens it.
-                    if opening, threaded, let threads = (try? store.threadedMessages(scope: scope, sort: sort))?.threadOf,
-                        let own = threads[anchor]
-                    {
-                        expanded.insert(own)
-                        opened.formUnion(threads.filter { $0.value == own }.map(\.key))
-                    }
+        let load: @Sendable () -> LoadedList = {
+            let began = Date()
+            var (scope, expanded, opened) = (scope, savedExpanded, savedOpened)
+            if let (kind, anchor, condition, opening) = result {
+                // Found again on each load, so new mail in the conversation shows up: the thread, or
+                // All Messages narrowed by the result's condition (what its Details shows), with the
+                // message it was opened for wherever that is.
+                var ids = kind == .thread
+                    ? (try? store.threadMemberIDs(of: anchor)) ?? [anchor]
+                    : (try? store.messageIDs(scope: .allMessages, search: condition)) ?? []
+                if !ids.contains(anchor) { ids.append(anchor) }
+                scope = .messages(ids)
+                // The message's own conversation shown whole (the thread result is just that one), so
+                // the message itself is in view to select, as MailMate opens it.
+                if opening, threaded, let threads = (try? store.threadedMessages(scope: scope, sort: sort))?.threadOf,
+                    let own = threads[anchor]
+                {
+                    expanded.insert(own)
+                    opened.formUnion(threads.filter { $0.value == own }.map(\.key))
                 }
-                let list = threaded
-                    ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
-                    : nil
-                let rows = list?.rows ?? ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
-                    MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
-                }
-                let listed = Date()
-                var newest = try? store.newestMessageID(scope: scope, search: search)
-                // New mail inside a collapsed thread is followed to the thread's row.
-                if let list, let id = newest, !rows.contains(where: { $0.id == id }), let thread = list.threadOf[id] {
-                    newest = rows.first { $0.thread == thread }?.id ?? id
-                }
-                let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
-                let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
-                // Looked up by id on the main thread, made here (hundreds of thousands in a big mailbox).
-                let threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
-                let rowIDs = Set(rows.map(\.id))
-                // Every message of the list, collapsed threads' replies included (threadOf has each one).
-                return (rows, list?.threadOf.count ?? rows.count, newest, stages, scope, expanded, opened, threadRows, rowIDs)
-            }.value
+            }
+            let list = threaded
+                ? (try? store.threadedMessages(scope: scope, sort: sort, search: search, expanded: expanded, opened: opened))
+                : nil
+            let rows = list?.rows ?? ((try? store.messageIDs(scope: scope, sort: sort, search: search)) ?? []).map {
+                MailStore.ThreadedRow(id: $0, thread: "", depth: 0, size: 1, anyUnread: false)
+            }
+            let listed = Date()
+            var newest = try? store.newestMessageID(scope: scope, search: search)
+            // New mail inside a collapsed thread is followed to the thread's row.
+            if let list, let id = newest, !rows.contains(where: { $0.id == id }), let thread = list.threadOf[id] {
+                newest = rows.first { $0.thread == thread }?.id ?? id
+            }
+            let ms = { (a: Date, b: Date) in Int(b.timeIntervalSince(a) * 1000) }
+            let stages = "waited \(ms(started, began)), list \(ms(began, listed)), newest \(ms(listed, Date()))"
+            // Looked up by id on the main thread, made here (hundreds of thousands in a big mailbox).
+            let threadRows = threaded ? Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
+            let rowIDs = Set(rows.map(\.id))
+            // Every message of the list, collapsed threads' replies included (threadOf has each one).
+            return LoadedList(
+                rows: rows, messages: list?.threadOf.count ?? rows.count, newest: newest, stages: stages, scope: scope,
+                expanded: expanded, opened: opened, threadRows: threadRows, listed: rowIDs)
+        }
+        func show(_ loaded: LoadedList) {
+            let (rows, messages, newest, stages, scope, expanded, opened, threadRows, listed) = (
+                loaded.rows, loaded.messages, loaded.newest, loaded.stages, loaded.scope, loaded.expanded, loaded.opened,
+                loaded.threadRows, loaded.listed)
             #if DEBUG
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil {
                     NSLog("MMJ timing: reload stages: \(stages) ms, back on main after \(Int(Date().timeIntervalSince(started) * 1000))")
@@ -482,7 +508,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 navigatingHistory = false
             }
             updateTitle()
+            if !firstListShown {
+                firstListShown = true
+                launchLog("first list shown (\(ids.count) rows; \(stages) ms)")
+            }
         }
+        // While the window is built at launch, on the spot: it comes up with its messages, as MailMate's
+        // does (the Dock icon bouncing meanwhile), rather than a second after.
+        if loadsListAtOnce { return show(load()) }
+        Task { show(await Task.detached(priority: .userInitiated, operation: load).value) }
     }
 
     /// Updates the Correspondence pane at once for a click or a single key press, as MailMate does.
@@ -766,6 +800,12 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
 
         var debugSelection: [Int64] { list.selectedIDs }
+
+        /// Where the list is scrolled: the rows in view, and whether the newest end shows.
+        var debugListScroll: String {
+            let table = list.tableView, rows = table.rows(in: table.visibleRect)
+            return "rows \(rows.location)–\(rows.location + rows.length) of \(table.numberOfRows), height \(Int(table.visibleRect.height)), newest end in view \(list.showsNewestEnd)"
+        }
 
         /// The keyboard in the message list.
         func debugFocusList() { window?.makeFirstResponder(list.tableView) }

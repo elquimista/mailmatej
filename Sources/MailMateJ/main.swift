@@ -79,7 +79,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.showWindow(nil)
         NSApp.activate()
         launchLog("window shown")
-        DispatchQueue.main.async { launchLog("first turn after launching") }
+        #if DEBUG
+            launchLog("list: \(windowController.debugListScroll)")
+        #endif
+        DispatchQueue.main.async {
+            launchLog("first turn after launching")
+            #if DEBUG
+                launchLog("list: \(windowController.debugListScroll)")
+            #endif
+        }
         #if DEBUG
             scheduleDebugSnapshot()
         #endif
