@@ -899,13 +899,37 @@ public actor GmailAccountSync {
         _ = try await syncLabels()
     }
 
-    /// Renames a label, keeping it where it is ("Work/Old" becomes "Work/New").
+    /// Renames a label, keeping it where it is ("Work/Old" becomes "Work/New"), and the labels inside it
+    /// with it ("Work/Old/Done" becomes "Work/New/Done"), as Gmail does.
     public func renameMailbox(remoteId: String, to name: String) async throws {
         guard let full = labelNames[remoteId] else { throw GmailClient.APIError(status: 400, message: "Gmail’s own mailboxes can’t be renamed") }
         let parent = full.range(of: "/", options: .backwards).map { String(full[..<$0.lowerBound]) }
-        try await client.renameLabel(remoteId, to: parent.map { "\($0)/\(name)" } ?? name)
+        let renamed = parent.map { "\($0)/\(name)" } ?? name
+        try await client.renameLabel(remoteId, to: renamed)
+        for (id, inside) in labelNames where inside.hasPrefix(full + "/") {
+            try await client.renameLabel(id, to: renamed + inside.dropFirst(full.count))
+        }
         storedLabels = nil
         _ = try await syncLabels()
+    }
+
+    /// Deletes labels, each after those inside it (`remoteIds` in that order): they come off their
+    /// messages, which Gmail keeps.
+    public func deleteMailboxes(remoteIds: [String]) async throws {
+        var refused: Error?
+        for remoteId in remoteIds where refused == nil {
+            do {
+                guard labelNames[remoteId] != nil else {
+                    throw JMAPAccountSync.MailboxRefused(reason: "Gmail’s own mailboxes can’t be deleted.")
+                }
+                try await client.deleteLabel(remoteId)
+            } catch {
+                refused = error
+            }
+        }
+        storedLabels = nil
+        _ = try await syncLabels()  // those deleted before a refusal are gone
+        if let refused { throw refused }
     }
 
     /// Copies a whole message into this account (a move from another account), into `mailboxRemoteId`

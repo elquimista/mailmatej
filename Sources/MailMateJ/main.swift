@@ -743,7 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACTIONS"] {
                     // "subject|action,action,…" on the newest message with that subject; after each, a sync,
                     // then its mailboxes and flags as the server reports them. Actions: read, unread, flag,
-                    // unflag, archive, inbox, delete, junk, notjunk.
+                    // unflag, archive, inbox, delete, junk, notjunk, copyto=<mailbox name> (any account's).
                     let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
                     let model = AppModel.shared!
                     func state(_ id: Int64) -> String {
@@ -753,7 +753,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         let row = (try? model.store.rows(ids: [id]))?.first
                         return "mailboxes \(boxes.sorted()) seen \(row?.isSeen ?? false) flagged \(row?.isFlagged ?? false)"
                     }
-                    let found = ((try? model.store.messageIDs(scope: .everything)) ?? []).first { (try? model.store.detail(id: $0))?.subject == parts[0] }
+                    // MMJ_DEBUG_MESSAGE_ACCOUNT=<account id>: that account's message only.
+                    let account = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACCOUNT"]
+                    let found = ((try? model.store.messageIDs(scope: account.map { .account($0) } ?? .everything)) ?? [])
+                        .first { (try? model.store.detail(id: $0))?.subject == parts[0] }
                     if let id = found, let accountId = (try? model.store.refs(ids: [id]))?.first?.accountId {
                         NSLog("MMJ message actions on \(parts[0]): before \(state(id))")
                         for action in parts[1].split(separator: ",").map(String.init) {
@@ -768,6 +771,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             case "junk": .junk
                             case "notjunk": .notJunk
                             default: nil
+                            }
+                            if action.hasPrefix("copyto="),
+                                let target = ((try? model.store.mailboxes()) ?? []).first(where: { $0.name == action.dropFirst(7) })
+                            {
+                                if target.accountId == accountId {
+                                    model.perform(.copy(toMailboxId: target.id), on: [id]) { _ in false }
+                                } else {
+                                    model.copyAcrossAccounts((try? model.store.refs(ids: [id])) ?? [], toMailboxId: target.id)
+                                }
+                                try? await Task.sleep(for: .seconds(4))
+                                model.sync(accountId: target.accountId)
+                                try? await Task.sleep(for: .seconds(6))
+                                NSLog("MMJ message actions after \(action): copied")
+                                continue
                             }
                             guard let message else { continue }
                             model.perform(message, on: [id]) { _ in false }

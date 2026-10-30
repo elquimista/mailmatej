@@ -1112,6 +1112,79 @@ final class AppModel {
         }
     }
 
+    /// Mailboxes being deleted on their servers, left out of the sidebar meanwhile (see `deleteMailbox`).
+    private(set) var deletingMailboxes: Set<Int64> = []
+
+    /// A server mailbox and the mailboxes inside it, each before those inside it.
+    func mailboxWithInside(_ id: Int64) -> [MailboxRecord] {
+        guard let all = try? store.mailboxes(), let box = all.first(where: { $0.id == id }) else { return [] }
+        var boxes = [box]
+        var next = 0
+        while next < boxes.count {
+            let parent = boxes[next]
+            boxes += all.filter { $0.accountId == parent.accountId && $0.parentRemoteId == parent.remoteId }
+            next += 1
+        }
+        return boxes
+    }
+
+    /// What Delete Mailbox deletes along with it, for the alert asking first.
+    func deletionSummary(mailboxId: Int64) -> String {
+        let boxes = mailboxWithInside(mailboxId)
+        guard let box = boxes.first else { return "" }
+        let inside = boxes.count - 1
+        var lines: [String] = []
+        if (try? store.account(id: box.accountId))?.isGmail == true {
+            if inside > 0 { lines.append(inside == 1 ? "The label inside it is deleted too." : "The \(inside) labels inside it are deleted too.") }
+            lines.append("Gmail keeps the messages: only the label comes off them.")
+        } else {
+            if inside > 0 { lines.append(inside == 1 ? "The mailbox inside it is deleted too." : "The \(inside) mailboxes inside it are deleted too.") }
+            let found = try? store.messages(inMailboxes: boxes.map(\.id))
+            let deleted = found?.onlyThere.count ?? 0
+            let kept = (found?.count ?? 0) - deleted
+            if deleted > 0 {
+                let messages = deleted == 1 ? "message" : "\(deleted) messages"
+                lines.append("\(inside > 0 ? "The \(messages) in them" : "Its \(messages)") \(deleted == 1 ? "is" : "are") deleted too.")
+            }
+            if kept > 0 {
+                lines.append(kept == 1 ? "A message also in another mailbox stays there." : "\(kept) messages also in other mailboxes stay there.")
+            }
+        }
+        lines.append("You can’t undo this.")
+        return lines.joined(separator: " ")
+    }
+
+    /// MailMate's Delete Mailbox, for a server's mailbox: it goes with the mailboxes inside it. Their rows
+    /// go at once (left out of the sidebar while the server deletes them), then their messages in no other
+    /// mailbox, which the server deleted with them (Gmail keeps them). If the server refuses, the rows come
+    /// back and an alert says why.
+    func deleteMailbox(id: Int64) {
+        let boxes = mailboxWithInside(id)
+        guard let box = boxes.first, box.role == nil, !box.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) else {
+            return NSSound.beep()
+        }
+        let ids = Set(boxes.map(\.id))
+        let gmail = (try? store.account(id: box.accountId))?.isGmail == true
+        let onlyThere = gmail ? [] : (try? store.messages(inMailboxes: Array(ids)).onlyThere) ?? []
+        deletingMailboxes.formUnion(ids)
+        refreshNow(countsUnchanged: true)
+        inBackground { [self] in
+            do {
+                // Those inside first: a server won't delete a mailbox that still has some.
+                try await coordinator.deleteMailboxes(accountId: box.accountId, remoteIds: boxes.reversed().map(\.remoteId))
+                try? store.deleteMessages(accountId: box.accountId, remoteIds: onlyThere)
+                for gone in boxes { MailboxSettings.forget("mailbox.\(gone.accountId).\(gone.remoteId)") }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t delete “\(box.name)”."
+                alert.informativeText = Self.describe(error)
+                present(alert)
+            }
+            deletingMailboxes.subtract(ids)
+            refreshNow()
+        }
+    }
+
     /// Creates a mailbox inside `parentId` (in its account) and returns it once synced.
     func createSubmailbox(named name: String, inside parentId: Int64) async throws -> MailboxRecord {
         guard let parent = try store.mailboxes().first(where: { $0.id == parentId }) else {

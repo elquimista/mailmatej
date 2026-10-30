@@ -631,6 +631,33 @@ public actor JMAPAccountSync {
         _ = try await syncMailboxes(accountId)
     }
 
+    /// Deletes mailboxes on the server, with their messages in no other mailbox (onDestroyRemoveEmails),
+    /// then syncs mailboxes. One Mailbox/set each, in `remoteIds`' order: a mailbox with another still
+    /// inside it is refused, so those inside come first.
+    public func deleteMailboxes(remoteIds: [String]) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var request = JMAPRequest()
+        let sets = remoteIds.map { remoteId in
+            (remoteId, request.call("Mailbox/set", [
+                "accountId": .string(accountId), "destroy": .array([.string(remoteId)]), "onDestroyRemoveEmails": .bool(true),
+            ]))
+        }
+        let response = try await client.send(request)
+        var refused: Error?
+        for (remoteId, set) in sets where refused == nil {
+            do {
+                // One gone already (deleted elsewhere meanwhile) is as good as deleted.
+                if let error = try response.arguments(set)["notDestroyed"]?[remoteId], error["type"]?.stringValue != "notFound" {
+                    refused = MailboxRefused(error)
+                }
+            } catch {
+                refused = error
+            }
+        }
+        _ = try await syncMailboxes(accountId)  // those deleted before a refusal are gone
+        if let refused { throw refused }
+    }
+
     /// Puts a whole message (its raw RFC 5322 bytes) into a mailbox of this account (blob upload, then
     /// Email/import), keeping its keywords and received date: the copy half of a move from another
     /// account. Returns once the server has confirmed it (a sync brings it in: see `SyncCoordinator`).

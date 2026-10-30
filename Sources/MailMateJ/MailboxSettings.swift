@@ -1,6 +1,6 @@
 import Foundation
 
-/// The settings kept by sidebar key, cleared for a smart mailbox. SQLite gives a new smart mailbox the
+/// The settings kept by sidebar key, cleared for a deleted mailbox. SQLite gives a new smart mailbox the
 /// id of the last one deleted, so a deleted one's settings go with it, and a new one starts with none
 /// left behind (a copy took the color of a mailbox deleted earlier).
 @MainActor
@@ -18,8 +18,10 @@ enum MailboxSettings {
     ]
 
     /// Forgets smart mailbox `id`'s settings, and those of the submailboxes made inside it.
-    static func forgetSmartMailbox(_ id: Int64) {
-        let key = "smart.\(id)"
+    static func forgetSmartMailbox(_ id: Int64) { forget("smart.\(id)") }
+
+    /// Forgets the settings of the mailbox with this sidebar key, and those of the submailboxes made inside it.
+    static func forget(_ key: String) {
         func isIt(_ other: String) -> Bool { other == key || other.hasPrefix(key + ".") }
         let defaults = UserDefaults.standard
         var forgot = false

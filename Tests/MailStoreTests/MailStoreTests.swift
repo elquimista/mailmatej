@@ -654,6 +654,22 @@ import Testing
         #expect(try store.mailboxes().filter { $0.role == "archive" }.map(\.remoteId) == ["z"])  // the server's wins
     }
 
+    @Test func deletedMailboxesTakeOnlyTheirOwnMessages() throws {
+        try store.applyMailboxes(accountId: "acc", upserts: [
+            IncomingMailbox(remoteId: "w", parentRemoteId: nil, name: "Work", role: nil, sortOrder: 0, totalEmails: 0, unreadEmails: 0),
+            IncomingMailbox(remoteId: "wc", parentRemoteId: "w", name: "Done", role: nil, sortOrder: 0, totalEmails: 0, unreadEmails: 0),
+        ], destroyed: [], replaceAll: false)
+        var both = message("3", from: "a@x.com", box: "w", at: 300)
+        both.mailboxRemoteIds = ["w", "in"]
+        try upsert([message("1", from: "a@x.com", box: "w", at: 100), message("2", from: "a@x.com", box: "wc", at: 200), both])
+        let ids = Dictionary(uniqueKeysWithValues: try store.mailboxes().map { ($0.remoteId, $0.id) })
+        let work = try store.messages(inMailboxes: [ids["w"]!, ids["wc"]!])
+        #expect(work.count == 3)
+        #expect(Set(work.onlyThere) == ["1", "2"])  // the one also in Inbox stays
+        let done = try store.messages(inMailboxes: [ids["wc"]!])
+        #expect(done.count == 1 && done.onlyThere == ["2"])
+    }
+
     @Test func threadsGroupConversations() {
         typealias T = MailStore.ThreadInput
         // Sorted newest first: c2 (replies to c1), b2 (replies to a), c1, a, d (alone).

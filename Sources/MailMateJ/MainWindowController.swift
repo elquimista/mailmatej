@@ -912,6 +912,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step.hasPrefix("newname") { return sidebar.debugFinishRename(step.hasPrefix("newname=") ? String(step.dropFirst(8)) : nil) }
                 if step.hasPrefix("selecttitle=") { return sidebar.debugSelect(title: String(step.dropFirst(12))) }
                 if step.hasPrefix("renamerow=") { return sidebar.debugRename(String(step.dropFirst(10))) }  // Rename on that row
+                if step.hasPrefix("deleteask=") { return sidebar.debugAskDeleteMailbox(String(step.dropFirst(10))) }  // its alert
+                if step.hasPrefix("deletebox=") { return sidebar.debugDeleteMailbox(String(step.dropFirst(10))) }  // Delete Mailbox, confirmed
                 if step.hasPrefix("rows=") {
                     return NSLog("MMJ rows under \(step.dropFirst(5)):\n\(sidebar.debugRows(under: String(step.dropFirst(5))))")
                 }

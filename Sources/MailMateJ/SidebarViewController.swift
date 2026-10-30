@@ -80,7 +80,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// The main sidebar's tree as it is now (to read: for menus and lists), else one built without counts.
     static func currentTree(model: AppModel) -> [SidebarNode] {
-        main?.roots ?? buildTree(store: model.store, counts: false)
+        main?.roots ?? buildTree(store: model.store, counts: false, hiding: model.deletingMailboxes)
     }
 
     private let model: AppModel
@@ -380,7 +380,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let fresh = if let main = Self.main, main !== self, !showsStatus {
             main.roots.map { $0.copied() }
         } else {
-            Self.buildTree(store: model.store, counts: showsStatus, reuse: reuse)
+            Self.buildTree(store: model.store, counts: showsStatus, reuse: reuse, hiding: model.deletingMailboxes)
         }
         apply(fresh)
     }
@@ -416,10 +416,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         buildSerial += 1
         let serial = buildSerial
         let store = model.store
+        let hiding = model.deletingMailboxes
         Task {
             let counter = smartCounter
             let built = await Task.detached(priority: .userInitiated) {
-                BuiltTree(roots: Self.buildTree(store: store, counter: counter))
+                BuiltTree(roots: Self.buildTree(store: store, counter: counter, hiding: hiding))
             }.value
             isBuilding = false
             // Built from before a change that came meanwhile: its counts are still newer than the rows',
@@ -937,11 +938,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// The sidebar's tree. Without `counts` the unread counts of smart and special mailboxes aren't
     /// queried. With `reuse` (the rows as they were, by key) those rows keep their counts and generated
     /// submailboxes: only rows new since are queried. With `counter`, smart mailboxes are counted from the
-    /// messages changed since its last build.
+    /// messages changed since its last build. Mailboxes in `hiding` are left out (being deleted).
     /// Runs off the main thread too (see `reloadInBackground`): it reads only the store and the defaults;
     /// account rows get their sync states from `refreshStatuses`.
     nonisolated static func buildTree(
-        store: MailStore, counts withCounts: Bool = true, reuse: [String: SidebarNode]? = nil, counter: SmartCounter? = nil
+        store: MailStore, counts withCounts: Bool = true, reuse: [String: SidebarNode]? = nil, counter: SmartCounter? = nil,
+        hiding: Set<Int64> = []
     ) -> [SidebarNode] {
         // Smart mailboxes' counts from the messages changed since the last build, when counting them all.
         let counter = withCounts && reuse == nil && (try? counter?.refresh()) != nil ? counter : nil
@@ -952,7 +954,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
         #endif
         let accounts = (try? store.accounts()) ?? []
-        let mailboxes = (try? store.mailboxes()) ?? []
+        let mailboxes = ((try? store.mailboxes()) ?? []).filter { !hiding.contains($0.id) }
         let smart = (try? store.smartMailboxes()) ?? []
         /// A row's unread count, when counting and the row is new (kept rows get theirs back at the end).
         func count(_ key: String, _ scope: MessageScope) -> Int? {
@@ -1589,6 +1591,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 item("Delete Mailbox", #selector(deleteSmartClicked(_:))),
                 item("Duplicate Mailbox", #selector(duplicateClicked(_:))),
             ])
+        } else if isServerMailbox(node) {
+            // As a smart mailbox's, without Edit and Duplicate.
+            let rename = item("Rename Mailbox…", #selector(renameClicked(_:)))
+            let delete = item("Delete Mailbox", #selector(deleteMailboxClicked(_:)))
+            if !canRename(node) { rename.action = nil }
+            if !canDelete(node) { delete.action = nil }
+            groups.append([rename, delete])
         } else if node.kind == .unified {
             groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
         } else if node.kind == .account {
@@ -2017,6 +2026,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             if !beginRename(key: key, thenEdit: false) { NSLog("MMJ rename: can't rename \(key)") }
         }
 
+        /// Delete Mailbox on `key`'s row, as its menu item does (the alert asking first).
+        func debugAskDeleteMailbox(_ key: String) {
+            let item = NSMenuItem()
+            item.representedObject = find(key, in: roots)
+            deleteMailboxClicked(item)
+        }
+
+        /// Delete Mailbox on `key`'s row, as the alert's Delete does; logs what the alert says.
+        func debugDeleteMailbox(_ key: String) {
+            guard let node = find(key, in: roots), canDelete(node), case .mailbox(let id)? = node.scope else {
+                return NSLog("MMJ delete: can't delete \(key)")
+            }
+            NSLog("MMJ delete: “\(node.title)”: \(model.deletionSummary(mailboxId: id))")
+            deleteMailbox(node)
+        }
+
         /// The name being edited: `name` typed over it, then Return; nil: Escape. Logs what was edited.
         func debugFinishRename(_ name: String?) {
             guard let renaming, let node = find(renaming.key, in: roots), case let row = outline.row(forItem: node), row >= 0,
@@ -2126,9 +2151,49 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// its labels) and one a Submailboxes tab makes.
     private func canHoldMailboxes(_ node: SidebarNode) -> Bool {
         if node.kind == .account { return true }
-        guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope, !node.isGenerated, let accountId = node.accountId
-        else { return false }
+        guard isServerMailbox(node), let accountId = node.accountId else { return false }
         return node.role == nil || (try? model.store.account(id: accountId))?.isGmail != true
+    }
+
+    /// A mailbox of an account's server (not one a Submailboxes tab makes).
+    private func isServerMailbox(_ node: SidebarNode) -> Bool {
+        guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
+        return !node.isGenerated && node.accountId != nil
+    }
+
+    /// One of the user's own server mailboxes (not Inbox, Sent and the like), while its account is online
+    /// and once its server has made it.
+    private func canDelete(_ node: SidebarNode) -> Bool {
+        guard isServerMailbox(node), node.role == nil, let accountId = node.accountId else { return false }
+        return !node.key.contains(MailStore.pendingMailboxPrefix) && !model.isOffline(accountId: accountId)
+    }
+
+    @objc private func deleteMailboxClicked(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode, canDelete(node), case .mailbox(let id)? = node.scope,
+            let window = view.window
+        else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(node.title)” permanently?"
+        alert.informativeText = model.deletionSummary(mailboxId: id)
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.deleteMailbox(node)
+        }
+    }
+
+    /// Deletes a server mailbox (see `AppModel.deleteMailbox`); shown, or one inside it, its parent's row
+    /// is shown instead.
+    private func deleteMailbox(_ node: SidebarNode) {
+        guard case .mailbox(let id)? = node.scope else { return }
+        if let selected = selectedNode, selected === node || ancestors(of: selected).contains(where: { $0 === node }),
+            let parent = ancestors(of: node).last(where: { $0.kind != .header })
+        {
+            select(key: parent.key)
+        }
+        model.deleteMailbox(id: id)
     }
 
     @objc private func newMailboxClicked(_ sender: NSMenuItem) {
@@ -2174,11 +2239,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var renaming: (key: String, thenEdit: Bool)?
     private var reloadAfterRename = false
 
-    /// Smart mailboxes, accounts and an account's folders can be renamed (not unified mailboxes or Inbox).
+    /// Smart mailboxes, accounts and an account's folders can be renamed (not unified mailboxes, Inbox or
+    /// Gmail's own mailboxes: it renames labels only). A folder's server renames it, so not while its
+    /// account is offline, nor while the server makes it.
     private func canRename(_ node: SidebarNode) -> Bool {
         if node.kind == .smart || node.kind == .account { return true }
-        guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
-        return node.role != "inbox" && !node.key.contains(MailStore.pendingMailboxPrefix)  // not while its server makes it
+        guard isServerMailbox(node), let accountId = node.accountId, node.role != "inbox",
+            !node.key.contains(MailStore.pendingMailboxPrefix), !model.isOffline(accountId: accountId)
+        else { return false }
+        return node.role == nil || (try? model.store.account(id: accountId))?.isGmail != true
     }
 
     /// Edits a smart mailbox's, account's or folder's name in its row; false if the row isn't shown.

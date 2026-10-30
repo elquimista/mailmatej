@@ -345,6 +345,26 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// The messages in any of these mailboxes (each counted once), and those of them in no other
+    /// mailbox (their remote ids): the ones a server deletes with the mailboxes.
+    public func messages(inMailboxes ids: [Int64]) throws -> (count: Int, onlyThere: [String]) {
+        guard !ids.isEmpty else { return (0, []) }
+        return try dbPool.read { db in
+            let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let arguments = StatementArguments(ids)
+            let count = try Int.fetchOne(
+                db, sql: "SELECT COUNT(DISTINCT messageId) FROM message_mailbox WHERE mailboxId IN (\(marks))",
+                arguments: arguments) ?? 0
+            let onlyThere = try String.fetchAll(
+                db, sql: """
+                    SELECT m.remoteId FROM message m
+                    WHERE m.id IN (SELECT messageId FROM message_mailbox WHERE mailboxId IN (\(marks)))
+                    AND NOT EXISTS (SELECT 1 FROM message_mailbox o WHERE o.messageId = m.id AND o.mailboxId NOT IN (\(marks)))
+                    """, arguments: arguments + arguments)
+            return (count, onlyThere)
+        }
+    }
+
     /// Its server made a pending mailbox: it takes the server's id, keeping its row. If a sync already
     /// brought the server's in, the stand-in goes instead.
     public func confirmPendingMailbox(accountId: String, pendingRemoteId: String, remoteId: String) throws {

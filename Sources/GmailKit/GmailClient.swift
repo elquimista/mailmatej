@@ -139,6 +139,11 @@ public struct GmailClient: Sendable {
         _ = try await send("PATCH", "labels/\(id)", json: ["name": name], cost: 5)
     }
 
+    /// Deletes a label: it comes off its messages, which stay.
+    public func deleteLabel(_ id: String) async throws {
+        _ = try await send("DELETE", url: Self.base.appendingPathComponent("labels/\(id)"), cost: 5)
+    }
+
     /// Adds a whole raw message to the account with these labels, as if it had arrived (dated by its
     /// Date header). Gmail's spam filter is left out: the message goes where it was put (as an IMAP
     /// append does), not into Spam as well.

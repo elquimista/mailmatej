@@ -355,6 +355,13 @@ public actor SyncCoordinator {
         try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId, replacing: pending)
     }
 
+    /// Deletes mailboxes on the server, each after those inside it (`remoteIds` in that order).
+    public func deleteMailboxes(accountId: String, remoteIds: [String]) async throws {
+        if let gmail = gmailEngines[accountId] { return try await gmail.deleteMailboxes(remoteIds: remoteIds) }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
+        try await engine.deleteMailboxes(remoteIds: remoteIds)
+    }
+
     /// Copies a whole message into a mailbox of `accountId` (see `JMAPAccountSync.importMessage`).
     public func importMessage(
         accountId: String, _ raw: Data, mailboxRemoteId: String, keywords: [String], receivedAt: Date
