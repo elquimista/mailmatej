@@ -813,6 +813,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step == "download" { return messageView.loadRemoteContentOnce() }  // the bar's Download
                 if step == "reload" { return messageView.debugBarAction(.reload) }  // the bar's Reload
                 if step == "corrcut" { return debugCutCorrespondenceRow() }  // see there
+                // "!threadcell=30,225": a thread row's cell 30 levels down in a 225 pt column, drawn to <snapshot>-cell-30-225.png.
+                if step.hasPrefix("threadcell="), let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] {
+                    let n = step.dropFirst(11).split(separator: ",").compactMap { Int($0) }
+                    guard n.count == 2 else { return }
+                    return list.debugRenderThreadCell(
+                        depth: n[0], width: CGFloat(n[1]), to: path.replacingOccurrences(of: ".png", with: "-cell-\(n[0])-\(n[1]).png"))
+                }
                 if step == "corrrow" { return debugLogCorrespondenceRow() }
                 // "!flagclick3": a click on list row 3's flag cell, as the mouse makes it (⌘ with "!flagclick3cmd");
                 // "!flagclick@377": on message 377's row.

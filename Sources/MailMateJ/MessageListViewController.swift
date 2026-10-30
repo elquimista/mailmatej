@@ -841,6 +841,26 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     #if DEBUG
+        /// A thread row's cell `depth` levels down in a column `width` wide, its chevron showing, drawn in
+        /// a strip 120 pt wider (to show anything spilling past the column) to `path`; its parts' frames logged.
+        func debugRenderThreadCell(depth: Int, width: CGFloat, to path: String) {
+            let strip = NSView(frame: NSRect(x: 0, y: 0, width: width + 120, height: 17))
+            strip.appearance = tableView.effectiveAppearance
+            let cell = ThreadFromCell(identifier: .init("thread"))
+            cell.frame = NSRect(x: 0, y: 0, width: width, height: 17)
+            strip.addSubview(cell)
+            cell.textField?.font = Self.font(bold: false)
+            cell.textField?.stringValue = "RE: Thank you for applying via LinkedIn"
+            cell.depth = depth
+            cell.chevron.isHidden = false
+            cell.chevron.image = Self.chevronDown
+            strip.layoutSubtreeIfNeeded()
+            guard let rep = strip.bitmapImageRepForCachingDisplay(in: strip.bounds) else { return }
+            strip.cacheDisplay(in: strip.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            NSLog("MMJ thread cell depth \(depth) width \(width): text \(NSStringFromRect(cell.textField?.frame ?? .zero)), chevron \(NSStringFromRect(cell.chevron.frame))")
+        }
+
         /// Scrolls so `row` shows only its top half at the bottom edge.
         func debugCutOff(row: Int) {
             guard let span = rowSpan, let clip = tableView.enclosingScrollView?.contentView else { return }
@@ -1355,10 +1375,21 @@ final class ThreadFromCell: ColoredCell {
     private var chevronLeading: NSLayoutConstraint!
 
     var depth = 0 {
-        didSet {
-            leading.constant = 15 + CGFloat(depth) * 8  // 8 px a level, as deep as the thread goes
-            chevronLeading.constant = -3 + CGFloat(depth) * 8
-        }
+        didSet { indent() }
+    }
+
+    /// 8 px a level, until the text would start past two thirds of the column: deeper replies line up
+    /// there, so their subject and chevron still show (a long back-and-forth ran past the column, its
+    /// chevron over the next one).
+    private func indent() {
+        let levels = min(depth, max(0, Int((bounds.width * 2 / 3 - 15) / 8)))
+        leading.constant = 15 + CGFloat(levels) * 8
+        chevronLeading.constant = -3 + CGFloat(levels) * 8
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        indent()
     }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
