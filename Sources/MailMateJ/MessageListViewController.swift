@@ -295,7 +295,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case keepPosition
         /// Return to a saved position; falls back to centering the selection.
         case restore(ScrollAnchor?)
-        /// Bring the first selected message into view (centered if it was off-screen).
+        /// Bring the first selected message fully into view: centered if it was off-screen, scrolled just
+        /// enough if it was cut off at an edge.
         case toSelection
         /// Bring a specific message into view.
         case toMessage(Int64?)
@@ -337,17 +338,31 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
 
     /// Whether the message's row is entirely in view (not cut off or under the column header).
     func isFullyVisible(_ id: Int64?) -> Bool {
-        guard let id, let row = ids.firstIndex(of: id), let clip = tableView.enclosingScrollView?.contentView else {
-            return false
-        }
-        let visible = tableView.convert(clip.bounds, from: clip)
-        // The list runs under the toolbar and the column header: the insets cover both, or the header
-        // alone floats over the content.
-        let top = visible.minY + max(clip.contentInsets.top, tableView.headerView?.frame.height ?? 0)
-        let bottom = visible.maxY - clip.contentInsets.bottom
+        guard let id, let row = ids.firstIndex(of: id), let span = rowSpan else { return false }
         // Vertically only: rows can be a little wider than the visible area (column widths).
         let rect = tableView.rect(ofRow: row)
-        return rect.minY + 1 >= top && rect.maxY - 1 <= bottom
+        return rect.minY + 1 >= span.top && rect.maxY - 1 <= span.bottom
+    }
+
+    /// Where rows can be seen, top to bottom in the table's coordinates: the list runs under the toolbar
+    /// and the column header, which the insets cover both of, or the header alone floats over.
+    private var rowSpan: (top: CGFloat, bottom: CGFloat)? {
+        guard let clip = tableView.enclosingScrollView?.contentView else { return nil }
+        let visible = tableView.convert(clip.bounds, from: clip)
+        return (visible.minY + max(clip.contentInsets.top, tableView.headerView?.frame.height ?? 0), visible.maxY - clip.contentInsets.bottom)
+    }
+
+    /// Scrolls a row fully into view: to the middle when none of it shows, else just enough to show what
+    /// was cut off at the top or the bottom.
+    private func reveal(_ row: Int) {
+        guard let span = rowSpan, let clip = tableView.enclosingScrollView?.contentView else { return }
+        let rect = tableView.rect(ofRow: row)
+        if rect.maxY <= span.top || rect.minY >= span.bottom { return center(row) }
+        if rect.minY < span.top {
+            scrollClip(toY: clip.bounds.minY - (span.top - rect.minY))
+        } else if rect.maxY > span.bottom {
+            scrollClip(toY: clip.bounds.minY + (rect.maxY - span.bottom))
+        }
     }
 
     var scrollAnchor: ScrollAnchor? {
@@ -411,7 +426,7 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
         case .restore(let saved):
             if !(saved.map(restore) ?? false), let row = indexes.first { center(row) }
         case .toSelection:
-            if let row = indexes.first, !tableView.rows(in: tableView.visibleRect).contains(row) { center(row) }
+            if let row = indexes.first { reveal(row) }
         case .toMessage(let id):
             if let id, let row = newIDs.firstIndex(of: id) { tableView.scrollRowToVisible(row) }
         }
@@ -826,6 +841,18 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     #if DEBUG
+        /// Scrolls so `row` shows only its top half at the bottom edge.
+        func debugCutOff(row: Int) {
+            guard let span = rowSpan, let clip = tableView.enclosingScrollView?.contentView else { return }
+            scrollClip(toY: clip.bounds.minY + (tableView.rect(ofRow: row).midY - span.bottom))
+        }
+
+        /// A row's top and bottom against where rows can be seen.
+        func debugRowPlace(_ row: Int) -> String {
+            let rect = tableView.rect(ofRow: row)
+            return "row \(rect.minY)–\(rect.maxY), seen \(rowSpan.map { "\($0.top)–\($0.bottom)" } ?? "-")"
+        }
+
         /// A click on a row's flag cell: mouse down sent to the view under it, mouse up queued for its
         /// tracking. Logs what was hit, the row's flag as shown and stored, and the selection.
         func debugClickFlag(row: Int, command: Bool) {

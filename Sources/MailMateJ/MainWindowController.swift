@@ -795,6 +795,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         func debugSearch(_ text: String) {
             if text.hasPrefix("@") { return _ = sidebar.select(key: String(text.dropFirst())) }  // "@key": choose a mailbox
             if text.hasPrefix("#"), let row = Int(text.dropFirst()) { return debugSelectRow(row) }  // "#row": select a list row
+            if text.hasPrefix("#@"), let id = Int64(text.dropFirst(2)), let row = list.ids.firstIndex(of: id) {  // "#@id": that message's row
+                return debugSelectRow(row)
+            }
             // "!Details", "!Save", "!Cancel": the bar's buttons; "!+text": ⊕ on the conditions, the first one
             // then "text"; "!name=X" / "!edit=X" / "!name": the name sheet's Save, Save and Edit…, Cancel.
             if text.hasPrefix("!") {
@@ -809,6 +812,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step == "findesc" { return messageView.debugFindEscape() }
                 if step == "download" { return messageView.loadRemoteContentOnce() }  // the bar's Download
                 if step == "reload" { return messageView.debugBarAction(.reload) }  // the bar's Reload
+                if step == "corrcut" { return debugCutCorrespondenceRow() }  // see there
+                if step == "corrrow" { return debugLogCorrespondenceRow() }
                 // "!flagclick3": a click on list row 3's flag cell, as the mouse makes it (⌘ with "!flagclick3cmd");
                 // "!flagclick@377": on message 377's row.
                 if step.hasPrefix("flagclick") {
@@ -963,6 +968,31 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             }
         }
         func debugExpandSidebar(key: String) { sidebar.debugExpand(key: key) }
+
+        /// Scrolls the Correspondence pane so the row of a message also in the main list shows only its top
+        /// half at the pane's bottom edge, then selects that message in the main list, as a click would.
+        func debugCutCorrespondenceRow() {
+            let candidates = correspondence.ids.indices.filter { i in
+                correspondence.ids[i] != correspondence.selectedID && list.ids.contains(correspondence.ids[i])
+            }
+            for row in candidates.reversed() {
+                let id = correspondence.ids[row]
+                correspondence.debugCutOff(row: row)
+                guard !correspondence.isFullyVisible(id), let mainRow = list.ids.firstIndex(of: id) else { continue }
+                NSLog("MMJ corr cut: pane row \(row) (message \(id)) cut off: \(correspondence.debugRowPlace(row))")
+                list.tableView.selectRowIndexes([mainRow], byExtendingSelection: false)
+                return
+            }
+            NSLog("MMJ corr cut: no row to cut off among \(candidates.count)")
+        }
+
+        /// Whether the Correspondence pane's selected row shows whole, and where it is.
+        func debugLogCorrespondenceRow() {
+            guard let id = correspondence.selectedID, let row = correspondence.ids.firstIndex(of: id) else {
+                return NSLog("MMJ corr row: nothing selected")
+            }
+            NSLog("MMJ corr row: message \(id), main \(list.selectedID ?? -1), fully visible \(correspondence.isFullyVisible(id)): \(correspondence.debugRowPlace(row))")
+        }
 
         /// Selects a row of the Correspondence pane, as a click would.
         func debugSelectCorrespondence(row: Int) {
