@@ -1592,12 +1592,20 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 item("Duplicate Mailbox", #selector(duplicateClicked(_:))),
             ])
         } else if isServerMailbox(node) {
-            // As a smart mailbox's, without Edit and Duplicate.
-            let rename = item("Rename Mailbox…", #selector(renameClicked(_:)))
-            let delete = item("Delete Mailbox", #selector(deleteMailboxClicked(_:)))
-            if !canRename(node) { rename.action = nil }
-            if !canDelete(node) { delete.action = nil }
-            groups.append([rename, delete])
+            // As a smart mailbox's, without Edit and Duplicate. Left out where they never apply (Rename for
+            // a name the server fixes, Delete for Inbox, Sent and the like); greyed out where they can't now.
+            var items: [NSMenuItem] = []
+            if !hasFixedName(node) {
+                let rename = item("Rename Mailbox…", #selector(renameClicked(_:)))
+                if !canRename(node) { rename.action = nil }
+                items.append(rename)
+            }
+            if node.role == nil {
+                let delete = item("Delete Mailbox", #selector(deleteMailboxClicked(_:)))
+                if !canDelete(node) { delete.action = nil }
+                items.append(delete)
+            }
+            groups.append(items)
         } else if node.kind == .unified {
             groups.append([item("Edit Mailbox…", #selector(editMailboxClicked(_:)))])
         } else if node.kind == .account {
@@ -2173,14 +2181,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// MailMate's Mailbox Type ▸ None, Drafts, Sent Messages, ..., for a JMAP account's mailbox (Gmail's
     /// are fixed), with the one it is checked; Archive gets a dash for one that's the archive only by its
-    /// name here, not on its server. Greyed out for Inbox, while the account is offline, and while its
-    /// server makes it.
+    /// name here, not on its server. None for Inbox; greyed out while the account is offline, and while
+    /// its server makes it.
     private func mailboxTypeItem(_ node: SidebarNode) -> NSMenuItem? {
-        guard isServerMailbox(node), let accountId = node.accountId, (try? model.store.account(id: accountId))?.isGmail == false
+        guard isServerMailbox(node), node.role != "inbox", let accountId = node.accountId,
+            (try? model.store.account(id: accountId))?.isGmail == false
         else { return nil }
         let item = NSMenuItem(title: "Mailbox Type", action: nil, keyEquivalent: "")
-        guard node.role != "inbox", !node.key.contains(MailStore.pendingMailboxPrefix), !model.isOffline(accountId: accountId)
-        else { return item }
+        guard !node.key.contains(MailStore.pendingMailboxPrefix), !model.isOffline(accountId: accountId) else { return item }
         let inferred = if case .mailbox(let id)? = node.scope {
             (try? model.store.mailboxes())?.first { $0.id == id }?.roleInferred == true
         } else { false }
@@ -2290,10 +2298,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// account is offline, nor while the server makes it.
     private func canRename(_ node: SidebarNode) -> Bool {
         if node.kind == .smart || node.kind == .account { return true }
-        guard isServerMailbox(node), let accountId = node.accountId, node.role != "inbox",
-            !node.key.contains(MailStore.pendingMailboxPrefix), !model.isOffline(accountId: accountId)
-        else { return false }
-        return node.role == nil || (try? model.store.account(id: accountId))?.isGmail != true
+        guard isServerMailbox(node), !hasFixedName(node), let accountId = node.accountId else { return false }
+        return !node.key.contains(MailStore.pendingMailboxPrefix) && !model.isOffline(accountId: accountId)
+    }
+
+    /// A server mailbox that can't be renamed: Inbox, and Gmail's own mailboxes (it renames labels only).
+    private func hasFixedName(_ node: SidebarNode) -> Bool {
+        guard let role = node.role else { return false }
+        return role == "inbox" || node.accountId.flatMap { try? model.store.account(id: $0) }?.isGmail == true
     }
 
     /// Edits a smart mailbox's, account's or folder's name in its row; false if the row isn't shown.
