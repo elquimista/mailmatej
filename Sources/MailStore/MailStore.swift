@@ -287,7 +287,7 @@ public final class MailStore: Sendable {
                 INSERT INTO mailbox (accountId, remoteId, parentRemoteId, name, role, sortOrder, totalEmails, unreadEmails)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (accountId, remoteId) DO UPDATE SET
-                    parentRemoteId = excluded.parentRemoteId, name = excluded.name, role = excluded.role,
+                    parentRemoteId = excluded.parentRemoteId, name = excluded.name, role = excluded.role, roleInferred = 0,
                     sortOrder = excluded.sortOrder, totalEmails = excluded.totalEmails,
                     unreadEmails = excluded.unreadEmails
                 """)
@@ -345,6 +345,21 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Gives a mailbox a role (taking it from the account's other mailboxes), or none; `inferred`: by its
+    /// name only, as it was (see `inferArchive`).
+    public func setMailboxRole(id: Int64, role: String?, inferred: Bool = false) throws {
+        try write { db in
+            if let role {
+                try db.execute(
+                    sql: """
+                        UPDATE mailbox SET role = NULL, roleInferred = 0
+                        WHERE role = ? AND id != ? AND accountId = (SELECT accountId FROM mailbox WHERE id = ?)
+                        """, arguments: [role, id, id])
+            }
+            try db.execute(sql: "UPDATE mailbox SET role = ?, roleInferred = ? WHERE id = ?", arguments: [role, inferred, id])
+        }
+    }
+
     /// The messages in any of these mailboxes (each counted once), and those of them in no other
     /// mailbox (their remote ids): the ones a server deletes with the mailboxes.
     public func messages(inMailboxes ids: [Int64]) throws -> (count: Int, onlyThere: [String]) {
@@ -388,13 +403,13 @@ public final class MailStore: Sendable {
     static func inferArchive(_ db: Database, accountId: String, serverArchive: String?) throws {
         if let serverArchive {
             try db.execute(
-                sql: "UPDATE mailbox SET role = NULL WHERE accountId = ? AND role = 'archive' AND remoteId != ?",
+                sql: "UPDATE mailbox SET role = NULL, roleInferred = 0 WHERE accountId = ? AND role = 'archive' AND remoteId != ?",
                 arguments: [accountId, serverArchive])
             return
         }
         try db.execute(
             sql: """
-                UPDATE mailbox SET role = 'archive'
+                UPDATE mailbox SET role = 'archive', roleInferred = 1
                 WHERE id = (SELECT id FROM mailbox WHERE accountId = ? AND role IS NULL AND parentRemoteId IS NULL
                             AND name = 'Archive' COLLATE NOCASE ORDER BY sortOrder LIMIT 1)
                   AND NOT EXISTS (SELECT 1 FROM mailbox WHERE accountId = ? AND role = 'archive')

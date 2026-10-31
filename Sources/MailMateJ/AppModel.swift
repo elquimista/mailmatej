@@ -1112,6 +1112,41 @@ final class AppModel {
         }
     }
 
+    /// MailMate's Mailbox Type choices, as the Mailboxes section names them, with their JMAP roles.
+    static let mailboxTypes: [(title: String, role: String?)] = [
+        ("None", nil), ("Drafts", "drafts"), ("Sent Messages", "sent"), ("Archive", "archive"), ("Junk", "junk"),
+        ("Deleted Messages", "trash"),
+    ]
+
+    /// MailMate's Mailbox Type, for a JMAP account's mailbox: the role it has on the server (nil: none).
+    /// It's here at once, taken from the account's mailbox that had it, then on the server; if the
+    /// server refuses, the roles go back as they were (a sync brings anything the server did change)
+    /// and an alert says why.
+    func setMailboxRole(id: Int64, to role: String?) {
+        guard let all = try? store.mailboxes(), let box = all.first(where: { $0.id == id }), box.role != "inbox", role != "inbox",
+            !box.remoteId.hasPrefix(MailStore.pendingMailboxPrefix)
+        else { return NSSound.beep() }
+        let holders = role.map { role in all.filter { $0.accountId == box.accountId && $0.role == role && $0.id != id } } ?? []
+        try? store.setMailboxRole(id: id, role: role)
+        refreshNow()
+        inBackground { [self] in
+            do {
+                try await coordinator.setMailboxRole(accountId: box.accountId, remoteId: box.remoteId, role: role)
+            } catch {
+                try? store.setMailboxRole(id: id, role: box.role, inferred: box.roleInferred)
+                for holder in holders { try? store.setMailboxRole(id: holder.id, role: holder.role, inferred: holder.roleInferred) }
+                sync(accountId: box.accountId)
+                let alert = NSAlert()
+                let type = Self.mailboxTypes.first { $0.role == role }?.title ?? "None"
+                alert.messageText = role == nil
+                    ? "Couldn’t make “\(box.name)” an ordinary mailbox." : "Couldn’t make “\(box.name)” the \(type) mailbox."
+                alert.informativeText = Self.describe(error)
+                present(alert)
+            }
+            refreshNow()
+        }
+    }
+
     /// Mailboxes being deleted on their servers, left out of the sidebar meanwhile (see `deleteMailbox`).
     private(set) var deletingMailboxes: Set<Int64> = []
 

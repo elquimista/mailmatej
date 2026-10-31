@@ -338,6 +338,16 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v23-inferred-archive") { db in
+            // Whether a mailbox is the archive only by its name (see `MailStore.inferArchive`), not by its
+            // server's role. Which ones are isn't known yet: each JMAP account's mailboxes are fetched whole
+            // with its next sync (its "Mailbox" state forgotten), which marks them.
+            try db.execute(sql: """
+                ALTER TABLE mailbox ADD COLUMN roleInferred INTEGER NOT NULL DEFAULT 0;
+                DELETE FROM syncState WHERE objectType = 'Mailbox';
+                """)
+        }
+
         m.registerMigration("v22-slim-search-index") { db in
             // The search index without its own copy of the text (nothing reads it back: searches only
             // find rows), nor the whole text again beside its unquoted and quoted parts (searched together

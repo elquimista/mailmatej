@@ -108,6 +108,8 @@ public struct MailboxRecord: Codable, FetchableRecord, Sendable, Hashable {
     public var sortOrder: Int
     public var totalEmails: Int
     public var unreadEmails: Int
+    /// The archive by its name only: its server gives it no role (see `MailStore.inferArchive`).
+    public var roleInferred: Bool = false
 }
 
 public enum AddressRole: Int, Sendable, CaseIterable {

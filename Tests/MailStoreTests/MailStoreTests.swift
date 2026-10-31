@@ -648,10 +648,29 @@ import Testing
             accountId: "acc", upserts: [box("in", "Inbox", role: "inbox"), box("x", "Archive", parent: "in"), box("a", "Archive")],
             destroyed: [], replaceAll: true)
         #expect(try store.mailbox(accountId: "acc", role: "archive")?.remoteId == "a")  // top level, by name
+        #expect(try store.mailbox(accountId: "acc", role: "archive")?.roleInferred == true)
         try store.applyMailboxes(accountId: "acc", upserts: [box("a", "Archive")], destroyed: [], replaceAll: false)
         #expect(try store.mailbox(accountId: "acc", role: "archive")?.remoteId == "a")  // kept after a sync
+        #expect(try store.mailbox(accountId: "acc", role: "archive")?.roleInferred == true)
         try store.applyMailboxes(accountId: "acc", upserts: [box("z", "Old Mail", role: "archive")], destroyed: [], replaceAll: false)
         #expect(try store.mailboxes().filter { $0.role == "archive" }.map(\.remoteId) == ["z"])  // the server's wins
+        #expect(try store.mailboxes().filter { $0.roleInferred }.isEmpty)
+    }
+
+    @Test func mailboxTypeMovesTheRole() throws {
+        func box(_ id: String, _ name: String, role: String? = nil) -> IncomingMailbox {
+            IncomingMailbox(remoteId: id, parentRemoteId: nil, name: name, role: role, sortOrder: 0, totalEmails: 0, unreadEmails: 0)
+        }
+        try store.applyMailboxes(
+            accountId: "acc", upserts: [box("in", "Inbox", role: "inbox"), box("a", "Archive"), box("p", "Projects")],
+            destroyed: [], replaceAll: true)
+        func id(_ remoteId: String) throws -> Int64 { try #require(store.mailboxes().first { $0.remoteId == remoteId }).id }
+        try store.setMailboxRole(id: id("a"), role: "archive")  // made the server's: no longer by its name only
+        #expect(try store.mailbox(accountId: "acc", role: "archive")?.roleInferred == false)
+        try store.setMailboxRole(id: id("p"), role: "archive")
+        #expect(try store.mailboxes().filter { $0.role == "archive" }.map(\.remoteId) == ["p"])  // one at a time
+        try store.setMailboxRole(id: id("p"), role: nil)
+        #expect(try store.mailboxes().filter { $0.role == "archive" }.isEmpty)
     }
 
     @Test func deletedMailboxesTakeOnlyTheirOwnMessages() throws {

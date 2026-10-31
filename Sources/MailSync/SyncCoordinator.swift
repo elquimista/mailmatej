@@ -355,6 +355,16 @@ public actor SyncCoordinator {
         try await engine.createMailbox(name: name, role: role, parentRemoteId: parentRemoteId, replacing: pending)
     }
 
+    /// Gives a mailbox a role on the server, or none (see `JMAPAccountSync.setMailboxRole`). Gmail's
+    /// mailboxes have theirs fixed.
+    public func setMailboxRole(accountId: String, remoteId: String, role: String?) async throws {
+        if gmailEngines[accountId] != nil {
+            throw JMAPAccountSync.MailboxRefused(reason: "Gmail’s mailboxes can’t change their type.")
+        }
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
+        try await engine.setMailboxRole(remoteId: remoteId, role: role)
+    }
+
     /// Deletes mailboxes on the server, each after those inside it (`remoteIds` in that order).
     public func deleteMailboxes(accountId: String, remoteIds: [String]) async throws {
         if let gmail = gmailEngines[accountId] { return try await gmail.deleteMailboxes(remoteIds: remoteIds) }

@@ -631,6 +631,41 @@ public actor JMAPAccountSync {
         _ = try await syncMailboxes(accountId)
     }
 
+    /// Gives a mailbox a role on the server (MailMate's Mailbox Type: "archive", "sent", ...), or none,
+    /// then syncs mailboxes. A role is one mailbox's at a time: the mailbox with it now (as the server
+    /// has it) loses it first, and gets it back if the server then refuses this one.
+    public func setMailboxRole(remoteId: String, role: String?) async throws {
+        let accountId = try remoteAccountId(try await client.currentSession())
+        var holders: [String] = []
+        if let role {
+            var request = JMAPRequest()
+            let get = request.call("Mailbox/get", ["accountId": .string(accountId), "ids": .null])
+            holders = try await client.send(request).decode(GetResponse<Mailbox>.self, get).list
+                .filter { $0.role == role && $0.id != remoteId }.map(\.id)
+        }
+        func update(_ ids: [String], role: String?) -> [String: JSONValue] {
+            ["accountId": .string(accountId), "update": .object(Dictionary(uniqueKeysWithValues: ids.map {
+                ($0, ["role": role.map { .string($0) } ?? .null])
+            }))]
+        }
+        var request = JMAPRequest()
+        let clear = holders.isEmpty ? nil : request.call("Mailbox/set", update(holders, role: nil))
+        let set = request.call("Mailbox/set", update([remoteId], role: role))
+        let response = try await client.send(request)
+        if let clear, let error = try response.arguments(clear)["notUpdated"]?.objectValue?.values.first {
+            throw MailboxRefused(error)
+        }
+        if let error = try response.arguments(set)["notUpdated"]?[remoteId] {
+            if !holders.isEmpty {
+                var undo = JMAPRequest()
+                _ = undo.call("Mailbox/set", update(holders, role: role))
+                _ = try? await client.send(undo)
+            }
+            throw MailboxRefused(error)
+        }
+        _ = try await syncMailboxes(accountId)
+    }
+
     /// Deletes mailboxes on the server, with their messages in no other mailbox (onDestroyRemoveEmails),
     /// then syncs mailboxes. One Mailbox/set each, in `remoteIds`' order: a mailbox with another still
     /// inside it is refused, so those inside come first.

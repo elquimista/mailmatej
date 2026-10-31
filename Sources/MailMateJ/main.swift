@@ -740,7 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let accountId = ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_IMAP"] {
                     await AppModel.shared.debugGmailIMAP(accountId: accountId)
                 }
-                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACTIONS"] {
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACTIONS"], spec.contains("|") {
                     // "subject|action,action,…" on the newest message with that subject; after each, a sync,
                     // then its mailboxes and flags as the server reports them. Actions: read, unread, flag,
                     // unflag, archive, inbox, delete, junk, notjunk, copyto=<mailbox name> (any account's).

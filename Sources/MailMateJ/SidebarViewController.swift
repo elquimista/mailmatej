@@ -1607,6 +1607,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             groups.append(messageItems(node))
             groups.append((applyRulesItem(node).map { [$0] } ?? []) + [item("Edit Rules…", #selector(editRulesClicked(_:)))])
         }
+        if let type = mailboxTypeItem(node) { groups.append([type]) }
         return groups.filter { !$0.isEmpty }
     }
 
@@ -2026,6 +2027,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             if !beginRename(key: key, thenEdit: false) { NSLog("MMJ rename: can't rename \(key)") }
         }
 
+        /// Mailbox Type on `key`'s row: logs its submenu (✓ by the checked one), then chooses `title` in it.
+        func debugMailboxType(_ key: String, choose title: String?) {
+            guard let node = find(key, in: roots), let item = mailboxTypeItem(node) else { return NSLog("MMJ type: none for \(key)") }
+            let choices = item.submenu?.items ?? []
+            let marks: [NSControl.StateValue: String] = [.on: "✓", .mixed: "–"]
+            NSLog("MMJ type of \(node.title): \(choices.map { (marks[$0.state] ?? "") + $0.title }.joined(separator: " | "))")
+            if let title, let choice = choices.first(where: { $0.title == title }) { mailboxTypeChosen(choice) }
+        }
+
         /// Delete Mailbox on `key`'s row, as its menu item does (the alert asking first).
         func debugAskDeleteMailbox(_ key: String) {
             let item = NSMenuItem()
@@ -2159,6 +2169,42 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func isServerMailbox(_ node: SidebarNode) -> Bool {
         guard node.key.hasPrefix("mailbox."), case .mailbox? = node.scope else { return false }
         return !node.isGenerated && node.accountId != nil
+    }
+
+    /// MailMate's Mailbox Type ▸ None, Drafts, Sent Messages, ..., for a JMAP account's mailbox (Gmail's
+    /// are fixed), with the one it is checked; Archive gets a dash for one that's the archive only by its
+    /// name here, not on its server. Greyed out for Inbox, while the account is offline, and while its
+    /// server makes it.
+    private func mailboxTypeItem(_ node: SidebarNode) -> NSMenuItem? {
+        guard isServerMailbox(node), let accountId = node.accountId, (try? model.store.account(id: accountId))?.isGmail == false
+        else { return nil }
+        let item = NSMenuItem(title: "Mailbox Type", action: nil, keyEquivalent: "")
+        guard node.role != "inbox", !node.key.contains(MailStore.pendingMailboxPrefix), !model.isOffline(accountId: accountId)
+        else { return item }
+        let inferred = if case .mailbox(let id)? = node.scope {
+            (try? model.store.mailboxes())?.first { $0.id == id }?.roleInferred == true
+        } else { false }
+        let menu = NSMenu()
+        for (index, type) in AppModel.mailboxTypes.enumerated() {
+            let choice = NSMenuItem(title: type.title, action: #selector(mailboxTypeChosen(_:)), keyEquivalent: "")
+            choice.target = self
+            choice.representedObject = node
+            choice.tag = index
+            choice.state = node.role == type.role ? (inferred ? .mixed : .on) : .off
+            if inferred, node.role == type.role {
+                choice.toolTip = "Used as \(type.title) for its name. Choose it to make it the server’s \(type.title) mailbox too."
+            }
+            menu.addItem(choice)
+        }
+        item.submenu = menu
+        return item
+    }
+
+    @objc private func mailboxTypeChosen(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? SidebarNode, case .mailbox(let id)? = node.scope,
+            AppModel.mailboxTypes.indices.contains(sender.tag)
+        else { return }
+        model.setMailboxRole(id: id, to: AppModel.mailboxTypes[sender.tag].role)
     }
 
     /// One of the user's own server mailboxes (not Inbox, Sent and the like), while its account is online

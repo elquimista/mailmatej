@@ -912,6 +912,11 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step.hasPrefix("newname") { return sidebar.debugFinishRename(step.hasPrefix("newname=") ? String(step.dropFirst(8)) : nil) }
                 if step.hasPrefix("selecttitle=") { return sidebar.debugSelect(title: String(step.dropFirst(12))) }
                 if step.hasPrefix("renamerow=") { return sidebar.debugRename(String(step.dropFirst(10))) }  // Rename on that row
+                // "!mbtype=key": that row's Mailbox Type submenu, logged; "!mbtype=key=Archive": Archive chosen in it.
+                if step.hasPrefix("mbtype=") {
+                    let parts = step.dropFirst(7).split(separator: "=", maxSplits: 1).map(String.init)
+                    return sidebar.debugMailboxType(parts[0], choose: parts.count > 1 ? parts[1] : nil)
+                }
                 if step.hasPrefix("deleteask=") { return sidebar.debugAskDeleteMailbox(String(step.dropFirst(10))) }  // its alert
                 if step.hasPrefix("deletebox=") { return sidebar.debugDeleteMailbox(String(step.dropFirst(10))) }  // Delete Mailbox, confirmed
                 if step.hasPrefix("rows=") {
