@@ -92,6 +92,43 @@ public enum MessagePage {
             """
     }
 
+    /// A message's raw source, as MailMate's Show Raw Message shows it: as it came (UTF-8, else Latin-1
+    /// byte for byte), in a framed block of fixed-width text, long lines wrapped. Nothing in it loads.
+    public static func rawHTML(_ source: Data) -> String {
+        // Escaping only touches ASCII, so the escaped bytes are UTF-8 exactly when the source is.
+        let text = String(bytes: rawEscaped(source), encoding: .utf8)
+            ?? String(decoding: rawEscaped(Data((String(data: source, encoding: .isoLatin1) ?? "").utf8)), as: UTF8.self)
+        return """
+            <!doctype html><html><head><meta charset="utf-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+            <meta name="color-scheme" content="light dark">
+            <style>\(pageCSS)\(rawCSS)</style>
+            </head><body><mmj-content>\(text)</mmj-content><mmj-end></mmj-end></body></html>
+            """
+    }
+
+    /// The source's bytes escaped as `escape` does, CRLF line ends as LF, in one pass: a message with
+    /// attachments runs to megabytes (4 MB: 6 ms, against 64 for `replacingOccurrences` pass by pass).
+    static func rawEscaped(_ source: Data) -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(source.count + source.count / 32)
+        source.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            let count = bytes.count
+            for i in 0..<count {
+                let byte = bytes[i]
+                switch byte {
+                case 0x0D where i + 1 < count && bytes[i + 1] == 0x0A: continue
+                case UInt8(ascii: "&"): out.append(contentsOf: "&amp;".utf8)
+                case UInt8(ascii: "<"): out.append(contentsOf: "&lt;".utf8)
+                case UInt8(ascii: ">"): out.append(contentsOf: "&gt;".utf8)
+                case UInt8(ascii: "\""): out.append(contentsOf: "&quot;".utf8)
+                default: out.append(byte)
+                }
+            }
+        }
+        return out
+    }
+
     /// Whether HTML shows a picture (an image not declared 1 or 2 px wide or tall, which a tracking pixel
     /// is). MailMate keeps such HTML on white even without colours: pictures, often on white themselves,
     /// look wrong on a dark page. (Seen at 1x: a Markdown message with an embedded picture stays white,
@@ -219,6 +256,19 @@ public enum MessagePage {
           html, body { background: #303234 !important; }
           mmj-quote { border-left-color: #787878; color: #787878; }
           a:link, a:visited { color: \(darkLinkColor); }
+        }
+        """
+
+    /// The raw source: fixed-width text in a framed block. Provisional values, from MailMate's screen
+    /// at a glance (11 px Menlo-width characters, 15 px lines); to be measured.
+    static let rawCSS = """
+
+        html, body { margin: 0 !important; padding: 0 !important; }
+        mmj-content { display: block; margin: 10px; padding: 6px; border: 1px solid #b4b4b4;
+          font: 11px/15px Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+        @media (prefers-color-scheme: dark) {
+          html, body { background: #303234 !important; }
+          mmj-content { border-color: #5a5a5a; }
         }
         """
 

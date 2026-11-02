@@ -1303,6 +1303,9 @@ enum MainMenu {
         let view = submenu(main, "View")
         view.addItem(withTitle: "Organize by Thread", action: #selector(MainWindowController.toggleThreads(_:)), keyEquivalent: "T")
         view.addItem(.separator())
+        view.addItem(withTitle: "Show Raw Message", action: #selector(MainWindowController.toggleRawMessage(_:)), keyEquivalent: "u")
+            .keyEquivalentModifierMask = [.command, .option]
+        view.addItem(.separator())
         view.addItem(withTitle: "Back in History", action: #selector(MainWindowController.goBack(_:)), keyEquivalent: "[")
         view.addItem(withTitle: "Forward in History", action: #selector(MainWindowController.goForward(_:)), keyEquivalent: "]")
         view.addItem(.separator())

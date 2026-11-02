@@ -17,11 +17,18 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     private let placeholder = NSTextField(labelWithString: "No Message Selected")
     private let linkPreview = LinkPreviewView()
     private var webView: MessageWebView!
+    /// The raw source's page (View ▸ Show Raw Message), under the message's until it has drawn, so the
+    /// two change places at once.
+    private var rawView: MessageWebView!
+    /// The web view on screen: the raw source's while it shows, else the message's.
+    private var shownWebView: MessageWebView { rawShown ? rawView : webView }
     private let header = MessageHeaderView()
     private let scroll = MessageScrollView()
     private let document = FlippedView()
     /// The content's height as the page last reported it (points).
     private var contentHeight: CGFloat = 0
+    /// The raw source page's, as `contentHeight`.
+    private var rawHeight: CGFloat = 0
     private let partHandler: EmbeddedPartSchemeHandler
 
     private var currentID: Int64?
@@ -57,23 +64,39 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func loadView() {
+    /// A message page's settings: three independent locks on scripts (JavaScript off, `script-src 'none'`
+    /// in the page CSP, a content rule blocking script loads), and the app's own scripts, in their own
+    /// world (the email can't see or affect them): the content's height, and marking.
+    private func pageConfiguration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
-        // Three independent locks on scripts: JavaScript off, `script-src 'none'` in the page CSP,
-        // and a content rule blocking script loads.
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.suppressesIncrementalRendering = true
-        config.setURLSchemeHandler(partHandler, forURLScheme: MessageHTML.cidScheme)
-        // The content's height, from the app's own script world (the email can't see or affect it).
         config.userContentController.addUserScript(WKUserScript(
             source: Self.heightScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         config.userContentController.add(WeakMessageHandler(self), contentWorld: .defaultClient, name: "mmjHeight")
         config.userContentController.addUserScript(WKUserScript(
             source: Self.markScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
+        return config
+    }
+
+    override func loadView() {
+        let config = pageConfiguration()
+        config.setURLSchemeHandler(partHandler, forURLScheme: MessageHTML.cidScheme)
         webView = MessageWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsMagnification = true
+        // Its page loads nothing at all (its CSP); no rules to change.
+        rawView = MessageWebView(frame: .zero, configuration: pageConfiguration())
+        rawView.navigationDelegate = self
+        rawView.isHidden = true
+        // WebKit starts a page's process with its first load (some 50 ms): done ahead, once the window has
+        // settled, so the first Show Raw Message is as quick as the rest.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, rawLoads == 0 else { return }
+            rawView.loadHTMLString("", baseURL: nil)
+        }
 
         header.onOpen = { [weak self] in self?.openAttachment($0) }
         header.onQuickLook = { [weak self] in self?.quickLookAttachment($0) }
@@ -107,6 +130,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         placeholder.textColor = .tertiaryLabelColor
         placeholder.alignment = .center
 
+        document.addSubview(rawView)  // under the message, until it has drawn
         document.addSubview(header)
         document.addSubview(webView)
         scroll.documentView = document
@@ -279,13 +303,14 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// Marks, in the headers and the text, Find's matches while the find bar has text (each its own, the
     /// current one yellow), else the search's.
     private func markAll(revealing: Bool) {
-        header.mark(findText.map { [SearchHighlight($0, wordStart: false)] } ?? highlights, finding: findText != nil)
+        // The raw source has the headers in its text; the header view is hidden.
+        header.mark(rawShown ? [] : findText.map { [SearchHighlight($0, wordStart: false)] } ?? highlights, finding: findText != nil)
         markText(revealing: revealing)
     }
 
     private func markText(revealing: Bool) {
         let terms = findText.map { [SearchHighlight($0, wordStart: false)] } ?? highlights
-        webView.callAsyncJavaScript(
+        shownWebView.callAsyncJavaScript(
             "return typeof mmjMark === 'function' ? mmjMark(terms, join) : -1;",
             arguments: ["terms": terms.map { ["text": $0.text, "wordStart": $0.wordStart, "group": $0.group] }, "join": findText == nil],
             in: nil, in: .defaultClient
@@ -319,12 +344,19 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     /// What Tab focuses: the find bar's field (while it's shown), and the message.
     var findKeyView: NSView { findBar.field }
-    var messageKeyView: NSView { webView }
+    var messageKeyView: NSView { shownWebView }
 
     /// Whether a message is shown (Find has something to look in).
     var showsMessage: Bool { currentID != nil }
 
     #if DEBUG
+        /// The page's height as laid out, and scrolls to its end (for the raw source's last lines).
+        func debugScrollToEnd() -> CGFloat {
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.frame.height - scroll.contentView.bounds.height)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            return document.frame.height
+        }
+
         /// ⌘F, then `text` as typed in the bar.
         func debugFind(_ text: String) {
             showFind()
@@ -362,7 +394,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         scrollTop?.constant = 0
         find("")
         // Back to what had it, if it's still in the window (a view, or a field's editor).
-        let back = (beforeFind as? NSView).flatMap { $0.window === view.window ? $0 : nil } ?? webView
+        let back = (beforeFind as? NSView).flatMap { $0.window === view.window ? $0 : nil } ?? shownWebView
         if hadKeyboard { view.window?.makeFirstResponder(back) }
     }
 
@@ -391,7 +423,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         {
             return use((editor.string as NSString).substring(with: editor.selectedRange()))
         }
-        webView.callAsyncJavaScript("return window.getSelection().toString();", arguments: [:], in: nil, in: .defaultClient) { result in
+        shownWebView.callAsyncJavaScript("return window.getSelection().toString();", arguments: [:], in: nil, in: .defaultClient) { result in
             use((try? result.get()) as? String ?? "")
         }
     }
@@ -416,12 +448,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         header.currentMark = inHeader ? findIndex : nil
         if inHeader, revealing, let rect = header.markRect(findIndex) { reveal(header.convert(rect, to: document)) }
         let inText = total > 0 && !inHeader ? findIndex - header.markCount : -1
-        webView.callAsyncJavaScript(
+        let page = shownWebView
+        page.callAsyncJavaScript(
             "return typeof mmjCurrent === 'function' ? mmjCurrent(n) : null;", arguments: ["n": inText], in: nil, in: .defaultClient
         ) { [weak self] result in
             guard let self, revealing, inText >= 0, let edges = (try? result.get()) as? [Double], edges.count == 2 else { return }
-            let scale = webView.magnification
-            reveal(NSRect(x: 0, y: webView.frame.minY + edges[0] * scale, width: 1, height: (edges[1] - edges[0]) * scale))
+            let scale = page.magnification
+            reveal(NSRect(x: 0, y: page.frame.minY + edges[0] * scale, width: 1, height: (edges[1] - edges[0]) * scale))
         }
     }
 
@@ -436,13 +469,18 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     nonisolated func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated {
-            if let height = (message.body as? NSNumber)?.doubleValue { contentHeightChanged(height) }
+            if let height = (message.body as? NSNumber)?.doubleValue { contentHeightChanged(height, of: message.webView) }
         }
     }
 
     /// Points: the page measures in CSS pixels, which zooming scales. Capped against a page that grows
-    /// with its own view (`min-height: 120vh`).
-    private func contentHeightChanged(_ height: Double) {
+    /// with its own view (`min-height: 120vh`); the raw source's own page doesn't, and runs long (a big
+    /// attachment's base64 is thousands of lines).
+    private func contentHeightChanged(_ height: Double, of page: WKWebView? = nil) {
+        if page === rawView {
+            rawHeight = min(CGFloat(height) * rawView.magnification, 10_000_000)
+            return layoutDocument()
+        }
         let points = min(CGFloat(height) * webView.magnification, 200_000)
         guard points != contentHeight else { return }
         contentHeight = points
@@ -452,27 +490,35 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// Measures the content once more when the page has loaded (the script reports changes after that),
     /// and marks what the search finds in it.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if webView === rawView { return rawPageLoaded() }
         if !highlights.isEmpty || findText != nil { markText(revealing: false) }
         if let bar = shownBar, bar.loaded { countDownloadedPixels(bar) }
         webView.callAsyncJavaScript(
             "const e = document.querySelector('mmj-end'); return e ? Math.ceil(e.getBoundingClientRect().top + window.scrollY) : 0;",
             arguments: [:], in: nil, in: .defaultClient
         ) { [weak self] result in
-            if let height = (try? result.get()) as? Double, height > 0 { self?.contentHeightChanged(height) }
+            if let height = (try? result.get()) as? Double, height > 0 { self?.contentHeightChanged(height, of: webView) }
         }
     }
 
     @objc private func clipResized() { layoutDocument() }
 
     /// The header on top, the content under it, as tall as the content (and at least down to the
-    /// pane's bottom, so the page's background fills it).
+    /// pane's bottom, so the page's background fills it); the raw source alone, the same way.
     private func layoutDocument() {
-        let width = scroll.contentView.bounds.width
+        let width = scroll.contentView.bounds.width, visible = scroll.contentView.bounds.height
+        if rawShown {
+            rawView.frame = NSRect(x: 0, y: 0, width: width, height: max(rawHeight, visible))
+            document.frame = rawView.frame
+            return
+        }
         let headerHeight = header.height(forWidth: width)
-        let webHeight = max(contentHeight, scroll.contentView.bounds.height - headerHeight)
+        let webHeight = max(contentHeight, visible - headerHeight)
         header.frame = NSRect(x: 0, y: 0, width: width, height: headerHeight)
         webView.frame = NSRect(x: 0, y: headerHeight, width: width, height: webHeight)
         document.frame = NSRect(x: 0, y: 0, width: width, height: headerHeight + webHeight)
+        // Under them while it loads, already at its size: changing places redraws nothing.
+        rawView.frame = NSRect(x: 0, y: 0, width: width, height: max(rawHeight, visible))
     }
 
     func show(messageID: Int64?, selectionCount: Int = 1) {
@@ -482,6 +528,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             return
         }
         guard messageID != currentID else { return }
+        if messageID != rawID { endRaw() }  // another message shows formatted, as in MailMate
         scroll.contentView.scroll(to: .zero)  // a new message starts at its top
         scroll.reflectScrolledClipView(scroll.contentView)
         currentID = messageID
@@ -525,6 +572,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func showPlaceholder(_ text: String) {
+        endRaw()
         renderGeneration += 1  // a page still being prepared doesn't show over this
         placeholder.stringValue = text
         placeholder.isHidden = false
@@ -569,6 +617,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func showStatus(_ text: String) {
+        guard !rawShown else { return }  // the body's loading doesn't cover the source
         renderGeneration += 1  // a page still being prepared doesn't show over this
         attachments = []
         applyRules(loadRemote: false)
@@ -579,6 +628,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     private var renderGeneration = 0
 
     private func render(_ body: MessageBody) {
+        if rawShown { return (currentBody, formattedStale) = (body, true) }  // shown with Show Formatted Message
         renderGeneration += 1
         // The window comes up while the rules are compiled: a message waits for them (nothing would
         // block its remote content yet).
@@ -631,6 +681,88 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     private func rerender() {
         if let currentBody { render(currentBody) }
+    }
+
+    // MARK: Raw source
+
+    /// The message whose raw source was asked for (View ▸ Show Raw Message). It shows in place of the
+    /// message, headers and all, until the item is chosen again or another message shows, as in MailMate.
+    private var rawID: Int64?
+    var showsRaw: Bool { rawID != nil && rawID == currentID }
+    /// The source is on screen: its page drew under the message's, then they changed places.
+    private var rawShown = false
+    /// A body came while the source showed: Show Formatted Message draws it.
+    private var formattedStale = false
+    /// Raw pages asked for: one that's been replaced or given up doesn't show.
+    private var rawLoads = 0
+
+    /// View ▸ Show Raw Message, or Show Formatted Message while the source shows. The message stays
+    /// on screen, untouched, until the source has drawn; going back shows it again at once.
+    func toggleRawMessage() {
+        guard let id = displayedMessageID else { return }
+        if showsRaw {
+            let stale = formattedStale
+            endRaw()
+            if stale, let currentBody { render(currentBody) }
+            return
+        }
+        rawID = id
+        rawLoads += 1
+        let load = rawLoads
+        Task {
+            do {
+                let source = try await model.rawMessage(messageId: id)
+                let page = await Task.detached(priority: .userInitiated) { MessagePage.rawHTML(source) }.value
+                guard load == rawLoads, showsRaw else { return }
+                rawHeight = 0
+                rawView.isHidden = false
+                layoutDocument()
+                rawView.loadHTMLString(page, baseURL: nil)
+            } catch {
+                guard load == rawLoads, showsRaw else { return }
+                rawID = nil
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t show the raw message."
+                alert.informativeText = AppModel.describe(error)
+                if let window = view.window { alert.beginSheetModal(for: window) { _ in } } else { alert.runModal() }
+            }
+        }
+    }
+
+    /// The source's page has loaded under the message: once it has drawn (a snapshot waits for that),
+    /// the two change places. Its height comes as the page reports it.
+    private func rawPageLoaded() {
+        let load = rawLoads
+        guard showsRaw else { return }
+        let drawn = WKSnapshotConfiguration()
+        drawn.rect = NSRect(x: 0, y: 0, width: rawView.bounds.width, height: scroll.contentView.bounds.height)
+        rawView.takeSnapshot(with: drawn) { [weak self] _, _ in
+            guard let self, load == rawLoads, showsRaw, !rawShown else { return }
+            rawShown = true
+            header.isHidden = true
+            webView.isHidden = true
+            layoutDocument()
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            if !highlights.isEmpty || findText != nil { markAll(revealing: false) }
+        }
+    }
+
+    /// The message again in place of its source (or none asked for any more), as it was.
+    private func endRaw() {
+        guard rawID != nil || rawShown else { return }
+        let wasShown = rawShown
+        (rawID, rawShown, formattedStale) = (nil, false, false)
+        rawLoads += 1
+        header.isHidden = false
+        webView.isHidden = false
+        rawView.isHidden = true
+        rawView.loadHTMLString("", baseURL: nil)
+        layoutDocument()
+        guard wasShown else { return }
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        if !highlights.isEmpty || findText != nil { markAll(revealing: false) }
     }
 
     private func loadPage(content: String, bar: MessagePage.Bar?, plain: Bool, remote: Bool) {

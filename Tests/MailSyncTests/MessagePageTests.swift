@@ -68,6 +68,18 @@ import Testing
             + "<mmj-line>After</mmj-line>")
     }
 
+    @Test func rawSourceShowsAsTextThatLoadsNothing() {
+        let source = "Subject: Hi\r\nContent-Type: text/html\r\n\r\n<img src=\"https://x.example/p.gif\">caf\u{e9}\r\n"
+        let utf8 = MessagePage.rawHTML(Data(source.utf8))
+        #expect(utf8.contains("<mmj-content>Subject: Hi\nContent-Type: text/html\n\n&lt;img src=&quot;https://x.example/p.gif&quot;&gt;café\n</mmj-content>"))
+        #expect(utf8.contains("default-src 'none'; style-src 'unsafe-inline'\""))
+        // Not UTF-8 (an 8-bit Latin-1 body): byte for byte, nothing dropped.
+        let latin1 = MessagePage.rawHTML(source.data(using: .isoLatin1)!)
+        #expect(latin1.contains("café\n</mmj-content>"))
+        // Only a CR that ends a line with LF goes.
+        #expect(MessagePage.rawEscaped(Data("a\rb\r\r\n".utf8)) == Array("a\rb\r\n".utf8))
+    }
+
     @Test func onlyHTMLWithoutColorsFollowsDarkMode() {
         #expect(MessagePage.hasNoColors("<p>Hi Ellie,</p><p>&nbsp;</p>"))
         #expect(!MessagePage.hasNoColors(##"<p style="color: #333">Hi</p>"##))

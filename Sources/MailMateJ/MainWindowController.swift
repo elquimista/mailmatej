@@ -913,6 +913,38 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if step.hasPrefix("selecttitle=") { return sidebar.debugSelect(title: String(step.dropFirst(12))) }
                 if step.hasPrefix("renamerow=") { return sidebar.debugRename(String(step.dropFirst(10))) }  // Rename on that row
                 // "!mbtype=key": that row's Mailbox Type submenu, logged; "!mbtype=key=Archive": Archive chosen in it.
+                if step == "raw" { return messageView.toggleRawMessage() }  // "!raw": View ▸ Show Raw/Formatted Message
+                if step == "rawburst" {  // "!rawburst": Show Raw (Formatted) Message, the window captured as fast as it can for 0.6 s
+                    guard let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"], let number = window?.windowNumber else { return }
+                    let start = Date()
+                    Thread.detachNewThread {
+                        // The window as on screen, in-process (screencapture starts too slowly to see a frame).
+                        typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+                        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return }
+                        let capture = unsafeBitCast(symbol, to: Capture.self)
+                        var shots: [(Double, CGImage)] = []
+                        while Date().timeIntervalSince(start) < 0.6 {
+                            if let image = capture(.null, 8, UInt32(number), 1 | 16)?.takeRetainedValue() {
+                                shots.append((Date().timeIntervalSince(start), image))
+                            }
+                        }
+                        for (i, (t, image)) in shots.enumerated() {
+                            let url = URL(fileURLWithPath: path.replacingOccurrences(of: ".png", with: String(format: "-b%03d-%03dms.png", i, Int(t * 1000))))
+                            guard let file = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { continue }
+                            CGImageDestinationAddImage(file, image, nil)
+                            CGImageDestinationFinalize(file)
+                        }
+                        NSLog("MMJ burst: \(shots.count) captures")
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { self.messageView.toggleRawMessage() }
+                    return
+                }
+                if step == "rawend" { return NSLog("MMJ raw end: page \(messageView.debugScrollToEnd()) pt") }  // "!rawend"
+                if step == "rawmenu" {  // "!rawmenu": that item's title, as the View menu shows it
+                    let item = NSMenuItem(title: "", action: #selector(toggleRawMessage(_:)), keyEquivalent: "")
+                    let enabled = validateMenuItem(item)
+                    return NSLog("MMJ raw menu: \(item.title)\(enabled ? "" : " (off)")")
+                }
                 if step.hasPrefix("mbtype=") {
                     let parts = step.dropFirst(7).split(separator: "=", maxSplits: 1).map(String.init)
                     return sidebar.debugMailboxType(parts[0], choose: parts.count > 1 ? parts[1] : nil)
@@ -1287,6 +1319,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return messageView.hasAttachments
         case #selector(goToMailbox(_:)):
             return !editing
+        case #selector(toggleRawMessage(_:)):
+            item.title = messageView.showsRaw ? "Show Formatted Message" : "Show Raw Message"
+            return messageView.displayedMessageID != nil
         case #selector(newSmartMailbox(_:)):
             return sidebar.selectedNode?.isGenerated != true
         case #selector(synchronize(_:)):
@@ -1301,6 +1336,9 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             return true
         }
     }
+
+    /// View ▸ Show Raw Message (⌥⌘U): the displayed message's source in the message pane, or back.
+    @objc func toggleRawMessage(_ sender: Any?) { messageView.toggleRawMessage() }
 
     @objc func toggleThreads(_ sender: Any?) {
         showsThreads.toggle()
