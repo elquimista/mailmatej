@@ -500,7 +500,15 @@ final class AppModel {
             try store.setKeyword(keyword, on, messageIds: ids)
             work.updates.append((remoteIds, ["keywords/\(keyword)": on ? .bool(true) : .null]))
         }
+        // Gmail puts messages in Sent Mail and Drafts itself and refuses to let an app do it: only messages
+        // already in one can go into it (out of their other mailboxes).
+        func checkSetByGmail(_ ids: [Int64], into target: MailboxRecord) throws {
+            guard target.role == "sent" || target.role == "drafts", try store.account(id: accountId)?.isGmail == true else { return }
+            let current = try store.mailboxIDs(messageIds: ids)
+            if ids.contains(where: { !(current[$0] ?? []).contains(target.id) }) { throw MessageActionError.setByGmail(target.name) }
+        }
         func move(_ messages: [MailStore.MessageRef], to target: MailboxRecord, extra: [String: JSONValue] = [:]) throws {
+            try checkSetByGmail(messages.map(\.id), into: target)
             try store.moveMessages(messages.map(\.id), toMailboxId: target.id)
             var patch = extra
             patch["mailboxIds"] = .object([target.remoteId: .bool(true)])
@@ -517,6 +525,7 @@ final class AppModel {
                 throw MessageActionError.noMailbox(role: "")
             }
             if target.remoteId.hasPrefix(MailStore.pendingMailboxPrefix) { throw MessageActionError.notMadeYet(target.name) }
+            try checkSetByGmail(ids, into: target)
             let current = try store.mailboxIDs(messageIds: ids)
             try store.setMailboxes(Dictionary(
                 ids.filter { !(current[$0] ?? []).contains(target.id) }.map { ($0, (current[$0] ?? []) + [target.id]) },
@@ -992,6 +1001,8 @@ final class AppModel {
         case noMailbox(role: String)
         /// Made here a moment ago, it isn't on its server yet (see `createMailbox`).
         case notMadeYet(String)
+        /// Gmail's Sent Mail or Drafts, for messages Gmail didn't put there.
+        case setByGmail(String)
 
         var errorDescription: String? {
             switch self {
@@ -1000,6 +1011,8 @@ final class AppModel {
                 return "This account has no \(name) mailbox."
             case .notMadeYet(let name):
                 return "“\(name)” isn’t on the server yet. Try again in a moment."
+            case .setByGmail(let name):
+                return "Gmail puts messages in “\(name)” itself, so only messages already there can be moved into it."
             }
         }
     }

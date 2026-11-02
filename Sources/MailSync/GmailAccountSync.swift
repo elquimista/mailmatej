@@ -65,6 +65,8 @@ public actor GmailAccountSync {
         "INBOX": ("Inbox", "inbox", 0), "DRAFT": ("Drafts", "drafts", 1), "SENT": ("Sent Mail", "sent", 2),
         archive: ("Archive", "archive", 3), "SPAM": ("Spam", "junk", 4), "TRASH": ("Trash", "trash", 5),
     ]
+    /// The mailbox labels only Gmail puts on messages (an app can't add them).
+    static let setByGmail: Set<String> = ["SENT", "DRAFT"]
     /// Bumped when how labels map to mailboxes changes: accounts synced before are fetched again.
     static let mappingVersion = "2"
     static let mappingState = "GmailMapping"
@@ -806,7 +808,9 @@ public actor GmailAccountSync {
     /// flags (see `imapKeywords`); a message's new set of
     /// mailboxes (`mailboxIds`) adds their labels and takes off the other mailboxes' (moving, as into a
     /// folder: Sent and Drafts stay); `mailboxIds/<id>` adds or takes off one. Archive is MailMate's
-    /// "[Gmail]/Archive" label, made the first time it's needed.
+    /// "[Gmail]/Archive" label, made the first time it's needed. Sent and Drafts are never added: Gmail
+    /// sets them itself and refuses a request that adds them, even to a message that has them, so a move
+    /// into Sent Mail only takes the other labels off (the app moves only messages already there).
     public func update(remoteIds: [String], patch: [String: JSONValue]) async throws {
         guard !remoteIds.isEmpty else { return }
         var add = Set<String>(), remove = Set<String>()
@@ -822,18 +826,18 @@ public actor GmailAccountSync {
             case "mailboxIds":
                 let targets = Set((value.objectValue ?? [:]).filter { $0.value.boolValue == true }.keys)
                 // Off every mailbox label but the targets', then onto the targets.
-                for box in mailboxLabels.union([Self.archive]) where !targets.contains(box) && box != "SENT" && box != "DRAFT" {
+                for box in mailboxLabels.union([Self.archive]) where !targets.contains(box) && !Self.setByGmail.contains(box) {
                     if box == Self.archive {
                         if let archiveLabel { set(archiveLabel, false) }
                     } else {
                         set(box, false)
                     }
                 }
-                for box in targets { set(try await label(for: box), true) }
+                for box in targets where !Self.setByGmail.contains(box) { set(try await label(for: box), true) }
             case _ where key.hasPrefix("mailboxIds/"):
                 let box = String(key.dropFirst("mailboxIds/".count))
                 if on {
-                    set(try await label(for: box), true)
+                    if !Self.setByGmail.contains(box) { set(try await label(for: box), true) }
                 } else if box != Self.archive || archiveLabel != nil {
                     set(box == Self.archive ? archiveLabel! : box, false)
                 }

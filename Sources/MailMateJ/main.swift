@@ -743,7 +743,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_MESSAGE_ACTIONS"], spec.contains("|") {
                     // "subject|action,action,…" on the newest message with that subject; after each, a sync,
                     // then its mailboxes and flags as the server reports them. Actions: read, unread, flag,
-                    // unflag, archive, inbox, delete, junk, notjunk, copyto=<mailbox name> (any account's).
+                    // unflag, archive, inbox, delete, junk, notjunk, copyto=<mailbox name> (any account's),
+                    // moveto=<mailbox name> (its own account's).
                     let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
                     let model = AppModel.shared!
                     func state(_ id: Int64) -> String {
@@ -784,6 +785,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 model.sync(accountId: target.accountId)
                                 try? await Task.sleep(for: .seconds(6))
                                 NSLog("MMJ message actions after \(action): copied")
+                                continue
+                            }
+                            if action.hasPrefix("moveto="),
+                                let target = ((try? model.store.mailboxes()) ?? [])
+                                    .first(where: { $0.name == action.dropFirst(7) && $0.accountId == accountId })
+                            {
+                                model.perform(.move(toMailboxId: target.id), on: [id]) { _ in false }
+                                try? await Task.sleep(for: .seconds(4))
+                                model.sync(accountId: accountId)
+                                try? await Task.sleep(for: .seconds(6))
+                                NSLog("MMJ message actions after \(action): \(state(id))")
                                 continue
                             }
                             guard let message else { continue }
