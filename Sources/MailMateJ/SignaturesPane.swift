@@ -143,6 +143,14 @@ final class SignaturesPane: NSViewController, NSTableViewDataSource, NSTableView
             button.frame = NSRect(x: x, y: 19, width: 23, height: 22)
             view.addSubview(button)
         }
+        // MailMate's help button (its frame); it explains the choices above.
+        let help = NSButton(frame: NSRect(x: 579, y: 17, width: 25, height: 25))
+        help.bezelStyle = .helpButton
+        help.title = ""
+        help.target = self
+        help.action = #selector(showHelp(_:))
+        help.autoresizingMask = [.minXMargin, .maxYMargin]
+        view.addSubview(help)
         self.view = view
         reload()
         NotificationCenter.default.addObserver(self, selector: #selector(storeChanged(_:)), name: .mailStoreDidChange, object: nil)
@@ -240,6 +248,16 @@ final class SignaturesPane: NSViewController, NSTableViewDataSource, NSTableView
         try? model.store.resetSignatureUsage()
     }
 
+    @objc private func showHelp(_ sender: NSButton) {
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = SignaturesHelp()
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+        #if DEBUG
+            debugHelp = popover
+        #endif
+    }
+
     @objc private func addClicked(_ sender: Any?) {
         edit(nil)
     }
@@ -265,6 +283,14 @@ final class SignaturesPane: NSViewController, NSTableViewDataSource, NSTableView
 
     #if DEBUG
         func debugFillAndSave(_ spec: String) { editor?.debugFillAndSave(spec) }
+
+        /// The help popover, opened as its button does; its window.
+        private var debugHelp: NSPopover?
+        func debugShowHelp() -> NSWindow? {
+            guard let help = view.subviews.first(where: { ($0 as? NSButton)?.bezelStyle == .helpButton }) as? NSButton else { return nil }
+            showHelp(help)
+            return debugHelp?.contentViewController?.view.window
+        }
         /// The rows as the table shows them: name | signature.
         var debugRows: [String] { signatures.map { "\($0.name) | \($0.text.replacingOccurrences(of: "\n", with: "⏎"))" } }
     #endif
@@ -304,6 +330,78 @@ private final class LinesCellView: NSTableCellView {
         cell.truncatesLastVisibleLine = true
         cell.backgroundStyle = backgroundStyle
         cell.draw(withFrame: bounds, in: self)
+    }
+}
+
+/// What Settings › Signatures' choices do, in the popover its help button opens (MailMate's button opens
+/// its help book; this says it for each choice, as it works here).
+private final class SignaturesHelp: NSViewController {
+    static let sections: [(title: String, lines: [String])] = [
+        ("Signature based on history", [
+            "Whether a message starts with the signature sent before: the one last sent to its main recipient "
+                + "(with its placement), else the one sent most from its From address. Sending with No Signature counts too.",
+            "• Never: always the default signature.",
+            "• New Messages Only: for new messages and forwards; replies get the default.",
+            "• New Messages and Replies: for every message.",
+            "• New Messages and Replies (Separately): for every message, a reply following the replies sent to that "
+                + "recipient, and a new message or forward the new messages and forwards.",
+        ]),
+        ("Reset Signature Usage History", [
+            "Forgets which signatures, and placements, were sent to whom and from which addresses.",
+        ]),
+        ("Default signature", [
+            "Which messages get a signature when history doesn't choose one: the first signature in the list below "
+                + "that their From address may use.",
+        ]),
+        ("Default signature placement", [
+            "Where a reply's or forward's signature goes: Top, above the quoted text, or Bottom, below it. A new "
+                + "message's goes at its end. History keeps the placement each recipient got, so after changing this, "
+                + "reset the history if past placements shouldn't carry on.",
+        ]),
+        ("Caret placement", [
+            "Where the cursor starts in a reply or forward:",
+            "• Always at Top: on the first line.",
+            "• Always at Top (with Newlines): on the first line, empty lines between it and the quoted text.",
+            "• Above Signature: on the line above the signature (below the quoted text when the signature is at "
+                + "the bottom).",
+        ]),
+        ("Signatures", [
+            "Double-click one to edit it. Its Addresses limit it to those From addresses: *@example.com, or "
+                + "{me@example.com,you@example.com}; none, any. One kept on a server is its address's own, and a "
+                + "Gmail signature is changed in Gmail's settings.",
+        ]),
+    ]
+
+    override func loadView() {
+        let text = NSMutableAttributedString()
+        let body = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        for (index, section) in Self.sections.enumerated() {
+            let heading = NSMutableParagraphStyle()
+            heading.paragraphSpacingBefore = index == 0 ? 0 : 8
+            heading.paragraphSpacing = 2
+            text.append(NSAttributedString(string: (index == 0 ? "" : "\n") + section.title, attributes: [
+                .font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: heading,
+            ]))
+            for line in section.lines {
+                let style = NSMutableParagraphStyle()
+                style.paragraphSpacing = 2
+                if line.hasPrefix("• ") {  // a choice: its lines after the first under its text
+                    style.headIndent = ("• " as NSString).size(withAttributes: [.font: body]).width
+                }
+                text.append(NSAttributedString(string: "\n" + line, attributes: [
+                    .font: body, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style,
+                ]))
+            }
+        }
+        let label = NSTextField(labelWithAttributedString: text)
+        label.preferredMaxLayoutWidth = 400
+        label.isSelectable = true
+        let size = label.fittingSize
+        label.frame = NSRect(x: 16, y: 14, width: 400, height: size.height)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 432, height: size.height + 28))
+        view.addSubview(label)
+        self.view = view
     }
 }
 

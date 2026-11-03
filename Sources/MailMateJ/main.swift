@@ -1135,6 +1135,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             NSLog("MMJ settings switch to \(label): \(await sampler.value.joined(separator: ", "))")
                         }
                     }
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_SIGNATURES_HELP"] != nil,
+                        let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"],
+                        let help = SettingsWindowController.shared.debugSignaturesPane.debugShowHelp()
+                    {
+                        // The help popover, as its button opens it, captured as <MMJ_SNAPSHOT>-help.png.
+                        try? await Task.sleep(for: .milliseconds(600))
+                        let capture = Process()
+                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                        capture.arguments = ["-x", "-o", "-l\(help.windowNumber)", path.replacingOccurrences(of: ".png", with: "-help.png")]
+                        try? capture.run()
+                        capture.waitUntilExit()
+                        NSLog("MMJ signatures help: \(NSStringFromRect(help.frame)) over settings \(NSStringFromRect(SettingsWindowController.shared.window?.frame ?? .zero))")
+                    }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_ESCAPE"] != nil, let sheet = target {
                         // Escape pressed on the editor's sheet, as AppKit hands it over (the key window's key
                         // equivalents first); then whether the sheet is still up.
