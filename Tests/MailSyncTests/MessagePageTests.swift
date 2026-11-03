@@ -102,4 +102,17 @@ import Testing
         #expect(!MessagePage.hasPictures(#"<img src="https://x.example/p.gif" style="width:1px;height:1px;">"#))
         #expect(!MessagePage.hasPictures("<p>No images</p>"))
     }
+
+    /// HTML with colours shows light even with dark mode of its own (its web view is light then):
+    /// ADP's sets its text white for dark mode, on a card it keeps white.
+    @Test func htmlWithItsOwnDarkModeShowsLight() {
+        let adp = """
+            <style>:root { color-scheme: light dark; } @media (prefers-color-scheme: dark) { p { color: #ffffff !important; } }</style>
+            <table bgcolor="#fefefe"><tr><td><p style="color: rgb(74, 74, 74);">Register</p></td></tr></table>
+            """
+        #expect(!MessagePage.adapts(adp, plain: false))
+        #expect(!MessagePage.html(content: adp, plain: false, remote: false).contains(#"<meta name="color-scheme""#))
+        #expect(MessagePage.adapts("<p>Hi Ellie,</p>", plain: false))
+        #expect(MessagePage.adapts(MessagePage.plainHTML("Hi"), plain: true))
+    }
 }

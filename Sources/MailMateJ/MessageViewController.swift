@@ -656,26 +656,27 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         #endif
         // Fail closed: remote content only loads when the strict and script rules are in place.
         let loadRemote = loadRemoteForCurrent && Self.strictRules != nil && Self.scriptRules != nil
-        func show(_ prepared: PreparedHTML, page: String) {
+        func show(_ prepared: PreparedHTML, page: String, adaptive: Bool) {
             let bar = prepared.remoteCount == 0 ? nil : MessagePage.Bar(resources: prepared.resources, loaded: loadRemote)
             applyRules(loadRemote: loadRemote)
-            loadPage(page, bar: bar)
+            loadPage(page, bar: bar, adaptive: adaptive)
         }
-        @Sendable nonisolated func prepare() -> (PreparedHTML, String) {
+        @Sendable nonisolated func prepare() -> (PreparedHTML, String, Bool) {
             let prepared = MessageHTML.prepare(html, messageId: id, blockRemote: !loadRemote)
-            return (prepared, MessagePage.html(content: prepared.html, plain: false, remote: loadRemote))
+            let adaptive = MessagePage.adapts(prepared.html, plain: false)
+            return (prepared, MessagePage.html(content: prepared.html, plain: false, remote: loadRemote, adaptive: adaptive), adaptive)
         }
         // Most messages take a few milliseconds; a big newsletter (they run to a megabyte) up to 70, so
         // it's prepared off the main thread, the message shown before staying until it's ready.
         guard html.utf8.count > 100_000 else {
-            let (prepared, page) = prepare()
-            return show(prepared, page: page)
+            let (prepared, page, adaptive) = prepare()
+            return show(prepared, page: page, adaptive: adaptive)
         }
         let generation = renderGeneration
         Task {
-            let (prepared, page) = await Task.detached(priority: .userInitiated) { prepare() }.value
+            let (prepared, page, adaptive) = await Task.detached(priority: .userInitiated) { prepare() }.value
             guard generation == renderGeneration else { return }
-            show(prepared, page: page)
+            show(prepared, page: page, adaptive: adaptive)
         }
     }
 
@@ -766,10 +767,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func loadPage(content: String, bar: MessagePage.Bar?, plain: Bool, remote: Bool) {
-        loadPage(MessagePage.html(content: content, plain: plain, remote: remote), bar: bar)
+        let adaptive = MessagePage.adapts(content, plain: plain)
+        loadPage(MessagePage.html(content: content, plain: plain, remote: remote, adaptive: adaptive), bar: bar, adaptive: adaptive)
     }
 
-    private func loadPage(_ html: String, bar: MessagePage.Bar?) {
+    /// `adaptive`: the page follows dark mode (see `MessagePage.adapts`); else the web view is light.
+    private func loadPage(_ html: String, bar: MessagePage.Bar?, adaptive: Bool) {
+        webView.appearance = adaptive ? nil : NSAppearance(named: .aqua)
         webView.resetHover()
         shownBar = bar
         header.update(fields: headerFields, attachments: attachments.map(Self.headerAttachment), bar: bar)

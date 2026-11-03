@@ -78,8 +78,19 @@ public enum MessagePage {
     ///   - content: HTML for HTML messages, already-escaped text for plain ones.
     ///   - remote: whether https resources may load (only after the user allowed it).
     public static func html(content: String, plain: Bool, remote: Bool) -> String {
-        // Plain text, and HTML that sets no colours of its own, follow dark mode as MailMate shows them.
-        let adaptive = plain || (hasNoColors(content) && !hasPictures(content))
+        html(content: content, plain: plain, remote: remote, adaptive: adapts(content, plain: plain))
+    }
+
+    /// Whether a message's page follows dark mode: plain text, and HTML that sets no colours of its own,
+    /// as MailMate shows them. The others show light, so their web view is light too: HTML's own dark
+    /// mode (prefers-color-scheme) would make its text white on its white (as Gmail's web app, which
+    /// drops those rules, doesn't).
+    public static func adapts(_ content: String, plain: Bool) -> Bool {
+        plain || (hasNoColors(content) && !hasPictures(content))
+    }
+
+    /// `html(content:plain:remote:)`, with `adapts` already known.
+    public static func html(content: String, plain: Bool, remote: Bool, adaptive: Bool) -> String {
         let https = remote ? " https:" : ""
         let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
             + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
