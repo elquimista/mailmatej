@@ -272,7 +272,11 @@ final class SignaturesPane: NSViewController, NSTableViewDataSource, NSTableView
     /// Opens the editor as a sheet: for `signature`, or a new one (nil).
     func edit(_ signature: SignatureRecord?) {
         guard let window = view.window, editor == nil else { return }
-        let editor = SignatureEditor(model: model, signature: signature, gmail: signature.map(isGmail) ?? false)
+        var gmail = signature.map(isGmail) ?? false
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_GMAIL_EDITOR"] != nil { gmail = true }  // Dev has no Gmail signatures
+        #endif
+        let editor = SignatureEditor(model: model, signature: signature, gmail: gmail)
         self.editor = editor
         editor.onDuplicate = { [weak self] copy in
             DispatchQueue.main.async { self?.edit(copy) }
@@ -332,13 +336,35 @@ final class SignatureEditor: NSWindowController, NSTextFieldDelegate {
         let exists = signature.map { s in model.signatures().contains { $0.id == s.id } } ?? false
         original = exists ? signature : nil
         start = signature ?? SignatureRecord(id: UUID().uuidString, name: "", text: "")
-        let window = NSPanel(
+        let window = EditorPanel(
             contentRect: NSRect(x: 0, y: 0, width: 396, height: 327), styleMask: [.titled, .resizable], backing: .buffered,
             defer: false)
         window.minSize = NSSize(width: 396, height: 300)
         super.init(window: window)
         build(in: window.contentView!)
         fill()
+        // A Gmail signature's has no Cancel button to take Escape.
+        if gmail { window.onEscape = { [weak self] in self?.cancel(nil) } }
+    }
+
+    /// The editor's sheet: with `onEscape`, Escape does that, wherever the focus is (a text view would
+    /// take it for completion otherwise).
+    private final class EditorPanel: NSPanel {
+        var onEscape: (() -> Void)?
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if let onEscape, event.type == .keyDown, event.charactersIgnoringModifiers == "\u{1b}",
+                event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+            {
+                onEscape()
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            if let onEscape { onEscape() } else { super.cancelOperation(sender) }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }

@@ -1095,6 +1095,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(1))
                     target = SettingsWindowController.shared.window?.attachedSheet ?? SettingsWindowController.shared.window
+                    if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_ESCAPE"] != nil, let sheet = target {
+                        // Escape pressed on the editor's sheet, as AppKit hands it over (the key window's key
+                        // equivalents first); then whether the sheet is still up.
+                        let escape = NSEvent.keyEvent(
+                            with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                            windowNumber: sheet.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                            isARepeat: false, keyCode: 53)
+                        sheet.makeFirstResponder(sheet.contentView?.subviews.lazy.compactMap { ($0 as? NSScrollView)?.documentView }.first)
+                        NSLog("MMJ editor escape: first responder \(sheet.firstResponder.map { String(describing: type(of: $0)) } ?? "-"), handled \(escape.map { sheet.performKeyEquivalent(with: $0) } ?? false)")
+                        try? await Task.sleep(for: .milliseconds(500))
+                        NSLog("MMJ editor escape: sheet still up \(SettingsWindowController.shared.window?.attachedSheet != nil)")
+                    }
                     if let seconds = ProcessInfo.processInfo.environment["MMJ_DEBUG_WATCH_SIGNATURES"].flatMap(Int.init) {
                         // The pane's rows, logged every 5 s for that long when they change.
                         var last: [String] = []
