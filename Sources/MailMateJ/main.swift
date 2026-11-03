@@ -1095,6 +1095,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     try? await Task.sleep(for: .seconds(1))
                     target = SettingsWindowController.shared.window?.attachedSheet ?? SettingsWindowController.shared.window
+                    if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_SETTINGS_SWITCH"],
+                        let number = SettingsWindowController.shared.window.map({ CGWindowID($0.windowNumber) })
+                    {
+                        // Each pane in turn ("Counters,Signatures"), the window's frame as the window server has it
+                        // (so a resize's animation shows), each change with its time; with MMJ_SNAPSHOT, the window
+                        // captured 0.2 s in.
+                        for label in steps.split(separator: ",").map(String.init) {
+                            let shot = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"].map {
+                                $0.replacingOccurrences(of: ".png", with: "-\(label)-mid.png")
+                            }
+                            let sampler = Task.detached { () -> [String] in
+                                var seen: [String] = []
+                                var shotTaken = false
+                                let start = Date()
+                                while Date().timeIntervalSince(start) < 0.9 {
+                                    if let shot, !shotTaken, Date().timeIntervalSince(start) > 0.2 {
+                                        // The window halfway (as <MMJ_SNAPSHOT>-<pane>-mid.png).
+                                        shotTaken = true
+                                        let capture = Process()
+                                        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                                        capture.arguments = ["-x", "-o", "-l\(number)", shot]
+                                        try? capture.run()
+                                    }
+                                    if let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], number) as? [[String: Any]])?.first,
+                                        let b = info[kCGWindowBounds as String] as? [String: CGFloat]
+                                    {
+                                        let frame = "\(Int(b["Width"] ?? 0))x\(Int(b["Height"] ?? 0)) top \(Int(b["Y"] ?? 0))"
+                                        if seen.last?.hasSuffix(frame) != true {
+                                            seen.append("\(Int(Date().timeIntervalSince(start) * 1000))ms \(frame)")
+                                        }
+                                    }
+                                    usleep(5000)
+                                }
+                                return seen
+                            }
+                            try? await Task.sleep(for: .milliseconds(60))
+                            SettingsWindowController.shared.debugSelectPane(label)
+                            NSLog("MMJ settings switch to \(label): \(await sampler.value.joined(separator: ", "))")
+                        }
+                    }
                     if ProcessInfo.processInfo.environment["MMJ_DEBUG_EDITOR_ESCAPE"] != nil, let sheet = target {
                         // Escape pressed on the editor's sheet, as AppKit hands it over (the key window's key
                         // equivalents first); then whether the sheet is still up.

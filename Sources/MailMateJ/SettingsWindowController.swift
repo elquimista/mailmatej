@@ -70,15 +70,47 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     #if DEBUG
         var debugSignaturesPane: SignaturesPane { signatures }
         var debugPaneLabels: [String] { tabs.tabViewItems.map(\.label) }
+        func debugSelectPane(_ label: String) {
+            if let index = tabs.tabViewItems.firstIndex(where: { $0.label == label }) { tabs.selectedTabViewItemIndex = index }
+        }
     #endif
 }
 
 /// The panes, titling the window and remembering the one shown; the Dock icon previews the counters
-/// while Counters shows.
+/// while Counters shows. Switching panes is MailMate's (MASPreferences'): the pane goes, the window
+/// takes the next one's size (its top left staying, at AppKit's resize speed), then that pane shows.
 @MainActor
 final class SettingsTabs: NSTabViewController {
+    /// Set while the window takes the next pane's size.
+    private var resizing = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        transitionOptions = []  // no crossfade: the pane shows once the window has its size
+    }
+
+    override func tabView(_ tabView: NSTabView, willSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, willSelect: tabViewItem)
+        guard let window = view.window, window.isVisible, let pane = tabViewItem?.viewController else { return }
+        let size = pane.preferredContentSize == .zero ? pane.view.fittingSize : pane.preferredContentSize
+        let old = window.frame
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: old.minX, y: old.maxY - frame.height)
+        guard frame != old else { return }
+        tabView.isHidden = true
+        resizing = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = window.animationResizeTime(frame)
+            window.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak self] in
+            self?.resizing = false
+            self?.tabView.isHidden = false
+        }
+    }
+
     override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         super.tabView(tabView, didSelect: tabViewItem)
+        if !resizing { tabView.isHidden = false }
         UserDefaults.standard.set(tabViewItem?.label, forKey: "SettingsPane")
         paneShown()
     }
