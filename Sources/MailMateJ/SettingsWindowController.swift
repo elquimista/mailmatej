@@ -2,24 +2,34 @@ import AppKit
 import MailStore
 import SwiftUI
 
-/// The Settings window: toolbar-style tabs like MailMate's preferences. One pane for now.
+/// The Settings window: toolbar-style tabs in MailMate's preferences' order (its General, Counters, Viewer,
+/// Composer, Signatures, Tags, Bundles, Security, Software Update; here Counters and Signatures).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
+    private let tabs = SettingsTabs()
+    private let signatures = SignaturesPane(model: AppModel.shared)
+
     private init() {
-        let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
         let pane = NSHostingController(rootView: CountersPane())
         pane.sizingOptions = [.preferredContentSize]  // The window takes the pane's size.
+        pane.title = "Counters"
         let counters = NSTabViewItem(viewController: pane)
         counters.label = "Counters"
         counters.image = NSImage(systemSymbolName: "envelope.badge", accessibilityDescription: "Counters")
         tabs.addTabViewItem(counters)
+        let signaturesItem = NSTabViewItem(viewController: signatures)
+        signaturesItem.label = "Signatures"
+        signaturesItem.image = NSImage(systemSymbolName: "signature", accessibilityDescription: "Signatures")
+        tabs.addTabViewItem(signaturesItem)
+        // The pane shown last, by name (an index would move as panes are added).
+        let shown = UserDefaults.standard.string(forKey: "SettingsPane")
+        tabs.selectedTabViewItemIndex = tabs.tabViewItems.firstIndex { $0.label == shown } ?? 0
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
-        window.title = "Counters"
         window.setFrameAutosaveName("SettingsWindow")
         super.init(window: window)
         window.delegate = self
@@ -31,11 +41,52 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if window?.isVisible != true { window?.center() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
-        AppModel.shared.dockCounters?.isPreviewing = true  // Counters is the only pane.
+        tabs.paneShown()
     }
+
+    /// Settings › Signatures; with `new`, its editor on that new signature (filled in already).
+    func showSignatures(new: SignatureRecord?) {
+        showSignaturesPane()
+        if let new { signatures.edit(new) }
+    }
+
+    private func showSignaturesPane() {
+        tabs.selectedTabViewItemIndex = tabs.tabViewItems.firstIndex { $0.viewController === signatures } ?? 0
+        show()
+    }
+
+    #if DEBUG
+        /// Settings › Signatures, editing this signature (nil: a new one).
+        func showSignatures(editing signature: SignatureRecord?) {
+            showSignaturesPane()
+            signatures.edit(signature)
+        }
+    #endif
 
     func windowWillClose(_ notification: Notification) {
         AppModel.shared.dockCounters?.isPreviewing = false
+    }
+
+    #if DEBUG
+        var debugSignaturesPane: SignaturesPane { signatures }
+        var debugPaneLabels: [String] { tabs.tabViewItems.map(\.label) }
+    #endif
+}
+
+/// The panes, titling the window and remembering the one shown; the Dock icon previews the counters
+/// while Counters shows.
+@MainActor
+final class SettingsTabs: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        UserDefaults.standard.set(tabViewItem?.label, forKey: "SettingsPane")
+        paneShown()
+    }
+
+    func paneShown() {
+        let item = selectedTabViewItemIndex >= 0 ? tabViewItems[selectedTabViewItemIndex] : nil
+        view.window?.title = item?.label ?? "Settings"
+        AppModel.shared.dockCounters?.isPreviewing = item?.label == "Counters" && view.window?.isVisible == true
     }
 }
 

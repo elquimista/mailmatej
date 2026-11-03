@@ -362,6 +362,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIGNATURE_COMPOSE"] {
+                    // "<new|reply|forward>|<message id, or the account's for new>|<step>,…": a compose window, then
+                    // text (logged with the signature in ⟦ ⟧), menu (the Signature menu, logged), choose=<item>,
+                    // to=<address>, subject=<text>, selectall, caret=<n> (n characters into the signature),
+                    // type=<text> (as typed; ⌫: Delete, ⌘Z: Undo), sheet (the sheet's texts and buttons, logged and captured
+                    // as <MMJ_SNAPSHOT>-c<n>-sheet.png), answer=<button>+… (clicked on the sheet), snap (the window,
+                    // as <MMJ_SNAPSHOT>-c<n>.png), send, wait=<seconds>.
+                    let parts = spec.split(separator: "|").map(String.init)
+                    let kind: ComposeKind = parts[0] == "reply" ? .reply : parts[0] == "forward" ? .forward : .new
+                    let id = Int64(parts[1]) ?? (try? AppModel.shared.store.messageIDs(scope: .account(parts[1])).first) ?? nil
+                    AppModel.shared.compose(kind, messageId: id, window: nil)
+                    try? await Task.sleep(for: .seconds(2))
+                    let compose = ComposeWindowController.debugNewest
+                    var shot = 0
+                    for step in parts[2].split(separator: ",").map(String.init) {
+                        switch step {
+                        case "text": NSLog("MMJ sigcompose text: \(compose?.debugSignatureText ?? "-")")
+                        case "menu": NSLog("MMJ sigcompose menu: \(compose?.debugSignatureMenu.joined(separator: " | ") ?? "-")")
+                        case "selectall": compose?.debugSelectAll()
+                        case let choose where choose.hasPrefix("choose="): compose?.debugChooseSignatureMenu(String(choose.dropFirst(7)))
+                        case let to where to.hasPrefix("to="): compose?.debugSetTo(String(to.dropFirst(3)))
+                        case let subject where subject.hasPrefix("subject="): compose?.debugSetSubject(String(subject.dropFirst(8)))
+                        case let caret where caret.hasPrefix("caret="): compose?.debugCaretInSignature(Int(caret.dropFirst(6)) ?? 0)
+                        case let typed where typed.hasPrefix("type="): compose?.debugType(String(typed.dropFirst(5)))
+                        case let answer where answer.hasPrefix("answer="):
+                            compose?.debugAnswerSheet(answer.dropFirst(7).split(separator: "+").map(String.init))
+                        case "sheet":
+                            shot += 1
+                            NSLog("MMJ sigcompose sheet: \(compose?.debugSheet ?? "-")")
+                            if let number = compose?.window?.attachedSheet?.windowNumber {
+                                let capture = Process()
+                                capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                                capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-c\(shot)-sheet.png")]
+                                try? capture.run()
+                                capture.waitUntilExit()
+                            }
+                        case "snap":
+                            shot += 1
+                            writeSnapshot(of: compose?.window, to: path.replacingOccurrences(of: ".png", with: "-c\(shot).png"))
+                        case "send": compose?.sendMessage(nil)
+                        case let wait where wait.hasPrefix("wait="): try? await Task.sleep(for: .seconds(Double(wait.dropFirst(5)) ?? 1))
+                        default: NSLog("MMJ sigcompose: no step \(step)")
+                        }
+                        try? await Task.sleep(for: .milliseconds(300))
+                    }
+                }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_OFFLINE"] {
                     // "<account id>|<step>,…": offline (Take Offline), select (its row), drop (Google drops its
                     // sign-in quietly), takeonline (Take Online), fetch (its first message), expire (Google refuses its sign-in),
@@ -1037,10 +1083,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     target = NSApp.windows.first { $0.windowController is MailboxEditorWindowController }
                 }
-                if ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTINGS"] != nil {
-                    SettingsWindowController.shared.show()
+                if let pane = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT_SETTINGS"] {
+                    // "signatures": that pane; "edit=2" / "edit=new": its editor on the third signature, or a
+                    // new one (the sheet captured).
+                    if pane.hasPrefix("edit=") {
+                        let signatures = AppModel.shared.signatures()
+                        let index = Int(pane.dropFirst(5))
+                        SettingsWindowController.shared.showSignatures(editing: index.flatMap { signatures.indices.contains($0) ? signatures[$0] : nil })
+                    } else {
+                        SettingsWindowController.shared.show()
+                    }
                     try? await Task.sleep(for: .seconds(1))
-                    target = SettingsWindowController.shared.window
+                    target = SettingsWindowController.shared.window?.attachedSheet ?? SettingsWindowController.shared.window
+                    if let seconds = ProcessInfo.processInfo.environment["MMJ_DEBUG_WATCH_SIGNATURES"].flatMap(Int.init) {
+                        // The pane's rows, logged every 5 s for that long when they change.
+                        var last: [String] = []
+                        for _ in 0..<(seconds / 5) {
+                            let rows = SettingsWindowController.shared.debugSignaturesPane.debugRows
+                            if rows != last { NSLog("MMJ signatures pane: \(rows)") }
+                            last = rows
+                            try? await Task.sleep(for: .seconds(5))
+                        }
+                    }
+                    if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_SIGNATURE_SAVE"] {
+                        // The editor's fields filled and OK pressed (see `SignatureEditor.debugFillAndSave`), then
+                        // the signatures as stored once the server has answered.
+                        SettingsWindowController.shared.debugSignaturesPane.debugFillAndSave(spec)
+                        try? await Task.sleep(for: .seconds(4))
+                        for s in AppModel.shared.signatures() {
+                            NSLog("MMJ signature: \(s.name) | \(s.addresses) | \(s.text.replacingOccurrences(of: "\n", with: "⏎")) | server \(s.server?.email ?? "-")")
+                        }
+                        target = SettingsWindowController.shared.window
+                    }
                 }
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_EDIT_ACCOUNT"] {
                     // "accountId|new description|password" (empty password keeps it).

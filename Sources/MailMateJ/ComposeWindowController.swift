@@ -32,6 +32,8 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         var openedDraft: AppModel.DraftRef?
         /// A From of the user's own (Customize…), sent through `identity`'s account.
         var customFrom: EmailAddress?
+        /// What it's written as, for choosing its signature (nil: a draft opened again, which has its own).
+        var kind: ComposeKind?
     }
 
     /// A From typed in Customize…, sent through `identity`'s account (an item of the From menu).
@@ -65,6 +67,16 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let textView = ComposeTextView()
     private let attachmentsView = ComposeAttachmentsView()
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let signaturePopup = NSPopUpButton(frame: .zero, pullsDown: true)
+    /// The signature in the text (nil: none), whether it's above the quoted text, and whether it was
+    /// chosen here (then changing the From or the recipient leaves it).
+    private var signatureId: String?
+    private var signatureTop = SignatureSettings.top
+    private var signatureChosen = false
+    /// Set while the signature changes without asking: put in or out, or as the warning's OK made it.
+    private var changingSignature = false
+    /// Where the text cursor starts.
+    private var initialCaret = 0
     private var isMarkdown: Bool { formatPopup.indexOfSelectedItem == 0 }
     /// The Content-IDs of pictures embedded in the Markdown (dropped on the text), by file.
     private var contentIDs: [URL: String] = [:]
@@ -253,9 +265,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         fields.toolTip = "Header Fields"
         fields.contentTintColor = .secondaryLabelColor
 
-        let signature = NSPopUpButton(frame: .zero, pullsDown: true)
+        // MailMate's Signature menu, filled as it opens (see `updateSignatureMenu`).
+        let signature = signaturePopup
         signature.addItem(withTitle: "Signature")
-        signature.isEnabled = false  // Signatures aren't built yet.
+        signature.menu?.delegate = self
+        signature.menu?.autoenablesItems = false
 
         // MailMate's formats: Markdown (its default: sent as text plus the HTML it makes) or Plain Text.
         formatPopup.addItems(withTitles: ["Markdown", "Plain Text"])
@@ -462,6 +476,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             popup.action = #selector(popupChanged(_:))
         }
         openedDraft = setup.openedDraft
+        startSignature()
         updateAttached()
         updateTitle()
         savedState = currentState
@@ -472,6 +487,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         if sender as? NSPopUpButton === fromPopup {
             if fromPopup.selectedItem?.representedObject as? String == Self.customizeItem { return customizeFrom() }
             fromIndex = fromPopup.indexOfSelectedItem
+            signatureContextChanged()
         }
         updateEdited()
     }
@@ -501,6 +517,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             fromPopup.selectItem(at: fromIndex)
             guard let address else { return }
             showCustomFrom(address)
+            signatureContextChanged()
             updateEdited()
         }
     }
@@ -697,6 +714,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === signaturePopup.menu { return updateSignatureMenu(menu) }
         for item in menu.items {
             guard let name = item.representedObject as? String, let row = HeaderRow(rawValue: name) else { continue }
             item.state = rows[row]?.isHidden == false ? .on : .off
@@ -720,8 +738,8 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             window?.makeFirstResponder(toField)
         } else {
             window?.makeFirstResponder(textView)
-            textView.setSelectedRange(NSRange(location: 0, length: 0))
-            textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            textView.setSelectedRange(NSRange(location: initialCaret, length: 0))
+            textView.scrollRangeToVisible(NSRange(location: initialCaret, length: 0))
         }
     }
 
@@ -748,10 +766,272 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     func controlTextDidChange(_ notification: Notification) {
         if let field = notification.object as? AddressTokenField { completer.textChanged(in: field) }
         if (notification.object as? NSTextField) === subjectField { updateTitle() }
+        if (notification.object as? NSTextField) === toField { signatureContextChanged() }
         updateEdited()
     }
 
     func textDidChange(_ notification: Notification) { updateEdited() }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        // Text typed just after the signature isn't part of it.
+        guard textView.typingAttributes[.mmjSignature] != nil else { return }
+        let at = textView.selectedRange().location
+        if let range = signatureRange, at > range.location, at < NSMaxRange(range) { return }
+        textView.typingAttributes[.mmjSignature] = nil
+    }
+
+    // MARK: Signatures
+
+    /// The signature's text, marked as the signature (see `ComposeTextView`).
+    private var signatureRange: NSRange? { textView.textStorage?.range(of: .mmjSignature) }
+
+    /// Where the quoted message starts (its attribution or Forwarded message line), in a reply or forward.
+    private var quoteStart: Int? { textView.textStorage?.range(of: .mmjQuoted)?.location }
+
+    /// The signatures the From may use (Settings › Signatures' Address(es)).
+    private func allowedSignatures() -> [SignatureRecord] {
+        guard let email = chosenFrom?.email else { return [] }
+        return model.signatures().filter { $0.isFor(email) }
+    }
+
+    /// Whether the signature in the text was edited (then it isn't replaced or sent as its HTML variant).
+    private var signatureEdited: Bool {
+        guard let range = signatureRange, let id = signatureId else { return false }
+        let shown = (textView.string as NSString).substring(with: range)
+        return model.signatures().first { $0.id == id }.map { shown != Self.block($0) } ?? true
+    }
+
+    /// A signature's text as it's put in: ending its last line.
+    private static func block(_ signature: SignatureRecord) -> String {
+        signature.text.hasSuffix("\n") ? signature.text : signature.text + "\n"
+    }
+
+    /// MailMate's choice, as the window opens: the signature last sent to the main recipient (with its
+    /// placement), else the one sent most from the From, by Signature based on history; else, where
+    /// Default signature covers this kind of message, the first the From may use.
+    private func derivedSignature(_ allowed: [SignatureRecord]) -> (signature: SignatureRecord?, top: Bool) {
+        let top = SignatureSettings.top
+        guard let kind = setup.kind else { return (nil, top) }
+        let reply = kind == .reply || kind == .replyAll
+        let history = SignatureSettings.history
+        let byId = Dictionary(allowed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        if history == .newAndReplies || history == .separately || (history == .newOnly && !reply) {
+            // "" is No Signature.
+            if let recipient = toField.addresses.first?.email,
+                let last = try? model.store.lastSignatureUsage(recipient: recipient, isReply: history == .separately ? reply : nil),
+                last.signatureId.isEmpty || byId[last.signatureId] != nil
+            {
+                return (byId[last.signatureId], last.isTop)
+            }
+            if let from = chosenFrom?.email, let id = try? model.store.mostUsedSignature(fromEmail: from), id.isEmpty || byId[id] != nil {
+                return (byId[id], top)
+            }
+        }
+        let byDefault = switch SignatureSettings.defaultFor {
+        case .none: false
+        case .new: kind == .new
+        case .newAndForwards: kind == .new || kind == .forward
+        case .all: true
+        }
+        return (byDefault ? allowed.first : nil, top)
+    }
+
+    /// Puts the signature in as the window opens; the cursor goes above it (Caret placement). A draft
+    /// opened again has its signature found by its text.
+    private func startSignature() {
+        guard let storage = textView.textStorage else { return }
+        textView.undoManager?.disableUndoRegistration()
+        defer { textView.undoManager?.enableUndoRegistration() }
+        if setup.kind == nil {
+            for signature in allowedSignatures() {
+                let range = (textView.string as NSString).range(of: Self.block(signature))
+                guard range.location != NSNotFound else { continue }
+                storage.addAttribute(.mmjSignature, value: signature.id, range: range)
+                signatureId = signature.id
+                signatureChosen = true
+                break
+            }
+            return
+        }
+        // A reply's or forward's quoted message starts after the two lines the reply is written in.
+        if setup.kind != .new, storage.length > 2 {
+            storage.addAttribute(.mmjQuoted, value: true, range: NSRange(location: 2, length: storage.length - 2))
+        }
+        let (signature, top) = derivedSignature(allowedSignatures())
+        placeSignature(signature, top: top)
+        initialCaret = 0
+        if !top || quoteStart == nil, SignatureSettings.caret == .aboveSignature, let range = signatureRange, setup.kind != .new {
+            initialCaret = max(0, range.location - 2)  // the line after the quoted text, with a blank one before it
+        }
+        textView.setSelectedRange(NSRange(location: initialCaret, length: 0))  // also for the body reached later
+    }
+
+    /// The From or the main recipient changed: the signature history or the defaults choose then goes
+    /// in, unless one was chosen here (kept while the From may use it) or the signature was edited.
+    private func signatureContextChanged() {
+        guard setup.kind != nil, !signatureEdited else { return }
+        let allowed = allowedSignatures()
+        if signatureChosen, signatureId.map({ id in allowed.contains { $0.id == id } }) ?? true { return }
+        let (signature, top) = derivedSignature(allowed)
+        if signature?.id != signatureId || (quoteStart != nil && top != signatureTop) {
+            placeSignature(signature, top: top)
+            updateEdited()
+        }
+    }
+
+    /// Puts `signature` in place of the one in the text (nil: none): above the quoted text (`top`), or
+    /// at the end; after a blank line, as MailMate does, and undoably.
+    private func placeSignature(_ signature: SignatureRecord?, top: Bool) {
+        guard let storage = textView.textStorage else { return }
+        changingSignature = true
+        defer { changingSignature = false }
+        func change(_ range: NSRange, to text: NSAttributedString) {
+            guard textView.shouldChangeText(in: range, replacementString: text.string) else { return }
+            storage.replaceCharacters(in: range, with: text)
+            textView.didChangeText()
+        }
+        var attributes = textView.typingAttributes
+        attributes[.mmjSignature] = nil
+        attributes[.mmjQuoted] = nil
+        attributes[.font] = textView.font
+        attributes[.foregroundColor] = NSColor.textColor
+        let plain = { (text: String) in NSAttributedString(string: text, attributes: attributes) }
+        var block: NSAttributedString?
+        if let signature {
+            var marked = attributes
+            marked[.mmjSignature] = signature.id
+            block = NSAttributedString(string: Self.block(signature), attributes: marked)
+        }
+        let text = { storage.string as NSString }
+        let wasTop = signatureTop
+        signatureId = signature?.id
+        signatureTop = top
+        if let range = signatureRange {
+            if let block, top == wasTop || quoteStart == nil { return change(range, to: block) }
+            // Out, with the blank line put in with it.
+            var gone = range
+            let after = NSMaxRange(range)
+            if wasTop, quoteStart != nil, after < text().length, text().character(at: after) == 10 {
+                gone.length += 1
+            } else {
+                while gone.location > 0, range.location - gone.location < 2, text().character(at: gone.location - 1) == 10 {
+                    gone.location -= 1
+                    gone.length += 1
+                }
+            }
+            change(gone, to: plain(""))
+        }
+        guard let block else { return }
+        if top, let start = quoteStart {
+            let inserted = NSMutableAttributedString(attributedString: block)
+            inserted.append(plain("\n"))
+            change(NSRange(location: start, length: 0), to: inserted)
+        } else {
+            // At the end, after a blank line (after a line to write on, when the text ends with a line).
+            let inserted = NSMutableAttributedString(attributedString: plain("\n\n"))
+            inserted.append(block)
+            change(NSRange(location: text().length, length: 0), to: inserted)
+        }
+    }
+
+    /// A change to the signature in the text (typed, deleted or pasted into it) asks first, as MailMate's
+    /// does; an undo or redo, a signature already edited, and with the warning turned off go ahead.
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        guard replacementString != nil, !changingSignature, let signature = signatureRange,
+            range.length > 0
+                ? NSIntersectionRange(range, signature).length > 0
+                : range.location > signature.location && range.location < NSMaxRange(signature),
+            textView.undoManager.map({ !$0.isUndoing && !$0.isRedoing }) ?? true,
+            SignatureSettings.editWarning, !signatureEdited, let window
+        else { return true }
+        askToChangeSignature(range, to: replacementString ?? "", in: window)
+        return false
+    }
+
+    /// MailMate's warning; OK makes the change asked about.
+    private func askToChangeSignature(_ range: NSRange, to string: String, in window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = "Do you really want to change the signature?"
+        alert.informativeText = "You have tried to edit the signature. If you want to permanently change the signature "
+            + "or create a new one then it’s better to explicitly do that."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Do not show this warning again"
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if alert.suppressionButton?.state == .on { SignatureSettings.editWarning = false }
+            // An attachment's character can't be put back as text; it's dropped or pasted again.
+            guard response == .alertFirstButtonReturn, !string.contains("\u{FFFC}") else { return }
+            changingSignature = true
+            defer { changingSignature = false }
+            textView.insertText(string, replacementRange: range)
+        }
+    }
+
+    /// Signature: those the From may use and No Signature (the one in the text checked), Placement (for a
+    /// reply or forward), Store Selection as Signature… and Edit Signatures…, as MailMate's.
+    private func updateSignatureMenu(_ menu: NSMenu) {
+        while menu.items.count > 1 { menu.removeItem(at: 1) }
+        func add(_ title: String, _ action: Selector?, on: Bool = false, enabled: Bool = true) -> NSMenuItem {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.state = on ? .on : .off
+            item.isEnabled = enabled && action != nil
+            return item
+        }
+        for signature in allowedSignatures() {
+            add(signature.name, #selector(signatureMenuChosen(_:)), on: signature.id == signatureId).representedObject = signature.id
+        }
+        add("No Signature", #selector(signatureMenuChosen(_:)), on: signatureId == nil).representedObject = ""
+        menu.addItem(.separator())
+        _ = add("Placement", nil, enabled: false)
+        let quoted = quoteStart != nil
+        for (index, title) in ["Top", "Bottom"].enumerated() {
+            let item = add(title, #selector(placementMenuChosen(_:)), on: (index == 0) == signatureTop, enabled: quoted)
+            item.tag = index
+            item.indentationLevel = 1
+        }
+        menu.addItem(.separator())
+        _ = add("Store Selection as Signature\u{2026}", #selector(storeSelectionAsSignature(_:)), enabled: textView.selectedRange().length > 0)
+        _ = add("Edit Signatures\u{2026}", #selector(editSignatures(_:)))
+    }
+
+    @objc private func signatureMenuChosen(_ sender: NSMenuItem) {
+        let id = sender.representedObject as? String ?? ""
+        signatureChosen = true
+        placeSignature(model.signatures().first { $0.id == id }, top: signatureTop)
+        updateEdited()
+    }
+
+    @objc private func placementMenuChosen(_ sender: NSMenuItem) {
+        signatureChosen = true
+        placeSignature(signatureId.flatMap { id in model.signatures().first { $0.id == id } }, top: sender.tag == 0)
+        updateEdited()
+    }
+
+    @objc private func storeSelectionAsSignature(_ sender: Any?) {
+        let selected = (textView.string as NSString).substring(with: textView.selectedRange())
+        SettingsWindowController.shared.showSignatures(new: SignatureRecord(
+            id: UUID().uuidString, name: "", text: selected, addresses: chosenFrom?.email ?? ""))
+    }
+
+    @objc private func editSignatures(_ sender: Any?) {
+        SettingsWindowController.shared.showSignatures(new: nil)
+    }
+
+    /// The HTML part for the text as written: Markdown's, with a signature's HTML variant in its place (a
+    /// plain-text message gets one only for such a signature, as in MailMate).
+    private func htmlPart() -> String? {
+        if let range = signatureRange, !signatureEdited, let id = signatureId,
+            let html = model.signatures().first(where: { $0.id == id })?.html
+        {
+            return isMarkdown
+                ? MarkdownMail.html(textView.string, signature: range, signatureHTML: html)
+                : MarkdownMail.plainHTML(textView.string, signature: range, signatureHTML: html)
+        }
+        return isMarkdown ? MarkdownMail.html(textView.string) : nil
+    }
 
     // MARK: Quotes
 
@@ -888,9 +1168,11 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             if asDraft {
                 message.draftFormat = "markdown"  // the text as typed
             } else {
-                message.html = MarkdownMail.html(textView.string)
+                message.html = htmlPart()
                 message.text = MarkdownMail.plainText(textView.string)  // pictures as [ "name" ], as MailMate
             }
+        } else if !asDraft {
+            message.html = htmlPart()
         }
         message.replyTo = replyTo
         // The envelope sender is the identity's own address, whatever the From says (Customize…).
@@ -935,6 +1217,12 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
                     replacingDrafts: [openedDraft, autosaved].compactMap { $0 })
                 sending = false
                 finished = true
+                // For choosing the signature by history next time.
+                if let recipient = message.to.first?.email {
+                    try? model.store.recordSignatureUsage(
+                        recipient: recipient, fromEmail: message.from.email ?? "", signatureId: signatureId ?? "",
+                        isReply: !setup.inReplyTo.isEmpty, isTop: signatureTop)
+                }
                 window.close()
             } catch {
                 #if DEBUG
@@ -1023,6 +1311,83 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     /// Brings forward the window editing a draft, if one is.
+    #if DEBUG
+        /// The compose window opened last.
+        static var debugNewest: ComposeWindowController? { open.max { ($0.window?.windowNumber ?? 0) < ($1.window?.windowNumber ?? 0) } }
+
+        /// The text with the signature in ⟦ ⟧ and the cursor as |, lines as ⏎.
+        var debugSignatureText: String {
+            let text = NSMutableString(string: textView.string)
+            if let range = signatureRange {
+                text.insert("⟧", at: NSMaxRange(range))
+                text.insert("⟦", at: range.location)
+            }
+            let caret = textView.selectedRange().location
+            let shift = (signatureRange.map { caret >= NSMaxRange($0) ? 2 : caret > $0.location ? 1 : 0 }) ?? 0
+            text.insert("|", at: min(caret + shift, text.length))
+            return (text as String).replacingOccurrences(of: "\n", with: "⏎")
+        }
+
+        /// The Signature menu as it opens: "✓" before the checked, "(off)" after the disabled.
+        var debugSignatureMenu: [String] {
+            guard let menu = signaturePopup.menu else { return [] }
+            updateSignatureMenu(menu)
+            return menu.items.dropFirst().map { item in
+                item.isSeparatorItem ? "—" : (item.state == .on ? "✓ " : "") + item.title + (item.isEnabled ? "" : " (off)")
+            }
+        }
+
+        func debugChooseSignatureMenu(_ title: String) {
+            guard let menu = signaturePopup.menu else { return }
+            updateSignatureMenu(menu)
+            guard let item = menu.items.first(where: { $0.title == title }), let action = item.action else { return }
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
+
+        func debugSetTo(_ address: String) {
+            toField.addresses = [EmailAddress(name: nil, email: address)]
+            NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: toField)
+        }
+
+        func debugSetSubject(_ subject: String) {
+            subjectField.stringValue = subject
+            updateTitle()
+        }
+
+        func debugSelectAll() { textView.setSelectedRange(NSRange(location: 0, length: (textView.string as NSString).length)) }
+
+        /// Puts the cursor `offset` characters into the signature.
+        func debugCaretInSignature(_ offset: Int) {
+            guard let range = signatureRange else { return }
+            textView.setSelectedRange(NSRange(location: range.location + offset, length: 0))
+        }
+
+        /// Types `text` at the cursor as the keyboard does ("⌫": Delete, "⌘Z": Undo).
+        func debugType(_ text: String) {
+            window?.makeFirstResponder(textView)
+            switch text {
+            case "⌫": textView.deleteBackward(nil)
+            case "⌘Z": textView.undoManager?.undo()
+            default: textView.insertText(text, replacementRange: textView.selectedRange())
+            }
+        }
+
+        /// The sheet on the window: its texts, then its buttons in [ ].
+        var debugSheet: String {
+            guard let view = window?.attachedSheet?.contentView else { return "none" }
+            func labels(_ view: NSView) -> [String] {
+                view.subviews.flatMap { ($0 as? NSTextField).map { [$0.stringValue] } ?? labels($0) }
+            }
+            return (labels(view) + Self.debugButtons(view).map { "[\($0.title)]" }).joined(separator: " / ")
+        }
+
+        /// Clicks the sheet's buttons with these titles, in turn.
+        func debugAnswerSheet(_ titles: [String]) {
+            guard let view = window?.attachedSheet?.contentView else { return NSLog("MMJ sigcompose: no sheet") }
+            for title in titles { Self.debugButtons(view).first { $0.title == title }?.performClick(nil) }
+        }
+    #endif
+
     static func bringForward(editing draft: AppModel.DraftRef) -> Bool {
         guard let controller = open.first(where: { $0.openedDraft == draft || $0.autosaved == draft }) else { return false }
         controller.window?.makeKeyAndOrderFront(nil)

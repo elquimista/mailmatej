@@ -574,6 +574,12 @@ public actor SyncCoordinator {
         try await engine.renameMailbox(remoteId: remoteId, to: name)
     }
 
+    /// Changes a JMAP identity's signature on its server (Gmail's are changed in Gmail).
+    public func setSignature(accountId: String, identityId: String, text: String, html: String) async throws {
+        guard let engine = engines[accountId] else { throw notLoaded(accountId) }
+        try await engine.setSignature(identityId: identityId, text: text, html: html)
+    }
+
     public func redirect(accountId: String, remoteId: String, to recipients: [String], identityId: String, mailFrom: String) async throws {
         if let gmail = gmailEngines[accountId] { return try await gmail.redirect(remoteId: remoteId, to: recipients, mailFrom: mailFrom) }
         guard let engine = engines[accountId] else { throw notLoaded(accountId) }

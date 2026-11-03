@@ -57,4 +57,17 @@ import Testing
             #expect(HTMLText.plainText(html) == HTMLText.byExpressions(html))
         }
     }
+
+    /// A signature's lines are the ones its HTML shows (Gmail's are nested divs).
+    @Test func signatureLinesAreAsTheHTMLShowsThem() {
+        #expect(HTMLText.lines(#"<div dir="ltr">Thanks,<div>Gerald</div></div>"#) == "Thanks,\nGerald")
+        #expect(HTMLText.lines("<div>Best,</div><div><br></div><div>Charles</div>") == "Best,\n\nCharles")
+        #expect(HTMLText.lines("<div>Best,</div><div>&nbsp;</div><div>Charles<br></div>") == "Best,\n\nCharles")
+        #expect(HTMLText.lines(#"Jane <b>Doe</b><br>CEO, Acme &amp; Co.&nbsp;&#8212; <a href="https://x.com">x.com</a>"#)
+            == "Jane Doe\nCEO, Acme & Co. — x.com")
+        #expect(HTMLText.lines("<table><tr><td>Jane</td><td>Doe</td></tr><tr><td>CEO</td></tr></table>") == "Jane Doe\nCEO")
+        #expect(HTMLText.lines("<style>p { color: red }</style><!-- x --><p>One</p>\n<p>Two</p>") == "One\nTwo")
+        #expect(HTMLText.lines("<div>\n  Thanks,\n  Gerald\n</div>") == "Thanks, Gerald")  // the HTML's line breaks are spaces
+        #expect(HTMLText.lines("<br><div>x &unknown; &#x1F600;</div><br>") == "x &unknown; 😀")
+    }
 }

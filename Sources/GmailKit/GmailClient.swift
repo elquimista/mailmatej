@@ -203,6 +203,8 @@ public struct GmailClient: Sendable {
         public var isPrimary: Bool?
         /// "accepted" once verified (the primary address has none).
         public var verificationStatus: String?
+        /// Its signature, in HTML (Gmail's settings › Signature); empty or missing: none.
+        public var signature: String?
     }
 
     public func sendAs() async throws -> [SendAs] {

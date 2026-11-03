@@ -10,6 +10,59 @@ enum HTMLText {
         (try? scanned(html)) ?? byExpressions(html)
     }
 
+    /// A signature's text, line for line as its HTML shows: a line where a block (div, p, list item, table
+    /// row, heading, quote) starts or ends unless one just did, and one at each <br>, so blank lines stay
+    /// (`plainText`, for searching, joins them, and starts no line where a block starts). Table cells are
+    /// spaced, other tags dropped, style and script dropped with what's in them, the HTML's own line
+    /// breaks and runs of spaces are a space (and nothing between blocks), and entities are decoded.
+    static func lines(_ html: String) -> String {
+        let edge: Character = "\u{1}"
+        var s = html.replacingOccurrences(of: #"(?is)<!--.*?-->|<(style|script|head|title)\b.*?</\1>"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[ \t\r\n\f]+"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?i)<br\b[^>]*>"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(
+            of: #"(?i)</?(div|p|li|tr|h[1-6]|blockquote|ul|ol|table|pre|center|address)\b[^>]*>"#, with: String(edge),
+            options: .regularExpression)
+        s = s.replacingOccurrences(of: #"(?i)</?t[dh]\b[^>]*>"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"<[^>]*>"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: " {2,}", with: " ", options: .regularExpression)
+        var text = ""
+        for c in decodingEntities(s) {
+            if c == edge {
+                while text.last == " " { text.removeLast() }  // a non-breaking space stays, a line of its own
+                if !text.isEmpty, !text.hasSuffix("\n") { text.append("\n") }
+            } else {
+                text.append(c)
+            }
+        }
+        let shown = text.split(separator: "\n", omittingEmptySubsequences: false).map {
+            $0.replacingOccurrences(of: "\u{A0}", with: " ").trimmingCharacters(in: .whitespaces)
+        }
+        return shown.drop { $0.isEmpty }.reversed().drop { $0.isEmpty }.reversed().joined(separator: "\n")
+    }
+
+    /// Named entities a signature is likely to have, and numeric ones; others stay as they are.
+    private static func decodingEntities(_ s: String) -> String {
+        let named: [String: String] = [
+            "nbsp": "\u{A0}", "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "copy": "©", "reg": "®",
+            "trade": "™", "mdash": "—", "ndash": "–", "hellip": "…", "middot": "·", "bull": "•", "lsquo": "‘",
+            "rsquo": "’", "ldquo": "“", "rdquo": "”", "laquo": "«", "raquo": "»",
+        ]
+        guard let entity = try? NSRegularExpression(pattern: "&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);") else { return s }
+        let ns = s as NSString
+        var out = ""
+        var at = 0
+        for match in entity.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: match.range(at: 1))
+            let code = name.hasPrefix("#x") || name.hasPrefix("#X")
+                ? UInt32(name.dropFirst(2), radix: 16) : name.hasPrefix("#") ? UInt32(name.dropFirst()) : nil
+            guard let char = code.flatMap(Unicode.Scalar.init).map(String.init) ?? named[name] else { continue }
+            out += ns.substring(with: NSRange(location: at, length: match.range.location - at)) + char
+            at = NSMaxRange(match.range)
+        }
+        return out + ns.substring(from: at)
+    }
+
     static func byExpressions(_ html: String) -> String {
         var s = html.replacingOccurrences(
             of: #"(?is)<(style|script|head|title)\b.*?</\1>"#, with: " ", options: .regularExpression)

@@ -581,6 +581,69 @@ import Testing
         #expect(try store.myAddresses().contains("support@other.com"))
     }
 
+    @Test func signaturesAreThisMacsThenTheServers() throws {
+        try store.saveSignature(SignatureRecord(id: "b", name: "Short", text: "B"))
+        try store.saveSignature(SignatureRecord(id: "a", name: "Work", text: "A", html: "<b>A</b>", addresses: "*@x.com"))
+        try store.saveSignature(SignatureRecord(id: "b", name: "Shorter", text: "B2"))  // changed in place
+        try store.replaceIdentities(
+            accountId: "acc", [("1", "", "me@example.com"), ("2", "", "pm@x.com")],
+            signatures: ["2": ("PM", "")])
+        let all = try store.signatures()
+        #expect(all.map(\.name) == ["Shorter", "Work", "pm@x.com"])
+        #expect(all[1].html == "<b>A</b>" && all[2].html == nil)
+        #expect(all[2].server == SignatureRecord.Server(accountId: "acc", identityId: "2", email: "pm@x.com"))
+        // A JMAP identity can keep one; an address of none can't.
+        #expect(try store.jmapIdentity(email: "ME@example.com")?.identityId == "1")
+        #expect(try store.jmapIdentity(email: "other@example.com") == nil)
+        try store.setIdentitySignature(accountId: "acc", identityId: "2", text: "", html: "")
+        try store.deleteSignature(id: "b")
+        #expect(try store.signatures().map(\.id) == ["a"])
+    }
+
+    /// A sync's signatures show in Settings at once; the checks finding them unchanged write nothing.
+    @Test func changedIdentitiesShowAndUnchangedOnesWriteNothing() throws {
+        let count = Counter()
+        let observation = store.observeChanges { count.increment() }
+        defer { observation.cancel() }
+        let identities: [(remoteId: String, name: String, email: String)] = [("2", "PM", "pm@x.com"), ("1", "", "Me@x.com")]
+        try store.replaceIdentities(accountId: "acc", identities, signatures: ["2": ("PM", "<p>PM</p>")])
+        #expect(count.value == 1)
+        try store.replaceIdentities(accountId: "acc", identities.reversed(), signatures: ["2": ("PM", "<p>PM</p>")])
+        #expect(count.value == 1)
+        try store.replaceIdentities(accountId: "acc", identities, signatures: ["2": ("PM, Inc.", "<p>PM, Inc.</p>")])
+        #expect(count.value == 2)
+        #expect(try store.signatures().map(\.text) == ["PM, Inc."])
+        try store.replaceIdentities(accountId: "acc", Array(identities.prefix(1)), signatures: ["2": ("PM, Inc.", "<p>PM, Inc.</p>")])
+        #expect(count.value == 3)
+        #expect(try store.jmapIdentity(email: "me@x.com") == nil)
+    }
+
+    @Test func signaturesAreForTheirAddresses() {
+        func sig(_ addresses: String) -> SignatureRecord { SignatureRecord(id: "x", name: "x", text: "", addresses: addresses) }
+        #expect(sig("").isFor("anyone@x.com"))
+        #expect(sig("mm-*@freron.com").isFor("MM-sales@freron.com"))
+        #expect(!sig("mm-*@freron.com").isFor("sales@freron.com"))
+        #expect(sig("{personal@example.com,work@example.com}").isFor("work@example.com"))
+        #expect(sig("personal@example.com, *@work.org").isFor("me@work.org"))
+        #expect(!sig("{personal@example.com,work@example.com}").isFor("home@example.com"))
+        let server = SignatureRecord(
+            id: "s", name: "pm@x.com", text: "", addresses: "pm@x.com",
+            server: .init(accountId: "acc", identityId: "2", email: "pm@x.com"))
+        #expect(server.isFor("pm@x.com") && !server.isFor("me@x.com"))
+    }
+
+    @Test func signatureHistory() throws {
+        try store.recordSignatureUsage(recipient: "Bob@x.com", fromEmail: "me@a.com", signatureId: "long", isReply: false, isTop: false, at: Date(timeIntervalSince1970: 1))
+        try store.recordSignatureUsage(recipient: "bob@x.com", fromEmail: "me@a.com", signatureId: "short", isReply: true, isTop: true, at: Date(timeIntervalSince1970: 2))
+        try store.recordSignatureUsage(recipient: "carol@x.com", fromEmail: "me@a.com", signatureId: "short", isReply: true, isTop: false, at: Date(timeIntervalSince1970: 3))
+        #expect(try store.lastSignatureUsage(recipient: "bob@x.com")! == ("short", true))
+        #expect(try store.lastSignatureUsage(recipient: "bob@x.com", isReply: false)! == ("long", false))
+        #expect(try store.lastSignatureUsage(recipient: "dave@x.com") == nil)
+        #expect(try store.mostUsedSignature(fromEmail: "ME@a.com") == "short")
+        try store.resetSignatureUsage()
+        #expect(try store.mostUsedSignature(fromEmail: "me@a.com") == nil)
+    }
+
     @Test func contentTypeConditionsTestTheMessagesParts() throws {
         try upsert([
             message("1", from: "notifications@calendly.com", at: 100), message("2", from: "a@x.com", at: 200),

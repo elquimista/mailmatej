@@ -149,16 +149,155 @@ public final class MailStore: Sendable {
 
     // MARK: Identities
 
-    public func replaceIdentities(accountId: String, _ identities: [(remoteId: String, name: String, email: String)])
-        throws
-    {
+    /// The account's sending identities as its server has them, with their signatures (by identity id).
+    /// Written only when they changed: a change shows (see `observeChanges`), the checks finding them
+    /// as they were don't.
+    public func replaceIdentities(
+        accountId: String, _ identities: [(remoteId: String, name: String, email: String)],
+        signatures: [String: (text: String, html: String)] = [:]
+    ) throws {
+        let rows = Dictionary(identities.map { i in
+            let signature = signatures[i.remoteId]
+            return (i.remoteId, [i.remoteId, i.name, i.email.lowercased(), signature?.text ?? "", signature?.html ?? ""])
+        }, uniquingKeysWith: { _, last in last }).values.sorted { $0[0] < $1[0] }
         try write { db in
+            let stored = try Row.fetchAll(db, sql: """
+                SELECT remoteId, name, email, textSignature, htmlSignature FROM identity WHERE accountId = ? ORDER BY remoteId
+                """, arguments: [accountId]
+            ).map { row in (0..<5).map { row[$0] as String } }
+            guard stored != rows else { return }
             try db.execute(sql: "DELETE FROM identity WHERE accountId = ?", arguments: [accountId])
-            for i in identities {
+            for row in rows {
                 try db.execute(
-                    sql: "INSERT OR REPLACE INTO identity (accountId, remoteId, name, email) VALUES (?, ?, ?, ?)",
-                    arguments: [accountId, i.remoteId, i.name, i.email.lowercased()])
+                    sql: """
+                        INSERT INTO identity (accountId, remoteId, name, email, textSignature, htmlSignature)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: StatementArguments([accountId] + row))
             }
+        }
+    }
+
+    // MARK: Signatures
+
+    /// Every signature, as Settings › Signatures lists them: those kept on this Mac in their order, then
+    /// the sending identities' own (kept on their servers), in account order, then by address.
+    public func signatures() throws -> [SignatureRecord] {
+        let rank = Dictionary(uniqueKeysWithValues: try accounts().enumerated().map { ($1.id, $0) })
+        return try dbPool.read { db in
+            let local = try Row.fetchAll(db, sql: "SELECT id, name, text, html, addresses FROM signature ORDER BY sortOrder")
+                .map { SignatureRecord(id: $0["id"], name: $0["name"], text: $0["text"], html: $0["html"], addresses: $0["addresses"]) }
+            let server = try Row.fetchAll(db, sql: """
+                SELECT i.accountId, i.remoteId, i.email, i.textSignature, i.htmlSignature
+                FROM identity i JOIN account a ON a.id = i.accountId
+                WHERE a.isEnabled AND (i.textSignature <> '' OR i.htmlSignature <> '') ORDER BY i.email
+                """
+            ).map { row -> SignatureRecord in
+                let place = SignatureRecord.Server(accountId: row["accountId"], identityId: row["remoteId"], email: row["email"])
+                let html: String = row["htmlSignature"]
+                return SignatureRecord(
+                    id: "server|\(place.accountId)|\(place.identityId)", name: place.email, text: row["textSignature"],
+                    html: html.isEmpty ? nil : html, addresses: place.email, server: place)
+            }.enumerated().sorted { a, b in
+                let (x, y) = (rank[a.element.server!.accountId] ?? .max, rank[b.element.server!.accountId] ?? .max)
+                return x != y ? x < y : a.offset < b.offset
+            }.map(\.element)
+            return local + server
+        }
+    }
+
+    /// Adds a signature kept on this Mac (at the end), or changes one.
+    public func saveSignature(_ signature: SignatureRecord) throws {
+        try write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO signature (id, name, text, html, addresses, sortOrder)
+                    VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sortOrder), 0) + 1 FROM signature))
+                    ON CONFLICT(id) DO UPDATE SET name = excluded.name, text = excluded.text, html = excluded.html,
+                        addresses = excluded.addresses
+                    """,
+                arguments: [signature.id, signature.name, signature.text, signature.html, signature.addresses])
+        }
+    }
+
+    /// Notes the signature a sent message used ("" for none), for choosing one by history.
+    public func recordSignatureUsage(
+        recipient: String, fromEmail: String, signatureId: String, isReply: Bool, isTop: Bool, at date: Date = Date()
+    ) throws {
+        try write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO signature_usage (recipient, fromEmail, signatureId, isReply, isTop, usedAt)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [recipient.lowercased(), fromEmail.lowercased(), signatureId, isReply, isTop, date.timeIntervalSince1970])
+        }
+    }
+
+    /// The signature ("" for none) and placement last used with this recipient; with `isReply`, in replies
+    /// (true) or new messages (false) only.
+    public func lastSignatureUsage(recipient: String, isReply: Bool? = nil) throws -> (signatureId: String, isTop: Bool)? {
+        try dbPool.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT signatureId, isTop FROM signature_usage
+                    WHERE recipient = ? AND (? IS NULL OR isReply = ?) ORDER BY usedAt DESC LIMIT 1
+                    """,
+                arguments: [recipient.lowercased(), isReply, isReply]
+            ).map { ($0["signatureId"], $0["isTop"]) }
+        }
+    }
+
+    /// The signature sent most from this address ("" for none), if any was.
+    public func mostUsedSignature(fromEmail: String) throws -> String? {
+        try dbPool.read { db in
+            try String.fetchOne(
+                db,
+                sql: """
+                    SELECT signatureId FROM signature_usage WHERE fromEmail = ?
+                    GROUP BY signatureId ORDER BY COUNT(*) DESC, MAX(usedAt) DESC LIMIT 1
+                    """,
+                arguments: [fromEmail.lowercased()])
+        }
+    }
+
+    /// Settings › Signatures' Reset Signature Usage History.
+    public func resetSignatureUsage() throws {
+        try write { db in try db.execute(sql: "DELETE FROM signature_usage") }
+    }
+
+    /// The JMAP identity sending as this address, whose signature can be kept on its server (Gmail's
+    /// are changed in Gmail).
+    public func jmapIdentity(email: String) throws -> SignatureRecord.Server? {
+        try dbPool.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT i.accountId, i.remoteId, i.email FROM identity i JOIN account a ON a.id = i.accountId
+                WHERE a.isEnabled AND a.kind <> ? AND i.email = ? ORDER BY a.sortOrder LIMIT 1
+                """, arguments: [AccountRecord.gmailKind, email.lowercased()]
+            ).map { SignatureRecord.Server(accountId: $0["accountId"], identityId: $0["remoteId"], email: $0["email"]) }
+        }
+    }
+
+    /// Puts a signature back where it's kept: on this Mac, or as its identity's.
+    public func saveSignatureAnywhere(_ signature: SignatureRecord) throws {
+        if let server = signature.server {
+            try setIdentitySignature(accountId: server.accountId, identityId: server.identityId, text: signature.text, html: signature.html ?? "")
+        } else {
+            try saveSignature(signature)
+        }
+    }
+
+    public func deleteSignature(id: String) throws {
+        try write { db in try db.execute(sql: "DELETE FROM signature WHERE id = ?", arguments: [id]) }
+    }
+
+    /// Changes an identity's signature here (its server's is changed separately); empty: none.
+    public func setIdentitySignature(accountId: String, identityId: String, text: String, html: String) throws {
+        try write { db in
+            try db.execute(
+                sql: "UPDATE identity SET textSignature = ?, htmlSignature = ? WHERE accountId = ? AND remoteId = ?",
+                arguments: [text, html, accountId, identityId])
         }
     }
 
@@ -2031,7 +2170,8 @@ public final class MailStore: Sendable {
 
     // MARK: Observation
 
-    /// Calls `onChange` after every committed transaction that touches messages, mailboxes or accounts.
+    /// Calls `onChange` after every committed transaction that touches messages, mailboxes, accounts or
+    /// their sending identities (whose signatures a sync brings show in Settings › Signatures).
     /// Called on a background queue; the caller is expected to debounce and hop to the main thread.
     public func observeChanges(_ onChange: @escaping @Sendable () -> Void) -> StoreObservation {
         // Only the message columns the UI shows, and `downloadState` (a downloaded message shows up):
@@ -2041,7 +2181,8 @@ public final class MailStore: Sendable {
             Column("isSeen"), Column("isFlagged"), Column("isAnswered"), Column("hasAttachment"), Column("size"),
             Column("downloadState"))
         let observation = DatabaseRegionObservation(
-            tracking: shown, Table("message_mailbox"), Table("mailbox"), Table("account"), Table("smart_mailbox"))
+            tracking: shown, Table("message_mailbox"), Table("mailbox"), Table("account"), Table("smart_mailbox"),
+            Table("identity"))
         let cancellable = observation.start(in: dbPool, onError: { _ in }, onChange: { _ in onChange() })
         return StoreObservation(cancellable)
     }

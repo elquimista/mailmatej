@@ -108,6 +108,8 @@ public struct Identity: Decodable, Sendable {
     public let id: String
     public let name: String
     public let email: String
+    public let textSignature: String?
+    public let htmlSignature: String?
 }
 
 public struct GetResponse<T: Decodable & Sendable>: Decodable, Sendable {

@@ -9,6 +9,8 @@ public actor JMAPAccountSync {
     private let client: JMAPClient
     private let store: MailStore
     private var lastIdentitySync: Date?
+    /// Push said the identities changed (a signature edited elsewhere, say): the next sync reads them.
+    private var identitiesChanged = false
     private var lastStrandedCheck: Date?
 
     public init(account: AccountRecord, credentials: Credentials, store: MailStore, urlSession: URLSession = .shared)
@@ -43,7 +45,10 @@ public actor JMAPAccountSync {
             "Syncing \(self.account.name, privacy: .public): api \(session.apiUrl.absoluteString, privacy: .public), account \(accountId, privacy: .public)")
         var result = Result()
         result.mailboxes = try await syncMailboxes(accountId)
-        if session.supports(Capability.submission), lastIdentitySync.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+        if session.supports(Capability.submission),
+            identitiesChanged || lastIdentitySync.map({ Date().timeIntervalSince($0) > Self.identityInterval }) ?? true
+        {
+            identitiesChanged = false
             try await syncIdentities(accountId)
             lastIdentitySync = Date()
         }
@@ -242,7 +247,8 @@ public actor JMAPAccountSync {
             let task = Task {
                 do {
                     for try await signal in signals {
-                        if case .changed(let change) = signal, change.changed[accountId] != nil {
+                        if case .changed(let change) = signal, let types = change.changed[accountId] {
+                            if types["Identity"] != nil { identitiesChanged = true }
                             continuation.yield(.changed)
                         } else {
                             continuation.yield(.alive)
@@ -255,6 +261,15 @@ public actor JMAPAccountSync {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// How often the sending identities (with their signatures) are read again, unless push tells of a
+    /// change sooner: 10 minutes (MMJ_DEBUG_IDENTITY_INTERVAL seconds in a debug build, for tests).
+    static var identityInterval: TimeInterval {
+        #if DEBUG
+            if let seconds = ProcessInfo.processInfo.environment["MMJ_DEBUG_IDENTITY_INTERVAL"].flatMap(Double.init) { return seconds }
+        #endif
+        return 600
     }
 
     // MARK: Mailboxes
@@ -341,7 +356,30 @@ public actor JMAPAccountSync {
         let get = request.call("Identity/get", ["accountId": .string(accountId), "ids": .null])
         let response = try await client.send(request)
         let identities = try response.decode(GetResponse<Identity>.self, get).list
-        try store.replaceIdentities(accountId: account.id, identities.map { ($0.id, $0.name, $0.email) })
+        try store.replaceIdentities(
+            accountId: account.id, identities.map { ($0.id, $0.name, $0.email) },
+            signatures: Dictionary(identities.map { identity in
+                let html = identity.htmlSignature ?? ""
+                let text = identity.textSignature.flatMap { $0.isEmpty ? nil : $0 } ?? (html.isEmpty ? "" : HTMLText.lines(html))
+                return (identity.id, (text, html))
+            }, uniquingKeysWith: { a, _ in a }))
+    }
+
+    /// Changes an identity's signature on the server (Identity/set), then stores the server's identities
+    /// again. An empty HTML: none (the text only).
+    public func setSignature(identityId: String, text: String, html: String) async throws {
+        let session = try await client.currentSession()
+        let accountId = try remoteAccountId(session)
+        var request = JMAPRequest(using: [Capability.core, Capability.mail, Capability.submission])
+        let set = request.call("Identity/set", [
+            "accountId": .string(accountId),
+            "update": .object([identityId: .object(["textSignature": .string(text), "htmlSignature": .string(html)])]),
+        ])
+        let result = try await client.send(request).arguments(set)
+        if let error = result["notUpdated"]?[identityId] {
+            throw MailboxRefused(error)
+        }
+        try await syncIdentities(accountId)
     }
 
     // MARK: Emails
@@ -1035,8 +1073,9 @@ public actor JMAPAccountSync {
         return error["description"]?.stringValue.map { "\(type): \($0)" } ?? type
     }
 
-    /// The server wouldn't make or rename a mailbox (Mailbox/set notCreated or notUpdated): its
-    /// SetError's description ("A mailbox with name 'Work' already exists."), else its type.
+    /// The server wouldn't make or rename a mailbox (Mailbox/set notCreated or notUpdated), or change an
+    /// identity's signature: its SetError's description ("A mailbox with name 'Work' already exists."),
+    /// else its type.
     public struct MailboxRefused: Error, LocalizedError {
         public var reason: String
 

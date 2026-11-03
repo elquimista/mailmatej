@@ -910,6 +910,85 @@ final class AppModel {
         }
     }
 
+    // MARK: Signatures
+
+    /// Every signature (see `MailStore.signatures`).
+    func signatures() -> [SignatureRecord] { (try? store.signatures()) ?? [] }
+
+    /// Saves a signature as edited, here at once: kept on this Mac, or (`server` set) as a JMAP identity's
+    /// own, then on its server too. `previous` is it as it was (nil: new), to move it between this Mac
+    /// and a server, and to put it back if the server refuses.
+    func saveSignature(_ signature: SignatureRecord, previous: SignatureRecord?) {
+        do {
+            if let server = signature.server {
+                try store.setIdentitySignature(
+                    accountId: server.accountId, identityId: server.identityId, text: signature.text, html: signature.html ?? "")
+                if let previous, previous.server == nil { try store.deleteSignature(id: previous.id) }
+            } else {
+                try store.saveSignature(signature)
+                if let place = previous?.server {
+                    try store.setIdentitySignature(accountId: place.accountId, identityId: place.identityId, text: "", html: "")
+                }
+            }
+        } catch {
+            return reportSignature(error, name: signature.name)
+        }
+        refreshNow(countsUnchanged: true)
+        var changes: [(SignatureRecord.Server, text: String, html: String)] = []
+        if let server = signature.server { changes.append((server, signature.text, signature.html ?? "")) }
+        if let place = previous?.server, place != signature.server { changes.append((place, "", "")) }
+        sendSignatureChanges(changes, name: signature.name) { [store] in
+            // Back as it was.
+            if let previous { try? store.saveSignatureAnywhere(previous) }
+            if let server = signature.server, server != previous?.server {
+                try? store.setIdentitySignature(accountId: server.accountId, identityId: server.identityId, text: "", html: "")
+            }
+            if previous?.server != nil, signature.server == nil { try? store.deleteSignature(id: signature.id) }
+        }
+    }
+
+    /// Deletes a signature: here at once, and a JMAP identity's on its server too.
+    func deleteSignature(_ signature: SignatureRecord) {
+        do {
+            if let server = signature.server {
+                try store.setIdentitySignature(accountId: server.accountId, identityId: server.identityId, text: "", html: "")
+            } else {
+                try store.deleteSignature(id: signature.id)
+            }
+        } catch {
+            return reportSignature(error, name: signature.name)
+        }
+        refreshNow(countsUnchanged: true)
+        guard let server = signature.server else { return }
+        sendSignatureChanges([(server, "", "")], name: signature.name) { [store] in try? store.saveSignatureAnywhere(signature) }
+    }
+
+    /// Makes identity signature changes on their servers; if one is refused, `undo` puts the signatures
+    /// back here and the error is shown.
+    private func sendSignatureChanges(
+        _ changes: [(SignatureRecord.Server, text: String, html: String)], name: String, undo: @escaping () -> Void
+    ) {
+        guard !changes.isEmpty else { return }
+        inBackground { [self] in
+            do {
+                for (server, text, html) in changes {
+                    try await coordinator.setSignature(accountId: server.accountId, identityId: server.identityId, text: text, html: html)
+                }
+            } catch {
+                undo()
+                reportSignature(error, name: name)
+            }
+            refreshNow(countsUnchanged: true)
+        }
+    }
+
+    private func reportSignature(_ error: Error, name: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the signature “\(name)”."
+        alert.informativeText = Self.describe(error)
+        present(alert)
+    }
+
     // MARK: Smart mailboxes
 
     /// Narrows a special mailbox (Inbox, All Messages, ...) by its Conditions tab.
@@ -1289,7 +1368,9 @@ final class AppModel {
         let detail = try messageId.flatMap { try store.detail(id: $0) }
         guard kind != .new else {
             let identity = identities.first { $0.accountId == detail?.accountId } ?? identities.first
-            return ComposeWindowController.Setup(identities: identities, identity: identity)
+            var setup = ComposeWindowController.Setup(identities: identities, identity: identity)
+            setup.kind = .new
+            return setup
         }
         guard let messageId, let detail else { throw CocoaError(.fileNoSuchFile) }
 
@@ -1305,6 +1386,7 @@ final class AppModel {
             draft: Compose.draft(
                 kind, original: original, myAddresses: myAddresses,
                 accountAddresses: Set(identities.filter { $0.accountId == detail.accountId }.map(\.email))))
+        setup.kind = kind
         if kind == .forward {
             setup.attachments = MessageViewController.attachments(messageId: messageId, html: body?.html, store: store)
             setup.attachmentsAccountId = detail.accountId

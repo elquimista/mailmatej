@@ -368,6 +368,34 @@ enum Schema {
                 """)
         }
 
+        m.registerMigration("v24-signatures") { db in
+            // Signatures kept on this Mac (Settings › Signatures), and each sending identity's own, kept on
+            // its server (filled in by the accounts' next identity sync).
+            try db.execute(sql: """
+                ALTER TABLE identity ADD COLUMN textSignature TEXT NOT NULL DEFAULT '';
+                ALTER TABLE identity ADD COLUMN htmlSignature TEXT NOT NULL DEFAULT '';
+                CREATE TABLE signature (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    html TEXT,                       -- its HTML variant, if any
+                    addresses TEXT NOT NULL DEFAULT '',  -- the From addresses it's for; '' every one
+                    sortOrder INTEGER NOT NULL
+                );
+                -- Which signature each sent message used, for choosing one by history (as MailMate does).
+                CREATE TABLE signature_usage (
+                    recipient TEXT NOT NULL,         -- the main recipient, lowercased
+                    fromEmail TEXT NOT NULL,         -- lowercased
+                    signatureId TEXT NOT NULL,       -- '' for No Signature
+                    isReply INTEGER NOT NULL,
+                    isTop INTEGER NOT NULL,          -- placed above the quoted text
+                    usedAt REAL NOT NULL
+                );
+                CREATE INDEX signature_usage_recipient ON signature_usage(recipient, usedAt);
+                CREATE INDEX signature_usage_from ON signature_usage(fromEmail);
+                """)
+        }
+
         return m
     }
 }

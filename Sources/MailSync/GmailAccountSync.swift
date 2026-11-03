@@ -91,7 +91,7 @@ public actor GmailAccountSync {
         var result = JMAPAccountSync.Result()
         imapUnavailable = false  // try IMAP again
         result.mailboxes = try await syncLabels()
-        if lastIdentitySync.map({ Date().timeIntervalSince($0) > 600 }) ?? true {
+        if lastIdentitySync.map({ Date().timeIntervalSince($0) > JMAPAccountSync.identityInterval }) ?? true {
             do {
                 _ = try await syncIdentities()
             } catch {
@@ -1390,14 +1390,21 @@ extension GmailAccountSync {
     #endif
 
     /// Stores the addresses the account sends as (Gmail settings › Accounts › Send mail as: its own, and
-    /// the aliases verified there) as its identities, and returns them (lowercased).
+    /// the aliases verified there) as its identities, with their signatures, and returns them (lowercased).
     @discardableResult
     func syncIdentities() async throws -> Set<String> {
         let addresses = try await client.sendAs().filter { $0.isPrimary == true || $0.verificationStatus == "accepted" }
-        try store.replaceIdentities(accountId: account.id, addresses.map { address in
-            let email = address.sendAsEmail.lowercased()
-            return (remoteId: email, name: address.displayName ?? "", email: email)
-        })
+        try store.replaceIdentities(
+            accountId: account.id,
+            addresses.map { address in
+                let email = address.sendAsEmail.lowercased()
+                return (remoteId: email, name: address.displayName ?? "", email: email)
+            },
+            // Gmail's signatures are HTML only: the text variant is their text as the HTML shows it.
+            signatures: Dictionary(addresses.map { address in
+                let html = address.signature ?? ""
+                return (address.sendAsEmail.lowercased(), (html.isEmpty ? "" : HTMLText.lines(html), html))
+            }, uniquingKeysWith: { a, _ in a }))
         lastIdentitySync = Date()
         return Set(addresses.map { $0.sendAsEmail.lowercased() })
     }

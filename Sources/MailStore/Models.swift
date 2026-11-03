@@ -256,6 +256,64 @@ public struct IdentityRecord: Sendable, Hashable {
     }
 }
 
+/// A signature (MailMate's Settings › Signatures): kept on this Mac, or a sending identity's own, kept
+/// on its server (a JMAP Identity's signature, Gmail's Send mail as signature).
+public struct SignatureRecord: Sendable, Hashable {
+    /// Where a server's signature is kept: the identity it belongs to.
+    public struct Server: Sendable, Hashable {
+        public var accountId: String
+        public var identityId: String
+        /// The identity's address, lowercased.
+        public var email: String
+
+        public init(accountId: String, identityId: String, email: String) {
+            self.accountId = accountId
+            self.identityId = identityId
+            self.email = email
+        }
+    }
+
+    public var id: String
+    public var name: String
+    public var text: String
+    /// Its HTML variant, if it has one: sent in the message's HTML part in place of the text.
+    public var html: String?
+    /// The From addresses it's for, as MailMate's Address(es) take them: comma-separated addresses, `*`
+    /// for any characters, optionally in braces ("{a@x.com,b@x.com}"); empty: every address.
+    public var addresses: String
+    /// Set for a server's signature (nil: kept on this Mac).
+    public var server: Server?
+
+    public init(id: String, name: String, text: String, html: String? = nil, addresses: String = "", server: Server? = nil) {
+        self.id = id
+        self.name = name
+        self.text = text
+        self.html = html
+        self.addresses = addresses
+        self.server = server
+    }
+
+    /// Whether it may be used to send from `address`: a server's only from its identity's address.
+    public func isFor(_ address: String) -> Bool {
+        let address = address.lowercased()
+        if let server { return server.email == address }
+        var globs = addresses.trimmingCharacters(in: .whitespacesAndNewlines)
+        if globs.hasPrefix("{") && globs.hasSuffix("}") { globs = String(globs.dropFirst().dropLast()) }
+        let patterns = globs.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+        return patterns.isEmpty || patterns.contains { Self.matches(Substring(address), $0[...]) }
+    }
+
+    /// `*` for any characters (none too), anything else as itself.
+    private static func matches(_ text: Substring, _ pattern: Substring) -> Bool {
+        guard let first = pattern.first else { return text.isEmpty }
+        if first == "*" {
+            let rest = pattern.dropFirst()
+            return text.indices.contains { matches(text[$0...], rest) } || matches(text[text.endIndex...], rest)
+        }
+        return text.first == first && matches(text.dropFirst(), pattern.dropFirst())
+    }
+}
+
 public struct MessageDetail: Sendable {
     public var id: Int64
     public var accountId: String

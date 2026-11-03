@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import MailSync
@@ -7,6 +8,18 @@ import Testing
         let html = MarkdownMail.html("Hi Ana,\nsee <this> & that.\n\nBest")
         #expect(html.contains("Hi Ana,<br>\nsee &lt;this&gt; &amp; that.</p>"))
         #expect(html.contains(">Best</p>"))
+    }
+
+    @Test func anHTMLSignatureTakesTheSignaturesPlace() {
+        let text = "Hi **Bob**\n\nBest,\nAlice\n\nOn 2 Nov, Bob wrote:\n\n> Yes"
+        let signature = (text as NSString).range(of: "Best,\nAlice\n")
+        let html = MarkdownMail.html(text, signature: signature, signatureHTML: "<div class=\"sig\">Alice</div>")
+        #expect(html.contains("<strong>Bob</strong>"))
+        #expect(html.contains("<div class=\"sig\">Alice</div>"))
+        #expect(!html.contains("Best,") && !html.contains("MMJSIGNATURE"))
+        #expect(html.range(of: "sig")!.lowerBound < html.range(of: "Bob wrote")!.lowerBound)
+        let plain = MarkdownMail.plainHTML("Hi <b>\n\nBest,\nAlice\n", signature: (("Hi <b>\n\nBest,\nAlice\n") as NSString).range(of: "Best,\nAlice\n"), signatureHTML: "<i>A</i>")
+        #expect(plain.contains("Hi &lt;b&gt;<br>\n<br>\n<i>A</i>"))
     }
 
     @Test func markdownBecomesHTML() {

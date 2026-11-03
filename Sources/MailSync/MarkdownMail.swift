@@ -26,6 +26,36 @@ public enum MarkdownMail {
             """
     }
 
+    /// The HTML of Markdown whose signature (the text in `signature`) has an HTML variant: that, as typed,
+    /// in its place.
+    public static func html(_ markdown: String, signature: NSRange, signatureHTML: String) -> String {
+        let token = "MMJSIGNATURE" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let page = html((markdown as NSString).replacingCharacters(in: signature, with: "\n\(token)\n\n"))
+        return page.replacingOccurrences(of: "<p dir=\"auto\">\(token)</p>", with: signatureHTML)
+    }
+
+    /// A plain-text message as HTML, for a signature with an HTML variant (MailMate then sends HTML too):
+    /// the text with its lines kept, and the signature's HTML in its place.
+    public static func plainHTML(_ text: String, signature: NSRange, signatureHTML: String) -> String {
+        let source = text as NSString
+        func lines(_ part: String) -> String { escape(part).replacingOccurrences(of: "\n", with: "<br>\n") }
+        let before = lines(source.substring(to: signature.location))
+        let after = lines(source.substring(from: NSMaxRange(signature)))
+        return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta http-equiv="Content-Type" content="text/xhtml; charset=utf-8">
+            </head>
+            <body style="font-family: sans-serif;">
+            \(before)\(signatureHTML)
+            \(after)</body>
+
+            </html>
+
+            """
+    }
+
     /// The text part of a Markdown message, as MailMate writes it: the Markdown as typed, but an embedded
     /// picture (`![](cid:… "name")`, meaningless outside the HTML) as `[ "name" ]`.
     public static func plainText(_ markdown: String) -> String {

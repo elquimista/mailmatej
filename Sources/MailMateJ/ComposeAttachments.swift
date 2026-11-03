@@ -324,10 +324,66 @@ private final class AttachmentTableView: NSTableView {
     }
 }
 
+extension NSAttributedString.Key {
+    /// On the composer's signature: its id.
+    static let mmjSignature = NSAttributedString.Key("MMJSignature")
+    /// On a reply's or forward's quoted message (from its attribution on).
+    static let mmjQuoted = NSAttributedString.Key("MMJQuoted")
+}
+
+extension NSAttributedString {
+    /// From the first character with this attribute to the last: text typed among them is in it too (a
+    /// plain-text view doesn't give typed text the attribute).
+    func range(of key: NSAttributedString.Key) -> NSRange? {
+        var first: NSRange?
+        var last: NSRange?
+        let all = NSRange(location: 0, length: length)
+        enumerateAttribute(key, in: all) { value, range, stop in
+            if value != nil {
+                first = range
+                stop.pointee = true
+            }
+        }
+        enumerateAttribute(key, in: all, options: .reverse) { value, range, stop in
+            if value != nil {
+                last = range
+                stop.pointee = true
+            }
+        }
+        guard let first, let last else { return nil }
+        return NSUnionRange(first, last)
+    }
+}
+
 /// The composer's text view: files dropped on it go to the composer (with the text position they were
-/// dropped at), not inserted as paths, as in MailMate.
+/// dropped at), not inserted as paths, as in MailMate. The signature is drawn on a band, as MailMate's:
+/// its lines, from where the text starts to as far from the right edge (measured: rgb 70 on the dark
+/// editor's 30).
 final class ComposeTextView: NSTextView {
     var onDropFiles: ([URL], Int) -> Void = { _, _ in }
+
+    private static let signatureBand = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 70 / 255, green: 70 / 255, blue: 70 / 255, alpha: 1)
+            : NSColor(srgbRed: 222 / 255, green: 222 / 255, blue: 222 / 255, alpha: 1)  // not measured
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let storage = textStorage, let layoutManager, let textContainer,
+            let range = storage.range(of: .mmjSignature)
+        else { return }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var band = NSRect.null
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { line, _, _, _, _ in band = band.union(line) }
+        guard !band.isNull else { return }
+        let inset = textContainerOrigin.x + textContainer.lineFragmentPadding
+        band.origin.x = inset
+        band.size.width = bounds.width - 2 * inset
+        band.origin.y += textContainerOrigin.y
+        Self.signatureBand.setFill()
+        band.intersection(rect).fill()
+    }
 
     private func fileURLs(_ info: NSDraggingInfo) -> [URL] {
         (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
