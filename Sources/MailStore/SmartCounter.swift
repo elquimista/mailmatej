@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import Synchronization
 
 /// Smart mailboxes' unread counts and by-account submailboxes, kept from what each write changed
 /// rather than counted anew: a refresh tests just the messages written since the last one against
@@ -10,6 +11,8 @@ import GRDB
 public final class SmartCounter: @unchecked Sendable {
     private let store: MailStore
     private let lock = NSLock()
+    /// Counting everything anew (seconds in a big store): a list doesn't wait for it.
+    private let recounting = Atomic(false)
 
     /// What each smart mailbox's messages are tested with: its conditions, as SQL for all mail and for a
     /// few messages; for one that includes its submailboxes' messages, its own (`smartOwnFilter`) when
@@ -56,10 +59,11 @@ public final class SmartCounter: @unchecked Sendable {
     /// More changed messages than this are counted anew, which is quicker then.
     static let retestLimit = 5_000
     /// Counted anew this often anyway.
-    static let recountInterval: Duration = .seconds(600)
+    let recountInterval: Duration
 
-    public init(store: MailStore) throws {
+    public init(store: MailStore, recountingEvery recountInterval: Duration = .seconds(600)) throws {
         self.store = store
+        self.recountInterval = recountInterval
         try store.noteChangedMessages()
         store.counterSlot.counter = self  // the store lists smart mailboxes from here
     }
@@ -81,28 +85,56 @@ public final class SmartCounter: @unchecked Sendable {
     }
 
     /// A smart mailbox's messages as of now, for listing it (the changes since the last refresh taken in
-    /// first), or nil when that would take counting everything anew (left to the next refresh then), or
-    /// on the main thread while a refresh is under way (a list there doesn't wait for one).
+    /// first), or nil when that would take counting everything anew (left to the next refresh then),
+    /// while it's counting everything anew, or on the main thread while a refresh is under way (a list
+    /// doesn't wait for those). Its count anew every `recountInterval` (a check, not a need) waits for
+    /// the next refresh, so a quiet spell doesn't leave lists to their conditions.
     public func members(listing id: Int64) -> Set<Int64>? {
-        guard Thread.isMainThread ? lock.try() : lock.lock(before: Date(timeIntervalSinceNow: 1)) else { return nil }
+        if recounting.load(ordering: .relaxed) {
+            Self.debugWhy("counting anew")
+            return nil
+        }
+        guard Thread.isMainThread ? lock.try() : lock.lock(before: Date(timeIntervalSinceNow: 1)) else {
+            Self.debugWhy("busy counting")
+            return nil
+        }
         defer { lock.unlock() }
-        guard counted != nil else { return nil }
+        guard let counted else {
+            Self.debugWhy("not counted yet")
+            return nil
+        }
+        #if DEBUG
+            let generation = store.smartCatalog.generation
+        #endif
         do {
-            guard try update(recounting: false) else { return nil }
+            guard try update(recounting: false) else {
+                #if DEBUG
+                    Self.debugWhy(generation != counted.generation ? "smart mailboxes reloaded since its count" : "a renamed mailbox or many changes")
+                #endif
+                return nil
+            }
         } catch {
-            counted = nil
+            self.counted = nil
+            Self.debugWhy("\(error)")
             return nil
         }
         return members(id)
     }
 
+    private static func debugWhy(_ reason: @autoclosure () -> String) {
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: the counter can't list: \(reason())") }
+        #endif
+    }
+
     /// Takes the changes since the last update in: tests them, or counts everything anew when that's
-    /// due and `recounting` (else leaves it to the next refresh, returning false).
+    /// needed and `recounting` (else leaves it to the next refresh, returning false). Counting anew because
+    /// `recountInterval` passed is left to a refresh: the changes still test right.
     private func update(recounting: Bool) throws -> Bool {
         let generation = store.smartCatalog.generation
         let changed = try store.takeChangedMessages()  // before reading: what follows is in the next
-        if let counted, counted.generation == generation, !changed.mailboxesChanged,
-            changed.ids.count <= Self.retestLimit, counted.at.duration(to: .now) < Self.recountInterval
+        if let counted, counted.generation == generation, !changed.mailboxesChanged, changed.ids.count <= Self.retestLimit,
+            !recounting || counted.at.duration(to: .now) < recountInterval
         {
             try retest(Set(changed.ids))
         } else if recounting {
@@ -189,6 +221,8 @@ public final class SmartCounter: @unchecked Sendable {
     // MARK: Counting
 
     private func recount(generation: Int) throws {
+        recounting.store(true, ordering: .relaxed)
+        defer { recounting.store(false, ordering: .relaxed) }
         var tests: [Int64: Test] = [:]
         var volatile = Set<Int64>()
         for record in store.smartCatalog.all {

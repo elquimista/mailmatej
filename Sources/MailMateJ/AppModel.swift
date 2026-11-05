@@ -107,7 +107,13 @@ final class AppModel {
         #if DEBUG
             if let seconds = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_POLL_SECONDS"] ?? "") { pollInterval = .seconds(seconds) }
         #endif
-        Task { [pollInterval] in try? await coordinator.start(pollInterval: pollInterval) }
+        var syncing = true
+        #if DEBUG
+            // No account loaded or synced (nor any password read): for timing the app on a copy of the
+            // release store, which would otherwise sync the real accounts.
+            syncing = ProcessInfo.processInfo.environment["MMJ_DEBUG_NO_SYNC"] == nil
+        #endif
+        if syncing { Task { [pollInterval] in try? await coordinator.start(pollInterval: pollInterval) } }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in

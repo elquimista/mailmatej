@@ -235,6 +235,27 @@ import Testing
         #expect(try listed(search: .quickSearch("invoice")) == [ids["3"]!, five])
     }
 
+    @Test func aQuietSpellDoesntKeepSmartMailboxesFromTheCounter() throws {
+        try upsert([message("1", from: "a@bank.com", at: 100), message("2", from: "b@shop.com", at: 200)])
+        let ids = try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["1", "2"])
+        let bank = try store.createSmartMailbox(name: "Bank", parentId: nil)
+        try store.updateSmartMailbox(id: bank, definition: SmartDefinition(condition: .compound(.all, [.rule(.fromDomain, .is, "bank.com")])))
+        // Its count anew always due, as after ten quiet minutes: listing still takes the changes in.
+        let counter = try SmartCounter(store: store, recountingEvery: .zero)
+        try counter.refresh()
+        #expect(counter.members(listing: bank) == [ids["1"]!])
+        try store.upsertMessages(accountId: "acc", [message("3", from: "c@bank.com", at: 300)])
+        let three = try #require(try store.messageIDsByRemoteID(accountId: "acc", remoteIds: ["3"])["3"])
+        try store.setDownloadState(1, messageIds: [three])
+        #expect(counter.members(listing: bank) == [ids["1"]!, three])
+        // A smart mailbox changed since: counted anew at the next refresh, listed by its conditions meanwhile.
+        try store.updateSmartMailbox(id: bank, definition: SmartDefinition(condition: .compound(.all, [.rule(.fromDomain, .is, "shop.com")])))
+        #expect(counter.members(listing: bank) == nil)
+        #expect(try store.messageIDs(scope: .smart(bank)) == [ids["2"]!])
+        try counter.refresh()
+        #expect(counter.members(listing: bank) == [ids["2"]!])
+    }
+
     @Test func specialMailboxesPlacedInASmartMailboxCountAsItsSubmailboxes() throws {
         try upsert([
             message("1", from: "a@x.com", at: 100), message("2", from: "me@example.com", box: "se", at: 200),
