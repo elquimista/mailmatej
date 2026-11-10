@@ -72,13 +72,17 @@ public enum SoftwareUpdate {
         }
     }
 
-    /// The newest release newer than `current` (with its app): prereleases too with `betas`, never drafts.
-    public static func newest(in releases: [Release], newerThan current: Version, betas: Bool) -> Release? {
+    /// The newest release (with its app): prereleases too with `betas`, never drafts.
+    public static func latest(in releases: [Release], betas: Bool) -> Release? {
         releases
             .filter { !$0.draft && (betas || !$0.prerelease) && $0.app != nil }
             .compactMap { release in release.version.map { (release, $0) } }
-            .filter { current < $0.1 }
             .max { $0.1 < $1.1 }?.0
+    }
+
+    /// The newest release, if it's newer than `current`.
+    public static func newest(in releases: [Release], newerThan current: Version, betas: Bool) -> Release? {
+        latest(in: releases, betas: betas).flatMap { release in release.version.map { current < $0 } == true ? release : nil }
     }
 
     /// Why a check or download didn't work, in words for an alert.

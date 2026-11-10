@@ -40,6 +40,9 @@ import Testing
         #expect(SoftwareUpdate.newest(in: releases, newerThan: current, betas: true)?.tagName == "v1.20.0-beta1")
         #expect(SoftwareUpdate.newest(in: releases, newerThan: try #require(Version("1.19.0")), betas: false) == nil)
         #expect(releases[3].app?.digest == "sha256:ab")
+        // The latest whatever this copy is (one built after it is newer: MailMate's "prerelease").
+        #expect(SoftwareUpdate.latest(in: releases, betas: false)?.tagName == "v1.19.0")
+        #expect(SoftwareUpdate.newest(in: releases, newerThan: try #require(Version("1.19.1")), betas: false) == nil)
     }
 
     @Test func repositoryComesFromTheRemote() {

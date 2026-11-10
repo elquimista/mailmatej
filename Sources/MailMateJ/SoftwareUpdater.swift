@@ -123,9 +123,11 @@ final class SoftwareUpdater {
             do {
                 let releases = try await github.releases()
                 lastCheck = Date()
-                guard let release = SoftwareUpdate.newest(in: releases, newerThan: current, betas: channel == .beta) else {
-                    updateLog.notice("Up to date: \(current, privacy: .public)")
-                    if userInitiated { show(.upToDate) }
+                let latest = SoftwareUpdate.latest(in: releases, betas: channel == .beta)
+                guard let release = latest, let version = release.version, current < version else {
+                    updateLog.notice("Up to date: \(current, privacy: .public) (latest \(latest?.tagName ?? "-", privacy: .public))")
+                    // A copy built after the latest release (MailMate's "prerelease") isn't the latest version.
+                    if userInitiated { show(latest?.version.map { $0 < current } == true ? .newerThanReleases(latest!) : .upToDate) }
                     return
                 }
                 updateLog.notice("\(release.tagName, privacy: .public) is available (running \(current, privacy: .public))")
@@ -309,6 +311,7 @@ final class SoftwareUpdater {
 final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     enum Stage {
         case upToDate
+        case newerThanReleases(SoftwareUpdate.Release)
         case available(SoftwareUpdate.Release)
         case downloading(SoftwareUpdate.Release, fraction: Double)
         case downloaded(SoftwareUpdate.Release, app: URL)
@@ -384,6 +387,11 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         case .upToDate:
             titleField.stringValue = "Up To Date"
             textField.stringValue = "You are running \(running) which is the latest version available."
+            buttons = [("OK", .close)]
+        case .newerThanReleases(let release):
+            titleField.stringValue = "You are Using a Prerelease"
+            textField.stringValue = "\(version(release)) is the latest version available. You have version "
+                + "\(SoftwareUpdater.shared.current?.description ?? "?")."
             buttons = [("OK", .close)]
         case .available(let release):
             titleField.stringValue = "New Version Available"
