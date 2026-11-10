@@ -302,8 +302,9 @@ final class SoftwareUpdater {
     #endif
 }
 
-/// The update window, laid out as MailMate's (its constraints): the app's icon at 64 pt on the left,
-/// the title and text (and a download's progress) beside it, the buttons under them on the right.
+/// The update window, laid out as MailMate's (its constraints, and measured at 2x: 422 pt wide, no title,
+/// bold 13 pt title and 12 pt text in a 298 pt column, as tall as they need): the app's icon at 64 pt on
+/// the left, the title and text (and a download's progress) beside it, the buttons under them on the right.
 @MainActor
 final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     enum Stage {
@@ -327,11 +328,13 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     private let progress = NSProgressIndicator()
     private let buttons = NSStackView()
     private var actions: [Action] = []
+    /// The text's width: MailMate's 298 pt, or more for buttons that need it (the window widens).
+    private var contentWidth: NSLayoutConstraint?
 
     init(perform: @escaping (Action) -> Void) {
         self.perform = perform
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 150), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Software Update"
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 422, height: 126), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.animationBehavior = .alertPanel  // it pops up as an alert does, as MailMate's
         super.init(window: window)
         window.delegate = self
         build(in: window.contentView!)
@@ -343,8 +346,8 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     private func build(in view: NSView) {
         let image = NSImageView(image: NSApp.applicationIconImage)
         titleField.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-        textField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        for field in [titleField, textField] { field.preferredMaxLayoutWidth = 340 }
+        textField.font = .systemFont(ofSize: 12)
+        for field in [titleField, textField] { field.preferredMaxLayoutWidth = 298 }
         progress.isIndeterminate = false
         progress.minValue = 0
         progress.maxValue = 1
@@ -352,18 +355,20 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 8
+        content.setCustomSpacing(9, after: titleField)  // MailMate's text is 1 pt lower (and as much nearer its buttons)
         progress.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         buttons.orientation = .horizontal
-        buttons.spacing = 12
+        buttons.spacing = 16  // MailMate's: 16.5 pt between buttons
         let views: [String: NSView] = ["image": image, "content": content, "buttons": buttons]
         for (_, v) in views {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
-        content.widthAnchor.constraint(equalToConstant: 340).isActive = true
+        contentWidth = content.widthAnchor.constraint(equalToConstant: 298)
+        contentWidth?.isActive = true
         for format in [
             "H:|-(24)-[image(==64)]-(16)-[content]-|", "H:[image]-(>=20)-[buttons]-|",
-            "V:|-(16)-[image(==64)]-(>=20)-|", "V:|-(16)-[content]-(==20@750,>=20@250)-[buttons]-(18)-|",
+            "V:|-(16)-[image(==64)]-(>=20)-|", "V:|-(16)-[content]-(==19@750,>=19@250)-[buttons]-(18)-|",
         ] {
             view.addConstraints(NSLayoutConstraint.constraints(withVisualFormat: format, metrics: nil, views: views))
         }
@@ -400,6 +405,21 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             textField.stringValue = text
             buttons = [("OK", .close)]
         }
+        defer {
+            // MailMate's text has 14 pt lines (a text field's own would be 15).
+            let lines = NSMutableParagraphStyle()
+            lines.minimumLineHeight = 14
+            lines.maximumLineHeight = 14
+            textField.attributedStringValue = NSAttributedString(string: textField.stringValue, attributes: [
+                .font: textField.font ?? .systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor, .paragraphStyle: lines,
+            ])
+            // The buttons start at least 20 pt after the icon, the text 16 pt after it.
+            let width = max(298, self.buttons.fittingSize.width + 4)
+            contentWidth?.constant = width
+            for field in [titleField, textField] { field.preferredMaxLayoutWidth = width }
+            fit()
+            if window?.isVisible == false { window?.center() }
+        }
         let titles = buttons.map(\.0)
         guard titles != self.buttons.arrangedSubviews.compactMap({ ($0 as? NSButton)?.title }) else {
             actions = buttons.map(\.1)
@@ -410,11 +430,20 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         for (index, (title, _)) in buttons.enumerated() {
             let button = NSButton(title: title, target: self, action: #selector(clicked(_:)))
             button.tag = index
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 86).isActive = true  // MailMate's OK: 85.5 pt
             if index == buttons.count - 1 { button.keyEquivalent = "\r" }
             if title == "Cancel" || title == "Later" { button.keyEquivalent = "\u{1b}" }
             self.buttons.addArrangedSubview(button)
         }
+    }
+
+    /// As tall as the stage's text needs, its top staying where it is.
+    private func fit() {
+        guard let window, let view = window.contentView else { return }
+        view.layoutSubtreeIfNeeded()
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: view.fittingSize))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        if frame != window.frame { window.setFrame(frame, display: window.isVisible) }  // its left edge staying too
     }
 
     @objc private func clicked(_ sender: NSButton) {
