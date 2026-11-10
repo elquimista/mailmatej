@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.showWindow(nil)
         NSApp.activate()
         launchLog("window shown")
+        SoftwareUpdater.shared.start()
         #if DEBUG
             launchLog("list: \(windowController.debugListScroll)")
         #endif
@@ -670,6 +671,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let text = ProcessInfo.processInfo.environment["MMJ_DEBUG_HOVER_LINK"] {
                     await windowController?.debugHoverLink(containing: text)
                     try? await Task.sleep(for: .milliseconds(500))
+                }
+                if let steps = ProcessInfo.processInfo.environment["MMJ_DEBUG_UPDATE_STEPS"] {
+                    // Check for Update driven as a user would ("check,wait=<s>,press=<button>,…"), the update
+                    // window's text logged after each step and captured as <MMJ_SNAPSHOT>-u<n>.png.
+                    for (index, step) in steps.split(separator: ",").map(String.init).enumerated() {
+                        if step == "check" {
+                            SoftwareUpdater.shared.check(userInitiated: true)
+                        } else if step.hasPrefix("wait=") {
+                            try? await Task.sleep(for: .seconds(Double(step.dropFirst(5)) ?? 1))
+                        } else if step.hasPrefix("press=") {
+                            SoftwareUpdater.shared.debugWindow?.debugPress(String(step.dropFirst(6)))
+                        }
+                        try? await Task.sleep(for: .milliseconds(700))
+                        let window = SoftwareUpdater.shared.debugWindow
+                        NSLog("MMJ update \(step): \(window?.debugText ?? "no window")")
+                        if let number = window?.window?.windowNumber, let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            capture.arguments = ["-x", "-o", "-l\(number)", path.replacingOccurrences(of: ".png", with: "-u\(index).png")]
+                            try? capture.run()
+                            capture.waitUntilExit()
+                        }
+                    }
                 }
                 if let file = ProcessInfo.processInfo.environment["MMJ_RENDER_HTML_FILE"],
                     let html = try? String(contentsOfFile: file, encoding: .utf8)
@@ -1312,6 +1336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show()
     }
 
+    @objc func checkForUpdate(_ sender: Any?) {
+        SoftwareUpdater.shared.check(userInitiated: true)
+    }
+
     /// About MailMateJ: AppKit's panel as MailMate's, its version naming the build and the commit it's
     /// from, then the credits (see `aboutCredits`) and the copyright (Info.plist's).
     @objc func showAbout(_ sender: Any?) {
@@ -1408,6 +1436,7 @@ enum MainMenu {
         app.addItem(withTitle: "About \(appName)", action: #selector(AppDelegate.showAbout(_:)), keyEquivalent: "")
         app.addItem(.separator())
         app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+        app.addItem(withTitle: "Check for Update", action: #selector(AppDelegate.checkForUpdate(_:)), keyEquivalent: "")
         app.addItem(.separator())
         let services = NSMenu()
         app.addItem(withTitle: "Services", action: nil, keyEquivalent: "").submenu = services

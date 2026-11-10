@@ -8,6 +8,12 @@
 #
 # Gmail: with the GOOGLE_OAUTH_CLIENT_JSON secret (the Google Cloud client file's contents) the app
 # can sign in to Gmail accounts.
+#
+# Check for Update: this repository is private, so each release is also published to a public one
+# that holds only releases (the RELEASES_REPOSITORY variable, else this one's name with "-releases";
+# it needs a first commit, a README, for tags), where the app looks. That takes the RELEASES_TOKEN
+# secret: a fine-grained token with read and write access to that repository's contents. Its notes
+# are just the version, so commit messages stay private.
 name: Release
 
 on:
@@ -70,6 +76,8 @@ jobs:
           printf '%s' "$GOOGLE_OAUTH_CLIENT_JSON" > google-oauth-client.json
 
       - name: Build
+        env:
+          MMJ_UPDATE_REPOSITORY: ${{ vars.RELEASES_REPOSITORY || format('{0}-releases', github.repository) }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           MMJ_VERSION="$version" scripts/bundle.sh
@@ -87,6 +95,25 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "MailMateJ-$version.zip" --verify-tag \
               --title "MailMateJ $version" --generate-notes $prerelease
+          fi
+
+      - name: Publish to the public releases repository
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_REPOSITORY: ${{ vars.RELEASES_REPOSITORY || format('{0}-releases', github.repository) }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::No RELEASES_TOKEN secret: not published to $RELEASES_REPOSITORY, so Check for Update won't see it."
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$GITHUB_REF_NAME" -R "$RELEASES_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "MailMateJ-$version.zip" -R "$RELEASES_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "MailMateJ-$version.zip" -R "$RELEASES_REPOSITORY" \
+              --title "MailMateJ $version" --notes "MailMateJ $version" $prerelease
           fi
 
       - name: Remove the signing keychain

@@ -3,13 +3,15 @@ import MailStore
 import SwiftUI
 
 /// The Settings window: toolbar-style tabs in MailMate's preferences' order (its General, Counters, Viewer,
-/// Composer, Signatures, Tags, Bundles, Security, Software Update; here Counters and Signatures).
+/// Composer, Signatures, Tags, Bundles, Security, Software Update; here Counters, Signatures and Software
+/// Update).
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
     private let tabs = SettingsTabs()
     private let signatures = SignaturesPane(model: AppModel.shared)
+    private let softwareUpdate = SoftwareUpdatePane()
 
     private init() {
         tabs.tabStyle = .toolbar
@@ -24,6 +26,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         signaturesItem.label = "Signatures"
         signaturesItem.image = NSImage(systemSymbolName: "signature", accessibilityDescription: "Signatures")
         tabs.addTabViewItem(signaturesItem)
+        let softwareUpdateItem = NSTabViewItem(viewController: softwareUpdate)
+        softwareUpdateItem.label = "Software Update"
+        softwareUpdateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Software Update")
+        tabs.addTabViewItem(softwareUpdateItem)
         // The pane shown last, by name (an index would move as panes are added).
         let shown = UserDefaults.standard.string(forKey: "SettingsPane")
         tabs.selectedTabViewItemIndex = tabs.tabViewItems.firstIndex { $0.label == shown } ?? 0

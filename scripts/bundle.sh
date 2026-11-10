@@ -40,6 +40,14 @@ if [ -n "$COMMIT" ]; then
   git diff --quiet HEAD -- 2>/dev/null || COMMIT="$COMMIT+"
   /usr/libexec/PlistBuddy -c "Add :MMJCommit string $COMMIT" "$APP/Contents/Info.plist"
 fi
+# Where Check for Update looks: the public GitHub repository ("owner/name") the release workflow publishes
+# releases to (this one is private): MMJ_UPDATE_REPOSITORY, else this one's name with "-releases" (from
+# GITHUB_REPOSITORY in the workflow, else this checkout's origin).
+SOURCE="${GITHUB_REPOSITORY:-$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#.*[:/]([^/:]+/[^/:]+)$#\1#' || true)}"
+REPOSITORY="${MMJ_UPDATE_REPOSITORY:-${SOURCE:+$SOURCE-releases}}"
+if [ -n "$REPOSITORY" ]; then
+  /usr/libexec/PlistBuddy -c "Add :MMJUpdateRepository string $REPOSITORY" "$APP/Contents/Info.plist"
+fi
 # The Google OAuth client for Gmail accounts: the JSON file Google Cloud downloads for a "Desktop app"
 # client, at google-oauth-client.json (not in git) or MMJ_GOOGLE_OAUTH_JSON. Without it, adding a Gmail
 # account says so.
