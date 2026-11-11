@@ -124,6 +124,16 @@ public actor JMAPAccountSync {
         return DownloadBatchResult(processed: pending.count, failed: failed.count)
     }
 
+    /// Fetches and stores the bodies and parts of these messages (by remote id) that have none yet, so
+    /// rules can read them as they arrive (see `SyncCoordinator`); the raw messages come later, with the
+    /// downloads.
+    public func fetchBodies(remoteIds: [String]) async throws {
+        let pending = try store.messagesWithoutBody(accountId: account.id, remoteIds: remoteIds)
+        guard !pending.isEmpty else { return }
+        let accountId = try remoteAccountId(try await client.currentSession())
+        _ = try await Self.download(.bodies(pending), accountId: accountId, client: client, store: store, account: account.id)
+    }
+
     /// Requests one account's batch makes at once: the server's own limit, if lower, counts too. Most of
     /// an account's mail is usually on a server with others (8 connections to a host for them all, with 3
     /// accounts downloading at once), whose syncs mustn't wait on downloads.

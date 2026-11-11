@@ -711,9 +711,15 @@ public actor SyncCoordinator {
                     await self?.reportHeaders(accountId, downloaded: downloaded, total: total)
                 }
                 endHeaders(accountId)
-                if !result.arrived.isEmpty { onArrived(accountId, result.arrived) }
                 lastSynced[accountId] = .now
                 update(accountId, .idle, success: true)
+                // Rules see new mail whole, as MailMate's run once a message is downloaded: its text and
+                // parts (a calendar invite's) are fetched first, 25 at a time, each batch's rules run as
+                // it's stored. One that can't be fetched still gets its rules, on what's known of it.
+                for batch in result.arrived.chunked(25).map(Array.init) {
+                    try? await engine.fetchBodies(remoteIds: batch)
+                    onArrived(accountId, batch)
+                }
                 startDownloads(accountId)
             } catch {
                 endHeaders(accountId)

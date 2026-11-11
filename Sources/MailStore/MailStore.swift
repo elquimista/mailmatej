@@ -877,6 +877,23 @@ public final class MailStore: Sendable {
         }
     }
 
+    /// Those of an account's messages (by remote id) whose body and parts aren't stored yet.
+    public func messagesWithoutBody(accountId: String, remoteIds: [String]) throws -> [PendingDownload] {
+        try dbPool.read { db in
+            try remoteIds.chunked(500).flatMap { chunk in
+                try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT m.id, m.remoteId, m.blobId, m.size FROM message m
+                        WHERE m.accountId = ? AND m.remoteId IN (\(Array(repeating: "?", count: chunk.count).joined(separator: ", ")))
+                          AND NOT EXISTS (SELECT 1 FROM message_body b WHERE b.messageId = m.id)
+                        """,
+                    arguments: StatementArguments([accountId] + Array(chunk))
+                ).map { PendingDownload(id: $0["id"], remoteId: $0["remoteId"], blobId: $0["blobId"], size: $0["size"], hasBody: false) }
+            }
+        }
+    }
+
     /// Mailboxes holding the next `limit` messages to download: the ones the download is working on.
     public func mailboxIdsOfPendingDownloads(accountId: String, limit: Int) throws -> Set<Int64> {
         try dbPool.read { db in

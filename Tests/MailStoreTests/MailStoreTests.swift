@@ -501,6 +501,14 @@ import Testing
         #expect(try store.messageIDs(scope: .smart(id)).count == 1)
     }
 
+    @Test func messagesWithoutBodyAreThoseNotYetFetched() throws {
+        try store.upsertMessages(accountId: "acc", [message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", at: 200)])
+        let ids = try store.messageIDs(accountId: "acc", remoteIds: ["1"])
+        try store.saveBody(messageId: ids[0], MessageBody(html: nil, text: "Fetched"))
+        #expect(try store.messagesWithoutBody(accountId: "acc", remoteIds: ["1", "2", "3"]).map(\.remoteId) == ["2"])
+        #expect(try store.messagesWithoutBody(accountId: "other", remoteIds: ["2"]).isEmpty)
+    }
+
     @Test func smartMailboxesInsideSpecialOnes() throws {
         try upsert([message("1", from: "a@x.com", at: 100), message("2", from: "b@x.com", box: "tr", at: 200)])
         let id = try store.createSmartMailbox(name: "In All", parentId: nil, parentKey: "all")
