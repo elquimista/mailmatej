@@ -89,19 +89,50 @@ public enum MessagePage {
         plain || (hasNoColors(content) && !hasPictures(content))
     }
 
-    /// `html(content:plain:remote:)`, with `adapts` already known.
-    public static func html(content: String, plain: Bool, remote: Bool, adaptive: Bool) -> String {
-        let https = remote ? " https:" : ""
-        let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
-            + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
+    /// `html(content:plain:remote:)`, with `adapts` already known. `stacked`: the page is one of several
+    /// messages shown together (see `MessageStackPage`), in a frame of a page that follows dark mode.
+    public static func html(content: String, plain: Bool, remote: Bool, adaptive: Bool, stacked: Bool = false) -> String {
         let colorScheme = adaptive ? #"<meta name="color-scheme" content="light dark">"# : ""
+        // In a stack the page can't be made light by its web view: a light-only one keeps its light rules
+        // whatever the appearance (see `lightOnly`), on white.
+        let content = stacked && !adaptive ? lightOnly(content) : content
+        let stackCSS = stacked ? stackedCSS + (adaptive ? "" : lightOnlyCSS) : ""
         return """
             <!doctype html><html><head><meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="\(csp)">\(colorScheme)
-            <style>\(helveticaFaces)\(pageCSS)\(plain ? plainCSS : htmlCSS)\(adaptive && !plain ? adaptiveCSS : "")</style>
+            <meta http-equiv="Content-Security-Policy" content="\(csp(remote: remote))">\(colorScheme)
+            <style>\(helveticaFaces)\(pageCSS)\(plain ? plainCSS : htmlCSS)\(adaptive && !plain ? adaptiveCSS : "")\(stackCSS)</style>
             </head><body><mmj-content>\(content)</mmj-content><mmj-end></mmj-end></body></html>
             """
     }
+
+    /// The page's policy: no scripts, nothing remote unless `remote` (then https only).
+    public static func csp(remote: Bool) -> String {
+        let https = remote ? " https:" : ""
+        return "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'\(https); "
+            + "img-src data: \(MessageHTML.cidScheme):\(https); font-src data:\(https); media-src \(MessageHTML.cidScheme):"
+    }
+
+    /// An email's dark-mode rules made never to apply, and its light-mode ones always: a frame follows its
+    /// web view's appearance whatever its own `color-scheme`, so a light-only email in a dark stack would
+    /// otherwise switch to its dark styles (white text on its own white). Media queries keep their logic:
+    /// `(prefers-color-scheme: dark)` becomes `(max-width: 0px)`, never true of a frame on screen.
+    public static func lightOnly(_ html: String) -> String {
+        html.replacingOccurrences(of: #"(?i)prefers-color-scheme\s*:\s*dark"#, with: "max-width: 0px", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)prefers-color-scheme\s*:\s*light"#, with: "min-width: 0px", options: .regularExpression)
+    }
+
+    /// MailMate's stacked messages have their text 8 px in (its single message's, 14).
+    static let stackedCSS = """
+
+        mmj-content { margin: 8px !important; }
+        """
+
+    /// A light-only email in a stack: light defaults (black text, white canvas) whatever the appearance.
+    static let lightOnlyCSS = """
+
+        :root { color-scheme: light only !important; }
+        html { background: #fff; }
+        """
 
     /// A message's raw source, as MailMate's Show Raw Message shows it: as it came (UTF-8, else Latin-1
     /// byte for byte), in a framed block of fixed-width text, long lines wrapped. Nothing in it loads.

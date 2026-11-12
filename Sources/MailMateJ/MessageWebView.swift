@@ -92,7 +92,13 @@ final class MessageWebView: WKWebView {
         hitTestPending = true
         callAsyncJavaScript(
             """
-            const e = document.elementFromPoint(x / zoom, y / zoom);
+            let px = x / zoom, py = y / zoom, e = document.elementFromPoint(px, py);
+            // Into a stacked message's frame (they share the page's origin).
+            while (e && e.tagName === 'IFRAME' && e.contentDocument) {
+              const r = e.getBoundingClientRect();
+              px -= r.left; py -= r.top;
+              e = e.contentDocument.elementFromPoint(px, py);
+            }
             const link = e && e.closest('a[href]');
             return link ? link.getAttribute('href').trim() : null;
             """,

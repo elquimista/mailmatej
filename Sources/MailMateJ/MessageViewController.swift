@@ -50,11 +50,11 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     private var loadRemoteForCurrent = false
 
     /// Blocks every network load. Attached unless the user loads remote content.
-    private static var blockAllRules: WKContentRuleList?
+    private(set) static var blockAllRules: WKContentRuleList?
     /// Blocks trackers and insecure loads. Always attached.
-    private static var strictRules: WKContentRuleList?
+    private(set) static var strictRules: WKContentRuleList?
     /// Blocks every script load. Always attached.
-    private static var scriptRules: WKContentRuleList?
+    private(set) static var scriptRules: WKContentRuleList?
 
     init(model: AppModel) {
         self.model = model
@@ -178,7 +178,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     /// Reports the content's height whenever it changes (images loading, the pane resized): the end
     /// marker's position, which the page puts right after the content.
-    private static let heightScript = """
+    static let heightScript = """
         (() => {
           let last = -1, pending = false;
           const report = () => {
@@ -507,6 +507,12 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// pane's bottom, so the page's background fills it); the raw source alone, the same way.
     private func layoutDocument() {
         let width = scroll.contentView.bounds.width, visible = scroll.contentView.bounds.height
+        if stackShown, let stack {
+            stack.webView.frame = NSRect(x: 0, y: 0, width: width, height: max(stackHeight, visible))
+            document.frame = stack.webView.frame
+            scroll.reflectScrolledClipView(scroll.contentView)
+            return
+        }
         if rawShown {
             rawView.frame = NSRect(x: 0, y: 0, width: width, height: max(rawHeight, visible))
             document.frame = rawView.frame
@@ -521,13 +527,19 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         rawView.frame = NSRect(x: 0, y: 0, width: width, height: max(rawHeight, visible))
     }
 
-    func show(messageID: Int64?, selectionCount: Int = 1) {
+    /// Shows a message; with none, the selection: several stacked as MailMate shows them (see
+    /// MessageStack), up to its limit, past which the view stays blank, as MailMate's does.
+    func show(messageID: Int64?, selection: [Int64] = []) {
         guard let messageID else {
+            if selection.count > 1 {
+                return selection.count <= MessageStackPage.maximum ? showStack(selection) : showPlaceholder("")
+            }
             currentID = nil
-            showPlaceholder(selectionCount > 1 ? "\(selectionCount) Messages Selected" : "No Message Selected")
+            showPlaceholder("No Message Selected")
             return
         }
         guard messageID != currentID else { return }
+        hideStack()
         if messageID != rawID { endRaw() }  // another message shows formatted, as in MailMate
         scroll.contentView.scroll(to: .zero)  // a new message starts at its top
         scroll.reflectScrolledClipView(scroll.contentView)
@@ -572,6 +584,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     private func showPlaceholder(_ text: String) {
+        hideStack()
+        currentID = nil
         endRaw()
         renderGeneration += 1  // a page still being prepared doesn't show over this
         placeholder.stringValue = text
@@ -589,12 +603,86 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         linkPreview.isHidden = href?.isEmpty ?? true
     }
 
+    // MARK: Several messages
+
+    /// Several messages shown together, in place of the one (made when first needed).
+    private var stack: MessageStack?
+    private var stackShown = false
+    /// The stack's page's height as it last reported it (points).
+    private var stackHeight: CGFloat = 0
+
+    /// The selected messages, stacked (a new set from its top).
+    private func showStack(_ ids: [Int64]) {
+        if !stackShown {
+            endRaw()
+            hideFind()
+            renderGeneration += 1  // a page still being prepared doesn't show over this
+            (currentID, currentDetail, currentBody, attachments) = (nil, nil, nil, [])
+            partHandler.allowedMessageID = nil
+            header.update(fields: [], attachments: [], bar: nil)
+            webView.loadHTMLString("", baseURL: nil)
+            header.isHidden = true
+            webView.isHidden = true
+            placeholder.isHidden = true
+            scroll.isHidden = false
+            // Around the cards, the list's background, as MailMate's (tinted by the desktop as it is).
+            scroll.backgroundColor = .controlBackgroundColor
+            scroll.drawsBackground = true
+            stackShown = true
+        }
+        let stack = stack ?? makeStack()
+        stack.webView.isHidden = false
+        let before = stack.ids
+        stack.show(ids)
+        if stack.ids != before {
+            stackHeight = 0
+            scroll.contentView.scroll(to: .zero)
+        }
+        layoutDocument()
+    }
+
+    private func makeStack() -> MessageStack {
+        let stack = MessageStack(model: model)
+        stack.onHeight = { [weak self] height in
+            guard let self, stackShown, height != stackHeight else { return }
+            stackHeight = height
+            layoutDocument()
+        }
+        stack.webView.onHoverLink = { [weak self] in self?.showLinkPreview($0) }
+        stack.webView.isHidden = true
+        document.addSubview(stack.webView)
+        self.stack = stack
+        return stack
+    }
+
+    /// Back to one message (or none).
+    private func hideStack() {
+        guard stackShown else { return }
+        stackShown = false
+        scroll.drawsBackground = false
+        stack?.clear()
+        stack?.webView.isHidden = true
+        header.isHidden = false
+        webView.isHidden = false
+        showLinkPreview(nil)
+    }
+
+    #if DEBUG
+        var debugStackIDs: [Int64] { stackShown ? stack?.ids ?? [] : [] }
+        var debugStackHeight: CGFloat { stackShown ? stackHeight : -1 }
+        func debugStackCards() async -> String { await stack?.debugCards() ?? "-" }
+    #endif
+
     // MARK: Rendering
 
     private var currentSender: String? { currentDetail?.addresses(.from).first?.email }
 
     private var headerFields: [MessageHeaderView.Field] {
-        guard let detail = currentDetail else { return [] }
+        currentDetail.map(Self.fields(of:)) ?? []
+    }
+
+    /// A message's header fields, as shown above it (empty ones are left out when shown).
+    static func fields(of detail: MessageDetail) -> [MessageHeaderView.Field] {
         func list(_ role: AddressRole, groups: AddressRole? = nil) -> String {
             // Empty groups show by name, as MailMate shows "undisclosed-recipients".
             (detail.addresses(role).map { a in
@@ -814,7 +902,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     }
 
     /// The rules being compiled, until they're ready.
-    private static var preparingRules: Task<Void, Never>?
+    private(set) static var preparingRules: Task<Void, Never>?
 
     private static func compileBlockRules() async {
         let store = WKContentRuleListStore.default()

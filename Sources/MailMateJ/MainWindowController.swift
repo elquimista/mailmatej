@@ -222,14 +222,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         list.onToggleThread = { [weak self] row, collapse in self?.toggle(row, collapse: collapse) }
         // Showing a message marks it read, as in MailMate.
         messageView.onDisplay = { [weak self] id in
-            guard let self else { return }
-            recordInHistory(id)
-            guard let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
-            // The row turns read at once, and the counts; the store and the server follow.
-            list.showSeen(true, id: id)
-            correspondence.showSeen(true, id: id)
-            sidebar.adjustUnread(of: [id], by: -1)
-            model.perform(.markRead, on: [id]) { _ in false }
+            self?.recordInHistory(id)
+            self?.showRead(id)
         }
         correspondence.onToggleThread = { [weak self] row, collapse in
             self?.toggle(row, collapse: collapse, inCorrespondence: true)
@@ -275,7 +269,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: selection reported \(id ?? -1)") }
             #endif
             pendingCorrespondence = nil  // A new main selection starts the Correspondence pane fresh.
-            messageView.show(messageID: id, selectionCount: list.selectedIDs.count)
+            messageView.show(messageID: id, selection: list.selectedIDs)
             scheduleCorrespondenceUpdate(for: id)
             updateTitle()
         }
@@ -288,18 +282,15 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
         for messageList in [list, correspondence] {
             messageList.onShowInFinder = { [weak self] id in self?.model.showInFinder(messageId: id, window: self?.window) }
-            messageList.onOpen = { [weak self] id in  // a draft opens in a compose window, to go on with it
-                guard let self, (try? model.store.isDraft(id: id)) == true else { return }
-                model.openDraft(messageId: id, window: window)
-            }
+            messageList.onOpen = { [weak self] id in self?.open([id]) }  // a double-click
             messageList.addContextItems = { [weak self] menu, ids in self?.addMessageItems(to: menu, for: ids) }
             messageList.onToggleFlag = { [weak self] id, flag in self?.perform(flag ? .flag : .unflag, on: [id]) }
         }
         // As the main list's: nothing selected (a click on the pane's blank area) shows no message, as in
-        // MailMate, and several show how many.
+        // MailMate, and several show stacked.
         correspondence.onSelectionChange = { [weak self] id in
             guard let self else { return }
-            messageView.show(messageID: id, selectionCount: correspondence.selectedIDs.count)
+            messageView.show(messageID: id, selection: correspondence.selectedIDs)
         }
     }
 
@@ -499,7 +490,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             #endif
 
             if list.selectedIDs != before || reason == .scopeChanged {
-                messageView.show(messageID: restoredDisplay ?? list.selectedID, selectionCount: list.selectedIDs.count)
+                messageView.show(messageID: restoredDisplay ?? list.selectedID, selection: list.selectedIDs)
                 scheduleCorrespondenceUpdate(for: list.selectedID)
             }
             if reason == .scopeChanged {
@@ -1297,6 +1288,8 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         case #selector(archiveMessages(_:)), #selector(junkMessages(_:)), #selector(notJunkMessages(_:)), #selector(deleteMessages(_:)),
             #selector(moveToMailbox(_:)), #selector(flagMessages(_:)), #selector(unflagMessages(_:)):
             return !editing && !ids.isEmpty
+        case #selector(openMessages(_:)), #selector(openMessagesSeparately(_:)):
+            return !editing && !ids.isEmpty
         case #selector(toggleReadState(_:)):
             let marks = marks(of: ids)
             item.title = marks.count > 0 && !marks.anySeen ? "Mark as Read" : "Mark as Unread"
@@ -1507,7 +1500,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     private static let listStyleItem = NSToolbarItem.Identifier("listStyle")
     private static let searchItem = NSToolbarItem.Identifier("search")
 
-    private typealias ActionButton = (label: String, symbol: String, action: Selector)
+    typealias ActionButton = (label: String, symbol: String, action: Selector)
     /// The message buttons' symbols at MailMate's sizes (measured at 1x): 17 pt (archive 17 px wide,
     /// Reply All 22), but 16 pt for New Message and Mark as Read, which SF draws larger.
     private static let iconSize: CGFloat = 17
@@ -1516,7 +1509,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     /// MailMate's message buttons, in its order and groups, between back/forward and the list buttons.
-    private static let actionGroups: [(id: NSToolbarItem.Identifier, buttons: [ActionButton])] = [
+    static let actionGroups: [(id: NSToolbarItem.Identifier, buttons: [ActionButton])] = [
         (.init("mailboxActions"), [
             ("Archive", "archivebox", #selector(archiveMessages(_:))),
             ("Mark as Junk", "xmark.bin", #selector(junkMessages(_:))),
@@ -1575,7 +1568,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
     }
 
-    private static func toolbarButton(
+    static func toolbarButton(
         symbol: String, pointSize: CGFloat, weight: NSFont.Weight = .regular, label: String, width: CGFloat
     ) -> NSButton {
         let button = ToolbarIconButton()
@@ -1805,7 +1798,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
 
     @objc private func showFlagMenu(_ sender: NSButton) {
         let menu = NSMenu()
-        let ids = targetIDs
+        let ids = (sender as? ToolbarIconButton)?.messageIDs?() ?? targetIDs
         for (title, action) in [("Flag", AppModel.MessageAction.flag), ("Unflag", .unflag)] {
             let item = menu.addItem(withTitle: title, action: #selector(menuAction(_:)), keyEquivalent: "")
             item.target = self
@@ -1816,6 +1809,39 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     @objc private func menuAction(_ sender: NSMenuItem) { (sender.representedObject as? MenuAction)?.run() }
+
+    // MARK: Message windows
+
+    /// Showing a message marks it read, as in MailMate: the row turns read at once, and the counts; the
+    /// store and the server follow.
+    func showRead(_ id: Int64) {
+        guard let row = try? model.store.rows(ids: [id]).first, !row.isSeen else { return }
+        list.showSeen(true, id: id)
+        correspondence.showSeen(true, id: id)
+        sidebar.adjustUnread(of: [id], by: -1)
+        model.perform(.markRead, on: [id]) { _ in false }
+    }
+
+    /// File ▸ Open Message (⌘O), Return and Enter: MailMate's openMessages:, the selected messages in a
+    /// window of their own, several together.
+    @objc func openMessages(_ sender: Any?) { open(targetIDs) }
+
+    /// ⇧⌘O: each selected message in a window of its own, as MailMate's.
+    @objc func openMessagesSeparately(_ sender: Any?) { open(targetIDs, separately: true) }
+
+    /// Opens messages in a window of their own (a draft in a compose window, to go on with it).
+    private func open(_ ids: [Int64], separately: Bool = false) {
+        let drafts = Set(ids.filter { (try? model.store.isDraft(id: $0)) == true })
+        let messages = ids.filter { !drafts.contains($0) }
+        // A window each for more than MailMate shows together would be a flood of windows.
+        if separately, messages.count > MessageStackPage.maximum { return NSSound.beep() }
+        for id in ids where drafts.contains(id) { model.openDraft(messageId: id, window: window) }
+        if separately {
+            for id in messages { MessageWindowController.show([id], main: self, model: model) }
+        } else {
+            MessageWindowController.show(messages, main: self, model: model)
+        }
+    }
 
     // MARK: History
 
@@ -1877,8 +1903,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool { true }
 
     /// One toolbar item per group of MailMate's buttons, so the spacing can match: 40 pt from button
-    /// to button within a group, 46 pt between groups, symbols 15 px tall (measured at 1x).
-    private func actionGroupItem(_ id: NSToolbarItem.Identifier, _ buttons: [ActionButton]) -> NSToolbarItem {
+    /// to button within a group, 46 pt between groups, symbols 15 px tall (measured at 1x). The buttons
+    /// act on `ids` through `target`: the main window's own targets by default; a message window's
+    /// message, through that window.
+    func actionGroupItem(
+        _ id: NSToolbarItem.Identifier, _ buttons: [ActionButton], target: AnyObject? = nil, ids: (() -> [Int64])? = nil
+    ) -> NSToolbarItem {
+        let targetIDs = ids ?? { [weak self] in self?.targetIDs ?? [] }
         let views = buttons.map { b -> NSButton in
             let button = ToolbarIconButton()
             button.bezelStyle = .toolbar
@@ -1887,7 +1918,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 .withSymbolConfiguration(.init(pointSize: Self.iconSize(for: b.symbol), weight: .regular))
             button.imagePosition = .imageOnly
             button.toolTip = b.label
-            button.target = self
+            button.target = target ?? self
             button.action = b.action
             button.translatesAutoresizingMaskIntoConstraints = false
             button.widthAnchor.constraint(equalToConstant: 32).isActive = true
@@ -1900,6 +1931,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
             let button = Self.toolbarButton(symbol: "chevron.down", pointSize: 8, label: "Flag Options", width: 14)
             button.target = self
             button.action = #selector(showFlagMenu(_:))
+            (button as? ToolbarIconButton)?.messageIDs = targetIDs
             arranged.append(button)
             arrow = button
         }
@@ -1912,7 +1944,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         item.label = buttons.map(\.label).joined(separator: ", ")
         item.onValidate = { [weak self] in
             guard let self else { return }
-            let ids = targetIDs
+            let ids = targetIDs()
             let hasTarget = !ids.isEmpty
             let marks = marks(of: ids)
             for button in views {
@@ -1925,7 +1957,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
                 case #selector(reply(_:)), #selector(replyAll(_:)), #selector(forward(_:)):
                     button.isEnabled = ids.count == 1 && model.canCompose
                 case #selector(toggleFlag(_:)):
-                    let flagged = allFlagged(targetIDs)
+                    let flagged = allFlagged(ids)
                     button.toolTip = flagged ? "Unflag" : "Flag"
                     button.image = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: button.toolTip)?
                         .withSymbolConfiguration(.init(pointSize: Self.iconSize, weight: .regular))
@@ -1938,13 +1970,13 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         return item
     }
 
-    private func allFlagged(_ ids: [Int64]) -> Bool {
+    func allFlagged(_ ids: [Int64]) -> Bool {
         let marks = marks(of: ids)
         return marks.count > 0 && marks.allFlagged
     }
 
     /// What's marked among some messages, for the buttons and menus.
-    private struct SelectionMarks {
+    struct SelectionMarks {
         var count = 0, anySeen = false, anyUnread = false, allFlagged = true
     }
 
@@ -1952,7 +1984,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     /// times over (a selection can be tens of thousands); forgotten with every change.
     private var selectionMarks: (ids: [Int64], marks: SelectionMarks)?
 
-    private func marks(of ids: [Int64]) -> SelectionMarks {
+    func marks(of ids: [Int64]) -> SelectionMarks {
         if let cached = selectionMarks, cached.ids == ids { return cached.marks }
         var marks = SelectionMarks()
         for mark in (try? model.store.marks(ids: ids)) ?? [] {
@@ -2109,7 +2141,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     /// Archive, Junk and Delete take messages out of the list; select the next one, as MailMate does.
-    private func moveAway(_ action: AppModel.MessageAction, ids: [Int64]? = nil) {
+    func moveAway(_ action: AppModel.MessageAction, ids: [Int64]? = nil) {
         let ids = ids ?? targetIDs
         selectNextAfterMoving(ids)
         perform(action, on: ids)
@@ -2142,7 +2174,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         }
     }
 
-    private func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
+    func perform(_ action: AppModel.MessageAction, on ids: [Int64]) {
         guard !ids.isEmpty else { return }
         #if DEBUG
             if ProcessInfo.processInfo.environment["MMJ_DEBUG_TIMING"] != nil { NSLog("MMJ timing: action \(action) start") }
@@ -2196,7 +2228,7 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
         let remaining = list.ids.filter { !leaving.contains($0) }
         list.setIDs(remaining, selecting: selecting, scroll: list.followingScroll(to: remaining))
         if list.selectedIDs != before {  // the message pane follows the selection, as after a reload
-            messageView.show(messageID: list.selectedID, selectionCount: list.selectedIDs.count)
+            messageView.show(messageID: list.selectedID, selection: list.selectedIDs)
             scheduleCorrespondenceUpdate(for: list.selectedID)
         }
         updateTitle()
@@ -2301,6 +2333,10 @@ final class MenuAction: NSObject {
 /// A toolbar button in MailMate's two shades (measured at 1x on its 72 toolbar): icons at 196 when
 /// enabled, 111 when not. AppKit's own dimming of disabled images is off, so the shades are exact.
 final class ToolbarIconButton: NSButton {
+    /// The messages it acts on, where they aren't the main window's selection (Flag's menu arrow in a
+    /// message window).
+    var messageIDs: (() -> [Int64])?
+
     static let enabledColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.64) : NSColor(white: 0, alpha: 0.66)
     }
@@ -2432,6 +2468,16 @@ extension MainWindowController {
             case "s": NSSound.beep()  // Save draft: drafts aren't saved yet.
             default: return false
             }
+            return true
+        }
+        // Return and Enter open the selected messages (MailMate's openMessages:), from the lists or the
+        // message; the sidebar keeps Return for itself.
+        if modifiers.isEmpty, event.keyCode == 36 || event.keyCode == 76,
+            window.firstResponder === list.tableView || window.firstResponder === correspondence.tableView
+                || (window.firstResponder as? NSView)?.isDescendant(of: messageView.view) == true
+        {
+            pendingKey = nil
+            openMessages(nil)
             return true
         }
         // Backspace (⌫, labelled delete on Mac keyboards; key code 51) and forward delete (⌦, 117) delete,
@@ -2667,6 +2713,46 @@ extension MainWindowController {
                 let on = responds(to: item.action) ? validateMenuItem(item) : false
                 return "\(item.title)\(on ? "" : " (off)")"
             }.joined(separator: ", ")
+        }
+
+        /// Return in the list (or wherever `focus` puts the keyboard), as the key handler gets it, without
+        /// bringing the app forward; whether it was taken.
+        func debugReturn(focus: String = "list", row: Int = 0) -> Bool {
+            switch focus {
+            case "sidebar": sidebar.debugFocus()
+            case "message": window?.makeFirstResponder(messageView.messageKeyView)
+            default: window?.makeFirstResponder(list.tableView)
+            }
+            if row >= 0, list.selectedIDs.isEmpty || focus == "list" { selectRow(row) }
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window?.windowNumber ?? 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                isARepeat: false, keyCode: 36)
+            else { return false }
+            return handleKey(event)
+        }
+
+        /// Selects the list's rows in `rows` (as far as the list goes); the list's row count.
+        @discardableResult
+        func debugSelectRows(_ rows: Range<Int>) -> Int {
+            window?.makeFirstResponder(list.tableView)
+            list.tableView.selectRowIndexes(IndexSet(integersIn: rows.clamped(to: 0..<list.ids.count)), byExtendingSelection: false)
+            return list.ids.count
+        }
+
+        /// Stacks these messages in the pane, as a selection of them would; then each card as drawn.
+        func debugShowStack(_ ids: [Int64]) async -> String {
+            messageView.show(messageID: nil, selection: ids)
+            try? await Task.sleep(for: .seconds(4))
+            return await messageView.debugStackCards()
+        }
+
+        var debugStack: (ids: [Int64], height: CGFloat, showing: String) {
+            (messageView.debugStackIDs, messageView.debugStackHeight, messageView.debugShowing)
+        }
+
+        var debugSelectedRows: [(id: Int64, seen: Bool, flagged: Bool)] {
+            ((try? model.store.marks(ids: list.selectedIDs)) ?? []).map { ($0.id, $0.seen, $0.flagged) }
         }
 
         /// Presses keys as typed (each char a key; "^r" for ⌃R), 400 ms apart, logging the selection.

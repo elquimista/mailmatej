@@ -766,6 +766,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     windowController?.debugHeader(toggle: mode == "toggle")
                     try? await Task.sleep(for: .seconds(1))
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_STACK"], let controller = windowController {
+                    await debugStack(controller, rows: spec)
+                }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_OPEN_MESSAGE"] != nil, let controller = windowController {
+                    await debugOpenMessage(controller)
+                }
                 if let keys = ProcessInfo.processInfo.environment["MMJ_DEBUG_KEYS"] {
                     // Keys typed as a user would; "|filter" after a v or gl chooses in the mailbox picker.
                     for part in keys.split(separator: " ") {
@@ -1323,6 +1329,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        /// Captures this window only, to the snapshot path with `suffix` added.
+        private func capture(_ window: NSWindow?, _ suffix: String) {
+            guard let window, let path = ProcessInfo.processInfo.environment["MMJ_SNAPSHOT"] else { return }
+            let capture = Process()
+            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            capture.arguments = ["-x", "-o", "-l\(window.windowNumber)", path.replacingOccurrences(of: ".png", with: "-\(suffix).png")]
+            try? capture.run()
+            capture.waitUntilExit()
+        }
+
+        /// Several messages stacked in the pane (MMJ_DEBUG_STACK="<first>-<end>", list rows), captured; then
+        /// Return opens them in one window, captured; 150 selected leave the pane blank; 100 are timed,
+        /// counting the web processes. "ids:<id>,<id>…" stacks those messages and logs each card as drawn.
+        private func debugStack(_ controller: MainWindowController, rows spec: String) async {
+            if spec.hasPrefix("ids:") {
+                let ids = spec.dropFirst(4).split(separator: ",").compactMap { Int64($0) }
+                NSLog("MMJ stack cards: \(await controller.debugShowStack(ids))")
+                capture(controller.window, "cards")
+                return
+            }
+            let bounds = spec.split(separator: "-").compactMap { Int($0) }
+            guard bounds.count == 2 else { return }
+            func webProcesses() -> Int {
+                let ps = Process(), pipe = Pipe()
+                ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+                ps.arguments = ["-A", "-o", "comm="]
+                ps.standardOutput = pipe
+                try? ps.run()
+                let output = pipe.fileHandleForReading.readDataToEndOfFile()  // before waiting: a full pipe would block it
+                ps.waitUntilExit()
+                return String(decoding: output, as: UTF8.self).split(separator: "\n").filter { $0.contains("WebContent") }.count
+            }
+            let count = controller.debugSelectRows(bounds[0]..<bounds[1])
+            try? await Task.sleep(for: .seconds(3))
+            var stack = controller.debugStack
+            NSLog("MMJ stack: rows=\(count) shown=\(stack.ids) height=\(stack.height) \(stack.showing)")
+            capture(controller.window, "stack")
+            _ = controller.debugReturn(focus: "list", row: -1)
+            try? await Task.sleep(for: .seconds(3))
+            if let message = MessageWindowController.debugShown.first {
+                NSLog("MMJ stack window: “\(message.window?.title ?? "-")” ids=\(message.messageIDs) stacked=\(message.debugStackIDs)")
+                capture(message.window, "window")
+                message.close()
+            }
+            controller.debugSelectRows(0..<150)
+            try? await Task.sleep(for: .seconds(1))
+            stack = controller.debugStack
+            NSLog("MMJ stack 150: shown=\(stack.ids.count) \(stack.showing)")
+            let before = webProcesses()
+            let start = Date()
+            controller.debugSelectRows(0..<100)
+            var last: CGFloat = -1, steady = Date()
+            while Date().timeIntervalSince(start) < 30 {
+                try? await Task.sleep(for: .milliseconds(100))
+                let height = controller.debugStack.height
+                if height != last { last = height; steady = Date() }
+                if Date().timeIntervalSince(steady) > 2, height > 0 { break }
+            }
+            NSLog("MMJ stack 100: shown=\(controller.debugStack.ids.count) height=\(last) settled in \(String(format: "%.1f", steady.timeIntervalSince(start)))s web processes \(before)→\(webProcesses())")
+            capture(controller.window, "stack100")
+        }
+
+        /// Return on a message opens its window (not from the sidebar); its toolbar acts on it through the
+        /// main window (Flag shows in the list at once, Undo there takes it back); closing forgets it.
+        private func debugOpenMessage(_ controller: MainWindowController) async {
+            NSLog("MMJ open: Return in sidebar taken=\(controller.debugReturn(focus: "sidebar", row: -1)) windows=\(MessageWindowController.debugShown.count)")
+            let taken = controller.debugReturn(focus: "list", row: 0)
+            try? await Task.sleep(for: .seconds(2))
+            let shown = MessageWindowController.debugShown
+            NSLog("MMJ open: Return in list taken=\(taken) windows=\(shown.count) selected=\(controller.debugSelectedRows)")
+            guard let message = shown.first, let window = message.window else { return }
+            NSLog("MMJ open: window “\(window.title)” ids=\(message.messageIDs) \(message.debugShowing) frame=\(NSStringFromRect(window.frame)) visible=\(window.isVisible)")
+            window.toolbar?.validateVisibleItems()
+            let items = window.toolbar?.items.map { item -> String in
+                let buttons = (item.view as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSButton } ?? []
+                return "\(item.itemIdentifier.rawValue)[\(buttons.map { "\($0.toolTip ?? "?")\($0.isEnabled ? "" : " (off)")" }.joined(separator: ", "))]"
+            } ?? []
+            NSLog("MMJ open: toolbar \(items.joined(separator: " "))")
+            capture(window, "message")
+            message.toggleFlag(nil)
+            try? await Task.sleep(for: .seconds(1))
+            NSLog("MMJ open: after Flag selected=\(controller.debugSelectedRows) undo=\(window.undoManager?.undoActionName ?? "-") same=\(window.undoManager === controller.window?.undoManager)")
+            window.undoManager?.undo()
+            try? await Task.sleep(for: .seconds(1))
+            NSLog("MMJ open: after Undo selected=\(controller.debugSelectedRows)")
+            _ = controller.debugReturn(focus: "list", row: 0)
+            try? await Task.sleep(for: .milliseconds(500))
+            NSLog("MMJ open: Return again windows=\(MessageWindowController.debugShown.count)")
+            message.close()
+            try? await Task.sleep(for: .milliseconds(500))
+            NSLog("MMJ open: closed windows=\(MessageWindowController.debugShown.count)")
+        }
+
         private func writeSnapshot(of window: NSWindow?, to path: String) {
             guard let frameView = window?.contentView?.superview,
                 let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds)
@@ -1452,6 +1551,11 @@ enum MainMenu {
         // File, Edit and View grouped as MailMate groups them, with the commands MailMateJ has.
         let file = submenu(main, "File")
         file.addItem(withTitle: "New Message", action: #selector(MainWindowController.newMessage(_:)), keyEquivalent: "n")
+        file.addItem(withTitle: "Open Message", action: #selector(MainWindowController.openMessages(_:)), keyEquivalent: "o")
+        // With ⇧ (⇧⌘O), each message in a window of its own, as MailMate's.
+        let separately = file.addItem(withTitle: "Open Message", action: #selector(MainWindowController.openMessagesSeparately(_:)), keyEquivalent: "O")
+        separately.keyEquivalentModifierMask = [.command, .shift]
+        separately.isAlternate = true
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.addItem(.separator())

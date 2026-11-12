@@ -11,8 +11,15 @@ final class EmbeddedPartSchemeHandler: NSObject, WKURLSchemeHandler {
     private let model: AppModel
     private var stopped = Set<ObjectIdentifier>()
 
-    /// Only parts of the message on screen are served, so one message's HTML can't pull in another's.
-    var allowedMessageID: Int64?
+    /// Only parts of the messages on screen are served, so one message's HTML can't pull in another's
+    /// (in a stack of several, the others shown with it).
+    var allowedMessageIDs: Set<Int64> = []
+
+    /// The one message on screen.
+    var allowedMessageID: Int64? {
+        get { allowedMessageIDs.first }
+        set { allowedMessageIDs = newValue.map { [$0] } ?? [] }
+    }
 
     init(model: AppModel) {
         self.model = model
@@ -20,7 +27,7 @@ final class EmbeddedPartSchemeHandler: NSObject, WKURLSchemeHandler {
 
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
         let id = ObjectIdentifier(task)
-        guard let url = task.request.url, let messageId = url.host.flatMap(Int64.init), messageId == allowedMessageID
+        guard let url = task.request.url, let messageId = url.host.flatMap(Int64.init), allowedMessageIDs.contains(messageId)
         else {
             task.didFailWithError(URLError(.fileDoesNotExist))
             return
