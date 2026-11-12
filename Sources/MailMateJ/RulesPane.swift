@@ -26,6 +26,10 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
     private var actions: RuleActionEditor?
     private let conditionsLabel = NSTextField(labelWithString: "Conditions:")
     private let actionsLabel = NSTextField(labelWithString: "Actions:")
+    /// The conditions and actions, between the description and the buttons: a long rule scrolls there
+    /// instead of running under Revert and Commit.
+    private let editorsScroll = NSScrollView()
+    private let editors = EditorFlippedView()
     private let revertButton = NSButton(title: "Revert", target: nil, action: nil)
     private let commitButton = NSButton(title: "Commit", target: nil, action: nil)
     private var dirty = false {
@@ -101,6 +105,11 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
         commitButton.target = self
         commitButton.action = #selector(commitClicked)
         commitButton.keyEquivalent = "\r"
+        editorsScroll.drawsBackground = false
+        editorsScroll.hasVerticalScroller = true
+        editorsScroll.autohidesScrollers = true
+        editorsScroll.borderType = .noBorder
+        editorsScroll.documentView = editors
         descriptionField.delegate = self
         reload(select: nil)
     }
@@ -120,6 +129,26 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
         func debugSelect(row: Int) {
             table.selectRowIndexes([row], byExtendingSelection: false)
         }
+
+        /// Adds condition rows to the rule shown (as its + would); where the editors, the scroll view
+        /// and the buttons then are, and whether anything runs under the buttons.
+        func debugAddConditions(_ count: Int) -> String {
+            for i in 0..<count { conditions?.debugAddRow(text: "x\(i)") }
+            detail.layoutSubtreeIfNeeded()
+            guard let actions else { return "no rule" }
+            let actionsBottom = editors.convert(actions.frame, to: detail).maxY
+            let visibleBottom = editorsScroll.frame.maxY
+            return "scroll \(NSStringFromRect(editorsScroll.frame)) content \(Int(editors.frame.height)) actions bottom \(Int(actionsBottom))"
+                + " shown to \(Int(visibleBottom)) buttons top \(Int(commitButton.frame.minY + 6)) scrollable \(editors.frame.height > editorsScroll.contentSize.height)"
+        }
+
+        /// Scrolls the rule's editors to their end, as the scroll wheel would.
+        func debugScrollToEnd() {
+            editorsScroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, editors.frame.height - editorsScroll.contentSize.height)))
+            editorsScroll.reflectScrolledClipView(editorsScroll.contentView)
+        }
+
+        func debugRevert() { revertClicked() }
     #endif
 
     // MARK: Rules
@@ -234,6 +263,7 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
 
     private func showSelected() {
         detail.subviews.forEach { $0.removeFromSuperview() }
+        editors.subviews.forEach { $0.removeFromSuperview() }
         conditions = nil
         actions = nil
         bar.canRemove = selected != nil
@@ -260,9 +290,9 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
         conditionsLabel.sizeToFit()
         actionsLabel.sizeToFit()
         for b in [revertButton, commitButton] { b.sizeToFit() }
-        for v in [label, descriptionField, conditionsLabel, conditionsEditor, actionsLabel, actionsEditor, revertButton, commitButton] as [NSView] {
-            detail.addSubview(v)
-        }
+        for v in [label, descriptionField, editorsScroll, revertButton, commitButton] as [NSView] { detail.addSubview(v) }
+        for v in [conditionsLabel, conditionsEditor, actionsLabel, actionsEditor] as [NSView] { editors.addSubview(v) }
+        editorsScroll.contentView.scroll(to: .zero)
         descriptionLabel = label
         conditions = conditionsEditor
         actions = actionsEditor
@@ -275,24 +305,30 @@ final class RulesPane: NSObject, EditorPane, NSOutlineViewDataSource, NSOutlineV
     /// MailMate's positions in the box (measured at 1x): labels 20 pt in; the editors 20 pt in to 28 pt
     /// from the right; the description field from 103 pt, its top 21 pt down; "Conditions:" 52 pt down,
     /// its editor 73; "Actions:" 15 pt under that editor, its editor 33; Revert and Commit 20 pt up from
-    /// the bottom.
+    /// the bottom. The labels and editors are in a scroll view from under the description to above the
+    /// buttons (at the same places in it), so however many rows a rule has, they scroll there.
     private func layoutDetail() {
         guard let conditions, let actions, let descriptionLabel else { return }
         let width = detail.bounds.width
         descriptionField.frame = NSRect(x: 102, y: 19, width: width - 102 - 27, height: 21)
         descriptionLabel.frame.origin = NSPoint(x: 16, y: 21)
-        conditionsLabel.frame.origin = NSPoint(x: 16, y: 48)
-        conditions.frame = NSRect(x: 19, y: 72, width: width - 19 - 27, height: conditions.frame.height)
-        actionsLabel.frame.origin = NSPoint(x: 16, y: conditions.frame.maxY + 8)
-        actions.frame = NSRect(x: 19, y: conditions.frame.maxY + 32, width: width - 19 - 27, height: actions.frame.height)
         commitButton.frame.size.width = max(commitButton.frame.width, 70)
         revertButton.frame.size.width = max(revertButton.frame.width, 62)
         let buttonY = detail.bounds.height - 20 - commitButton.frame.height + 8
         commitButton.frame.origin = NSPoint(x: width - 27 - commitButton.frame.width + 7, y: buttonY)
         revertButton.frame.origin = NSPoint(x: commitButton.frame.minX - 9 - revertButton.frame.width + 4, y: buttonY)
+        // From the description's bottom to the buttons' top (their bezels, 6 pt inside their frames).
+        let top: CGFloat = 44
+        editorsScroll.frame = NSRect(x: 0, y: top, width: width, height: max(0, buttonY + 6 - 8 - top))
+        conditionsLabel.frame.origin = NSPoint(x: 16, y: 48 - top)
+        conditions.frame = NSRect(x: 19, y: 72 - top, width: width - 19 - 27, height: conditions.frame.height)
+        actionsLabel.frame.origin = NSPoint(x: 16, y: conditions.frame.maxY + 8)
+        actions.frame = NSRect(x: 19, y: conditions.frame.maxY + 32, width: width - 19 - 27, height: actions.frame.height)
+        editors.frame = NSRect(x: 0, y: 0, width: width, height: actions.frame.maxY + 1)
         // As in MailMate, they follow the window's width: the description and the condition and action
-        // tables stretch, the buttons keep to the right edge.
-        for view in [descriptionField, conditions, actions] as [NSView] { view.autoresizingMask = [.width] }
+        // tables stretch, the buttons keep to the right edge; the scroll view takes the height.
+        for view in [descriptionField, conditions, actions, editors] as [NSView] { view.autoresizingMask = [.width] }
+        editorsScroll.autoresizingMask = [.width, .height]
         commitButton.autoresizingMask = [.minXMargin, .minYMargin]
         revertButton.autoresizingMask = [.minXMargin, .minYMargin]
     }

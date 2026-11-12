@@ -184,6 +184,8 @@ final class MailboxEditorWindowController: NSWindowController, NSToolbarDelegate
         static func debugMoveSidebar(_ spec: String) { shared?.sidebar.debugMove(spec) }
 
         static func debugPressAddRule() { (shared?.content.debugPane as? RulesPane)?.debugPressAdd() }
+        static var debugRules: RulesPane? { shared?.content.debugPane as? RulesPane }
+        static var debugWindow: NSWindow? { shared?.window }
 
         static func debugClickAddRule() { (shared?.content.debugPane as? RulesPane)?.debugClickAdd() }
 

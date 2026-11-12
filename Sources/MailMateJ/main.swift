@@ -1069,6 +1069,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         MailboxEditorWindowController.debugSelectRule(row: row)
                         try? await Task.sleep(for: .milliseconds(500))
                     }
+                    // MMJ_DEBUG_RULE_CONDITIONS=<n>: that many more conditions on the rule shown: the editors
+                    // scroll between the description and the buttons (captured at the top and the end); reverted.
+                    if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_RULE_CONDITIONS"] ?? ""),
+                        let rules = MailboxEditorWindowController.debugRules
+                    {
+                        NSLog("MMJ rule layout: \(rules.debugAddConditions(count))")
+                        try? await Task.sleep(for: .milliseconds(500))
+                        capture(MailboxEditorWindowController.debugWindow, "rules")
+                        rules.debugScrollToEnd()
+                        try? await Task.sleep(for: .milliseconds(500))
+                        capture(MailboxEditorWindowController.debugWindow, "rules-end")
+                        rules.debugRevert()
+                        NSLog("MMJ rule layout after Revert: \(rules.debugAddConditions(0))")
+                    }
                     if let count = Int(ProcessInfo.processInfo.environment["MMJ_DEBUG_TAB"] ?? "") {
                         MailboxEditorWindowController.debugTab(count: count)  // Tab through the editor's fields
                     }
