@@ -2148,14 +2148,22 @@ final class MainWindowController: NSWindowController, NSToolbarDelegate, NSToolb
     }
 
     private func selectNextAfterMoving(_ ids: [Int64]) {
-        guard ids == list.selectedIDs else { return }
-        let selected = Set(ids)
-        let rows = list.ids.indices.filter { selected.contains(list.ids[$0]) }
-        if let last = rows.last, let first = rows.first,
-            let next = list.ids[(last + 1)...].first(where: { !selected.contains($0) }) ?? list.ids[..<first].last
-        {
-            selectAfterMove = (next, selected)
-        }
+        guard ids == list.selectedIDs, let next = Self.message(after: ids, in: list.ids) else { return }
+        selectAfterMove = (next, Set(ids))
+    }
+
+    /// The message that comes after `ids` in the list (else the one before), as the main list selects
+    /// after moving them away; the Correspondence list's when they're there. For a message window, which
+    /// shows it next.
+    func message(after ids: [Int64]) -> Int64? {
+        Self.message(after: ids, in: list.ids) ?? Self.message(after: ids, in: correspondence.ids)
+    }
+
+    private static func message(after ids: [Int64], in listed: [Int64]) -> Int64? {
+        let moved = Set(ids)
+        let rows = listed.indices.filter { moved.contains(listed[$0]) }
+        guard let last = rows.last, let first = rows.first else { return nil }
+        return listed[(last + 1)...].first(where: { !moved.contains($0) }) ?? listed[..<first].last
     }
 
     /// Moves the messages into a mailbox: as usual within its account, and for messages of other accounts
@@ -2746,6 +2754,8 @@ extension MainWindowController {
             try? await Task.sleep(for: .seconds(4))
             return await messageView.debugStackCards()
         }
+
+        var debugMessageView: MessageViewController { messageView }
 
         var debugStack: (ids: [Int64], height: CGFloat, showing: String) {
             (messageView.debugStackIDs, messageView.debugStackHeight, messageView.debugShowing)

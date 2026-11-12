@@ -15,6 +15,8 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
     private let partHandler: EmbeddedPartSchemeHandler
     /// The page's height changed (points).
     var onHeight: (CGFloat) -> Void = { _ in }
+    /// The page or a message's content loaded (what's marked goes on it too).
+    var onContentLoaded: () -> Void = {}
 
     /// The messages shown, oldest first.
     private(set) var ids: [Int64] = []
@@ -47,6 +49,9 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
         let scripts = config.userContentController
         scripts.addUserScript(WKUserScript(
             source: MessageViewController.heightScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
+        // The single message's marking, then the stack's own over it (every card's fields and content).
+        scripts.addUserScript(WKUserScript(
+            source: MessageViewController.markScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         scripts.addUserScript(WKUserScript(source: Self.pageScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         scripts.addUserScript(WKUserScript(source: Self.frameScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false, in: .defaultClient))
         scripts.add(WeakMessageHandler(self), contentWorld: .defaultClient, name: "mmjHeight")
@@ -71,7 +76,8 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
         for id in ordered {
             guard let detail = try? model.store.detail(id: id) else { continue }
             accounts[id] = detail.accountId
-            cards.append(MessageStackPage.Card(id: id, fields: MessageViewController.fields(of: detail).map { ($0.label, $0.value) }))
+            let fields = MessageViewController.fields(of: detail).map { MessageStackPage.Field($0.label, $0.value, searched: $0.searched) }
+            cards.append(MessageStackPage.Card(id: id, fields: fields))
         }
         page = MessageStackPage.html(cards: cards, detailsOpen: UserDefaults.standard.bool(forKey: "RemoteContentDetailsShown"))
         webView.resetHover()
@@ -257,6 +263,7 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
                 if let height = (message.body as? NSNumber)?.doubleValue { onHeight(min(CGFloat(height) * webView.magnification, 2_000_000)) }
                 return
             }
+            if (message.body as? [String: Any])?["action"] as? String == "loaded" { return onContentLoaded() }
             guard let body = message.body as? [String: Any], let id = (body["id"] as? NSNumber)?.int64Value, ids.contains(id),
                 let action = body["action"] as? String
             else { return }
@@ -287,6 +294,10 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
     }
 
     // MARK: Navigation
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if !ids.isEmpty { onContentLoaded() }
+    }
 
     func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -343,6 +354,45 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
             const id = cardOf(e), file = e.target.closest && e.target.closest('mmj-file');
             if (id !== null && file) post({ id, action: 'open', index: Number(file.dataset.i) });
           }, true);
+          // What a search or Find marks, card by card: the fields (all of them for Find, not the Date for a
+          // search, as the single message's header), then the content. One numbering for the whole stack.
+          const contentOf = (card) => {
+            const f = card.querySelector(':scope > iframe'), d = f && f.contentDocument;
+            return d ? d.querySelector('mmj-content') : null;
+          };
+          window.mmjMark = (terms, joinSpaced) => {
+            mmjUnmark(document);
+            const cards = [...document.querySelectorAll('mmj-card')];
+            for (const card of cards) { const root = contentOf(card); if (root) mmjUnmark(root.ownerDocument); }
+            if (!terms.length) return 0;
+            let count = 0;
+            for (const card of cards) {
+              for (const row of card.querySelectorAll(':scope > table tr')) {
+                if (joinSpaced && row.hasAttribute('data-nosearch')) continue;
+                if (row.cells[1]) count += mmjMarkIn(row.cells[1], terms, joinSpaced, count);
+              }
+              const root = contentOf(card);
+              if (root) count += mmjMarkIn(root, terms, joinSpaced, count);
+            }
+            return count;
+          };
+          // Find's current match, in the page or a frame; its top and bottom on the page.
+          window.mmjCurrent = (n) => {
+            let top = Infinity, bottom = -Infinity;
+            const visit = (doc, dy) => {
+              for (const mark of doc.querySelectorAll('mmj-mark')) {
+                const on = mark.dataset.n === String(n);
+                mark.toggleAttribute('current', on);
+                if (on) { const b = mark.getBoundingClientRect(); top = Math.min(top, b.top + dy); bottom = Math.max(bottom, b.bottom + dy); }
+              }
+            };
+            visit(document, window.scrollY);
+            for (const card of document.querySelectorAll('mmj-card')) {
+              const root = contentOf(card);
+              if (root) visit(root.ownerDocument, card.querySelector(':scope > iframe').getBoundingClientRect().top + window.scrollY);
+            }
+            return top === Infinity ? null : [top, bottom];
+          };
         })();
         """
 
@@ -365,6 +415,7 @@ final class MessageStack: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, 
           if (document.body) observer.observe(document.body);
           document.addEventListener('load', schedule, true);
           schedule();
+          window.webkit.messageHandlers.mmjStack.postMessage({ action: 'loaded' });
         })();
         """
 }

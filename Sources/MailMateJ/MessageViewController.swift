@@ -21,7 +21,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// two change places at once.
     private var rawView: MessageWebView!
     /// The web view on screen: the raw source's while it shows, else the message's.
-    private var shownWebView: MessageWebView { rawShown ? rawView : webView }
+    private var shownWebView: MessageWebView { rawShown ? rawView : stackShown ? stack?.webView ?? webView : webView }
     private let header = MessageHeaderView()
     private let scroll = MessageScrollView()
     private let document = FlippedView()
@@ -204,7 +204,9 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     /// marks of the same `group` only spaces part are joined into one, within a block. Returns how many
     /// places it marked; each place's marks are numbered (`data-n`) for `mmjCurrent(n)`, which makes
     /// place `n` Find's current one (yellow; -1 for none) and returns its top and bottom on the page.
-    private static let markScript = """
+    /// `mmjMarkIn(root, terms, joinSpaced, first)` marks within one element of any document (a stack's
+    /// header value or a message's frame), numbering from `first`; `mmjUnmark(document)` clears one.
+    static let markScript = """
         window.mmjCurrent = (n) => {
           let top = Infinity, bottom = -Infinity;
           for (const mark of document.querySelectorAll('mmj-mark')) {
@@ -214,12 +216,18 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
           }
           return top === Infinity ? null : [top, bottom];
         };
-        window.mmjMark = (terms, joinSpaced) => {
+        window.mmjUnmark = (doc) => {
           const parents = new Set();
-          for (const mark of document.querySelectorAll('mmj-mark')) { parents.add(mark.parentNode); mark.replaceWith(...mark.childNodes); }
+          for (const mark of doc.querySelectorAll('mmj-mark')) { parents.add(mark.parentNode); mark.replaceWith(...mark.childNodes); }
           parents.forEach(p => p.normalize());
+        };
+        window.mmjMark = (terms, joinSpaced) => {
+          mmjUnmark(document);
           const root = document.querySelector('mmj-content');
-          if (!root || !terms.length) return 0;
+          return root && terms.length ? mmjMarkIn(root, terms, joinSpaced, 0) : 0;
+        };
+        window.mmjMarkIn = (root, terms, joinSpaced, first) => {
+          const doc = root.ownerDocument;
           const fold = (s) => {
             let out = '';
             for (let i = 0; i < s.length; i++) {
@@ -240,7 +248,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
           };
           const nodes = [];
           let text = '', lastBlock = null;
-          const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+          const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
             acceptNode: n => n.nodeType === 1 && skipped.has(n.tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
           for (let n = walker.nextNode(); n; n = walker.nextNode()) {
             if (n.nodeType === 1) { if (n.tagName === 'BR') text += '\\u2029'; continue; }
@@ -282,8 +290,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
               if (y <= x) continue;
               const part = x > 0 ? node.splitText(x) : node;
               if (y - x < part.data.length) part.splitText(y - x);
-              const mark = document.createElement('mmj-mark');
-              mark.dataset.n = r;
+              const mark = doc.createElement('mmj-mark');
+              mark.dataset.n = first + r;
               part.replaceWith(mark);
               mark.appendChild(part);
             }
@@ -346,8 +354,8 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     var findKeyView: NSView { findBar.field }
     var messageKeyView: NSView { shownWebView }
 
-    /// Whether a message is shown (Find has something to look in).
-    var showsMessage: Bool { currentID != nil }
+    /// Whether a message is shown, or several (Find has something to look in).
+    var showsMessage: Bool { currentID != nil || stackShown }
 
     #if DEBUG
         /// The page's height as laid out, and scrolls to its end (for the raw source's last lines).
@@ -363,6 +371,14 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
             findBar.field.stringValue = text
             find(text)
         }
+
+        /// Find's state: matches, the current one, and how far down the message is scrolled.
+        var debugFindState: String {
+            "matches=\(header.markCount + textMatches) current=\(findIndex) scrolled=\(Int(scroll.contentView.bounds.minY)) of \(Int(document.frame.height))"
+        }
+
+        /// What a search for `text` marks.
+        func debugHighlight(_ text: String) { highlights = text.isEmpty ? [] : [SearchHighlight(text)] }
 
         /// A remote-content bar button's action, as clicking it does.
         func debugBarAction(_ action: MessagePage.Action) { perform(action) }
@@ -423,7 +439,13 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         {
             return use((editor.string as NSString).substring(with: editor.selectedRange()))
         }
-        shownWebView.callAsyncJavaScript("return window.getSelection().toString();", arguments: [:], in: nil, in: .defaultClient) { result in
+        // The page's selection, or a stacked message's (in its frame).
+        let selection = """
+            let text = window.getSelection().toString();
+            for (const f of document.querySelectorAll('iframe')) { if (text) break; text = f.contentDocument ? f.contentWindow.getSelection().toString() : ''; }
+            return text;
+            """
+        shownWebView.callAsyncJavaScript(selection, arguments: [:], in: nil, in: .defaultClient) { result in
             use((try? result.get()) as? String ?? "")
         }
     }
@@ -615,7 +637,6 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
     private func showStack(_ ids: [Int64]) {
         if !stackShown {
             endRaw()
-            hideFind()
             renderGeneration += 1  // a page still being prepared doesn't show over this
             (currentID, currentDetail, currentBody, attachments) = (nil, nil, nil, [])
             partHandler.allowedMessageID = nil
@@ -643,6 +664,7 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
 
     private func makeStack() -> MessageStack {
         let stack = MessageStack(model: model)
+        stack.onContentLoaded = { [weak self] in self?.scheduleStackMarks() }
         stack.onHeight = { [weak self] height in
             guard let self, stackShown, height != stackHeight else { return }
             stackHeight = height
@@ -654,6 +676,20 @@ final class MessageViewController: NSViewController, WKNavigationDelegate, WKScr
         self.stack = stack
         return stack
     }
+
+    /// Marks what the search or Find marks on the stack again once more of it has loaded (its messages'
+    /// content comes as each is ready), a moment after the last load, not once per message.
+    private func scheduleStackMarks() {
+        guard stackShown, !highlights.isEmpty || findText != nil, !stackMarksPending else { return }
+        stackMarksPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            stackMarksPending = false
+            if stackShown { markText(revealing: false) }
+        }
+    }
+
+    private var stackMarksPending = false
 
     /// Back to one message (or none).
     private func hideStack() {

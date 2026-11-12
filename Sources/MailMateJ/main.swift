@@ -769,6 +769,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_STACK"], let controller = windowController {
                     await debugStack(controller, rows: spec)
                 }
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_STACK_FIND"], let controller = windowController {
+                    await debugStackFind(controller, rows: spec)
+                }
+                if ProcessInfo.processInfo.environment["MMJ_DEBUG_WINDOW_NEXT"] != nil, let controller = windowController {
+                    await debugWindowNext(controller)
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_OPEN_MESSAGE"] != nil, let controller = windowController {
                     await debugOpenMessage(controller)
                 }
@@ -1389,6 +1395,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             NSLog("MMJ stack 100: shown=\(controller.debugStack.ids.count) height=\(last) settled in \(String(format: "%.1f", steady.timeIntervalSince(start)))s web processes \(before)→\(webProcesses())")
             capture(controller.window, "stack100")
+        }
+
+        /// Find and a search's marks on a stack (MMJ_DEBUG_STACK_FIND="<first>-<end>|<find>|<search>"): Find's
+        /// matches across the cards, Find Next moving down them (captured), then the search's marks.
+        private func debugStackFind(_ controller: MainWindowController, rows spec: String) async {
+            let parts = spec.split(separator: "|").map(String.init)
+            let bounds = parts[0].split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3, bounds.count == 2 else { return }
+            let view = controller.debugMessageView
+            controller.debugSelectRows(bounds[0]..<bounds[1])
+            try? await Task.sleep(for: .seconds(3))
+            view.debugFind(parts[1])
+            try? await Task.sleep(for: .seconds(1))
+            NSLog("MMJ stack find “\(parts[1])”: \(view.debugFindState)")
+            for step in 1...7 {
+                view.findNext(forward: true)
+                try? await Task.sleep(for: .milliseconds(600))
+                NSLog("MMJ stack find next \(step): \(view.debugFindState)")
+            }
+            capture(controller.window, "find")
+            view.findNext(forward: false)
+            try? await Task.sleep(for: .milliseconds(600))
+            NSLog("MMJ stack find previous: \(view.debugFindState)")
+            view.hideFind()
+            view.debugHighlight(parts[2])
+            try? await Task.sleep(for: .seconds(1))
+            capture(controller.window, "search")
+            view.debugHighlight("")
+        }
+
+        /// Archive in a message window shows the next message (the one after it in the list); Undo puts it back.
+        private func debugWindowNext(_ controller: MainWindowController) async {
+            _ = controller.debugReturn(focus: "list", row: 0)
+            try? await Task.sleep(for: .seconds(2))
+            guard let message = MessageWindowController.debugShown.first, let window = message.window else { return NSLog("MMJ next: no window") }
+            let before = (message.messageIDs, window.title)
+            message.archiveMessages(nil)
+            try? await Task.sleep(for: .seconds(2))
+            NSLog("MMJ next: archived \(before.0) “\(before.1)” → window shows \(message.messageIDs) “\(window.title)” \(message.debugShowing) open=\(window.isVisible) list selected=\(controller.debugSelectedRows.map(\.id))")
+            window.undoManager?.undo()
+            try? await Task.sleep(for: .seconds(2))
+            NSLog("MMJ next: after Undo list selected=\(controller.debugSelectedRows.map(\.id))")
+            message.close()
         }
 
         /// Return on a message opens its window (not from the sidebar); its toolbar acts on it through the

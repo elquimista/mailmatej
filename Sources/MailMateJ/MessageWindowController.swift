@@ -12,7 +12,7 @@ final class MessageWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// The windows open, kept while they show.
     private static var shown: [MessageWindowController] = []
 
-    let messageIDs: [Int64]
+    private(set) var messageIDs: [Int64]
     private weak var main: MainWindowController?
     private let model: AppModel
     private let messageView: MessageViewController
@@ -44,13 +44,8 @@ final class MessageWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.toolbarStyle = .expanded  // Title row above the toolbar, as in MailMate.
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
-        if ids.count == 1 {
-            let subject = (try? model.store.rows(ids: ids).first?.subject) ?? ""
-            window.title = subject.isEmpty ? "(no subject)" : subject
-        } else {
-            window.title = "\(ids.count) messages selected"  // MailMate's words for several
-        }
         super.init(window: window)
+        updateTitle()
         window.delegate = self
         window.contentViewController = messageView
         place(window)
@@ -67,6 +62,16 @@ final class MessageWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The subject, or how many for several (MailMate's words).
+    private func updateTitle() {
+        if messageIDs.count == 1 {
+            let subject = (try? model.store.rows(ids: messageIDs).first?.subject) ?? ""
+            window?.title = subject.isEmpty ? "(no subject)" : subject
+        } else {
+            window?.title = "\(messageIDs.count) messages selected"
+        }
+    }
 
     /// Where the last message window was left, the next one a step down and right of any still open.
     private func place(_ window: NSWindow) {
@@ -132,8 +137,7 @@ final class MessageWindowController: NSWindowController, NSWindowDelegate, NSToo
         _ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         if let group = MainWindowController.actionGroups.first(where: { $0.id == id }) {
-            let messageIDs = messageIDs
-            return main?.actionGroupItem(id, group.buttons, target: self, ids: { messageIDs })
+            return main?.actionGroupItem(id, group.buttons, target: self, ids: { [weak self] in self?.messageIDs ?? [] })
         }
         guard id == Self.quickLookItem else { return nil }
         let button = MainWindowController.toolbarButton(symbol: "eye", pointSize: 17, label: "Quick Look", width: 32)
@@ -150,15 +154,21 @@ final class MessageWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     // MARK: Commands
 
-    /// Archive, Junk and Delete move the messages away, and the window closes.
+    /// Archive, Junk and Delete move the messages away and show the next one, as MailMate's: the one
+    /// after them in the list they're in (else the one before). With none there, the window closes.
     @objc func archiveMessages(_ sender: Any?) { moveAway(.archive) }
     @objc func junkMessages(_ sender: Any?) { moveAway(.junk) }
     @objc func deleteMessages(_ sender: Any?) { moveAway(.delete) }
 
     private func moveAway(_ action: AppModel.MessageAction) {
         guard let main else { return NSSound.beep() }
+        let next = main.message(after: messageIDs)
         main.moveAway(action, ids: messageIDs)
-        close()
+        guard let next else { return close() }
+        messageIDs = [next]
+        updateTitle()
+        messageView.show(messageID: next, selection: [next])
+        window?.toolbar?.validateVisibleItems()
     }
 
     @objc func reply(_ sender: Any?) { compose(.reply) }

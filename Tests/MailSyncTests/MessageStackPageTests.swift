@@ -8,10 +8,11 @@ import Testing
     /// content; the page itself loads nothing but those frames.
     @Test func cardsHoldTheFieldsAndAFrameEach() {
         let page = MessageStackPage.html(cards: [
-            .init(id: 7, fields: [("From:", "Ann <ann@x.com>"), ("Subject:", "Hi"), ("Cc:", "")]),
-            .init(id: 9, fields: [("From:", "Bob")]),
+            .init(id: 7, fields: [.init("From:", "Ann <ann@x.com>"), .init("Date:", "Today", searched: false), .init("Cc:", "")]),
+            .init(id: 9, fields: [.init("From:", "Bob")]),
         ], detailsOpen: false)
-        #expect(page.contains("<td>From:</td><td>Ann &lt;ann@x.com&gt;</td>"))
+        #expect(page.contains("<tr><td>From:</td><td>Ann &lt;ann@x.com&gt;</td></tr>"))
+        #expect(page.contains("<tr data-nosearch><td>Date:</td><td>Today</td></tr>"))  // a search doesn't mark it
         #expect(!page.contains("Cc:"))
         #expect(page.range(of: "id=\"c7\"")!.lowerBound < page.range(of: "id=\"c9\"")!.lowerBound)
         #expect(page.contains("src=\"mmj-stack://stack/m/7/0\""))

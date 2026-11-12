@@ -32,12 +32,25 @@ public enum MessageStackPage {
 
     public struct Card: Sendable {
         public var id: Int64
-        /// Label and value, the empty ones left out.
-        public var fields: [(label: String, value: String)]
+        /// The header fields, the empty ones left out.
+        public var fields: [Field]
 
-        public init(id: Int64, fields: [(label: String, value: String)]) {
+        public init(id: Int64, fields: [Field]) {
             self.id = id
             self.fields = fields.filter { !$0.value.isEmpty }
+        }
+    }
+
+    public struct Field: Sendable {
+        public var label: String
+        public var value: String
+        /// Whether a search looks at it, so marks what it finds there (not the Date; Find does).
+        public var searched: Bool
+
+        public init(_ label: String, _ value: String, searched: Bool = true) {
+            self.label = label
+            self.value = value
+            self.searched = searched
         }
     }
 
@@ -68,7 +81,9 @@ public enum MessageStackPage {
     }
 
     static func card(_ card: Card) -> String {
-        let rows = card.fields.map { "<tr><td>\(MessagePage.escape($0.label))</td><td>\(MessagePage.escape($0.value))</td></tr>" }
+        let rows = card.fields.map { field in
+            "<tr\(field.searched ? "" : " data-nosearch")><td>\(MessagePage.escape(field.label))</td><td>\(MessagePage.escape(field.value))</td></tr>"
+        }
         return "<mmj-card id=\"c\(card.id)\"><table>\(rows.joined())</table><hr><mmj-extras></mmj-extras>"
             + "<iframe id=\"f\(card.id)\" src=\"\(frameURL(id: card.id, generation: 0))\"></iframe></mmj-card>"
     }
