@@ -403,6 +403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             shot += 1
                             writeSnapshot(of: compose?.window, to: path.replacingOccurrences(of: ".png", with: "-c\(shot).png"))
                         case "send": compose?.sendMessage(nil)
+                        case let kind where kind.hasPrefix("paste="): compose?.debugPaste(String(kind.dropFirst(6)))
+                        case "markdown", "plain": compose?.debugFormat(markdown: step == "markdown")
                         case let wait where wait.hasPrefix("wait="): try? await Task.sleep(for: .seconds(Double(wait.dropFirst(5)) ?? 1))
                         default: NSLog("MMJ sigcompose: no step \(step)")
                         }

@@ -200,6 +200,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
             self?.withAttachmentFiles([row]) { urls in urls.forEach { NSWorkspace.shared.open($0) } }
         }
         textView.onDropFiles = { [weak self] urls, index in self?.drop(urls, at: index) }
+        textView.onPaste = { [weak self] in self?.paste($0) }
 
         let content = FileDropView()
         content.onDropFiles = { [weak self] in self?.attach($0) }
@@ -614,10 +615,12 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// name, as in MailMate.
     /// Files dropped on the text: in Markdown, pictures are embedded where they're dropped, as MailMate does
     /// (`![](cid:… "name")`, the picture sent inline with that Content-ID); anything else is attached.
-    private func drop(_ urls: [URL], at index: Int) {
-        guard isMarkdown else { return attach(urls) }
+    /// `selection`: pasted over it (a picture's reference replaces the text selected); `namesSubject`: an
+    /// empty subject takes the first file's name (not a pasted picture's).
+    private func drop(_ urls: [URL], at index: Int, replacing selection: NSRange? = nil, namesSubject: Bool = true) {
+        guard isMarkdown else { return attach(urls, namesSubject: namesSubject) }
         let pictures = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
-        attach(urls)
+        attach(urls, namesSubject: namesSubject)
         guard !pictures.isEmpty else { return }
         let domain = chosenFrom?.email?.split(separator: "@").last
             .map(String.init) ?? "mailmatej.local"
@@ -629,12 +632,35 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         let text = references.joined(separator: "\n\n")
         let location = min(index, (textView.string as NSString).length)
-        textView.setSelectedRange(NSRange(location: location, length: 0))
-        textView.insertText(text, replacementRange: NSRange(location: location, length: 0))  // undoable, as typing
+        let range = selection.map { NSIntersectionRange($0, NSRange(location: 0, length: (textView.string as NSString).length)) }
+            ?? NSRange(location: location, length: 0)
+        textView.setSelectedRange(range)
+        textView.insertText(text, replacementRange: range)  // undoable, as typing
         window?.makeFirstResponder(textView)
     }
 
-    private func attach(_ urls: [URL]) {
+    /// Edit ▸ Paste of files or a picture: attached where pasted, as if dropped there. A picture is saved
+    /// first, under the name MailMate gives it (PastedImage.png).
+    private func paste(_ pasted: ComposeTextView.Pasted) {
+        let selection = textView.selectedRange()
+        switch pasted {
+        case .files(let urls):
+            drop(urls, at: selection.location, replacing: selection)
+        case .image(let data, let name):
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Compose/Pasted", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let url = folder.appendingPathComponent(name)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try data.write(to: url)
+            } catch {
+                return NSSound.beep()
+            }
+            drop([url], at: selection.location, replacing: selection, namesSubject: false)
+        }
+    }
+
+    private func attach(_ urls: [URL], namesSubject: Bool = true) {
         let new = urls.filter { url in
             var isDirectory: ObjCBool = false
             return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
@@ -642,7 +668,7 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         guard !new.isEmpty else { return }
         files += new
-        if subjectField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+        if namesSubject, subjectField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
             subjectField.stringValue = new[0].lastPathComponent
             updateTitle()
         }
@@ -1313,6 +1339,64 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Brings forward the window editing a draft, if one is.
     #if DEBUG
         /// The compose window opened last.
+        /// Pastes test data from a pasteboard of its own (never the user's): "png", "tiff", "jpeg",
+        /// "wordtext" (text with a picture of it, as Word copies), "url+png" (a browser's Copy Image),
+        /// "file" (a file copied in Finder); logs what was attached and the text.
+        func debugPaste(_ kind: String) {
+            let board = NSPasteboard(name: NSPasteboard.Name("mmj-debug-paste"))
+            board.clearContents()
+            let image = NSImage(size: NSSize(width: 40, height: 30), flipped: false) { rect in
+                NSColor.systemRed.setFill()
+                rect.fill()
+                return true
+            }
+            let tiff = image.tiffRepresentation ?? Data()
+            let rep = NSBitmapImageRep(data: tiff)
+            let png = rep?.representation(using: .png, properties: [:]) ?? Data()
+            switch kind {
+            case "empty": break
+            case "text": board.setString("plain words", forType: .string)
+            case "png": board.setData(png, forType: .png)
+            case "tiff": board.setData(tiff, forType: .tiff)
+            case "jpeg":
+                board.setData(rep?.representation(using: .jpeg, properties: [:]) ?? Data(), forType: .init(UTType.jpeg.identifier))
+            case "wordtext":
+                board.setString("Hello from Word", forType: .string)
+                board.setData(tiff, forType: .tiff)
+            case "url+png":
+                board.setString("https://example.com/a.png", forType: .string)
+                board.setData(png, forType: .png)
+            case "file":
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("mmj-paste-test/Report.txt")
+                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? Data("report".utf8).write(to: url)
+                board.writeObjects([url as NSURL])
+            default: return NSLog("MMJ paste: no kind \(kind)")
+            }
+            // Through Edit ▸ Paste as the menu does it: validated (greyed out or not), then sent.
+            textView.pasteboard = board
+            defer { textView.pasteboard = .general }
+            let item = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu?.items.first { $0.action == #selector(NSText.paste(_:)) }
+            let enabled = item.map { textView.validateMenuItem($0) } ?? false
+            let pasted = ComposeTextView.pasted(from: board)
+            let what = switch pasted {
+            case .files(let urls)?: "files \(urls.map(\.lastPathComponent))"
+            case .image(let data, let name)?: "image \(name) (\(data.count) bytes)"
+            case nil: "text"
+            }
+            if enabled { NSApp.sendAction(#selector(NSText.paste(_:)), to: textView, from: item) }
+            NSLog("MMJ paste \(kind): Edit ▸ Paste \(enabled ? "on" : "greyed out"), pastes \(what)")
+            board.clearContents()
+            NSLog("MMJ paste \(kind): \(what) → attachments \(files.map(\.lastPathComponent)) subject “\(subjectField.stringValue)” "
+                + "format \(isMarkdown ? "Markdown" : "Plain") body “\(textView.string.prefix(120).replacingOccurrences(of: "\n", with: "⏎"))”")
+        }
+
+        /// Markdown or Plain Text, as chosen in the format menu.
+        func debugFormat(markdown: Bool) {
+            formatPopup.selectItem(at: markdown ? 0 : 1)
+            if let action = formatPopup.action { NSApp.sendAction(action, to: formatPopup.target, from: formatPopup) }
+        }
+
         static var debugNewest: ComposeWindowController? { open.max { ($0.window?.windowNumber ?? 0) < ($1.window?.windowNumber ?? 0) } }
 
         /// The text with the signature in ⟦ ⟧ and the cursor as |, lines as ⏎.

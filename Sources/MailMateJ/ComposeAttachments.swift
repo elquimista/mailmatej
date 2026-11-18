@@ -361,6 +361,67 @@ extension NSAttributedString {
 /// editor's 30).
 final class ComposeTextView: NSTextView {
     var onDropFiles: ([URL], Int) -> Void = { _, _ in }
+    /// Files or a picture pasted, which are attached rather than pasted as text.
+    var onPaste: (Pasted) -> Void = { _ in }
+    /// Where Paste reads from: the clipboard (tests use one of their own).
+    var pasteboard = NSPasteboard.general
+
+    enum Pasted: Equatable {
+        /// Files copied in Finder.
+        case files([URL])
+        /// A copied picture, as a file's data and the name MailMate gives it.
+        case image(Data, name: String)
+    }
+
+    /// Edit ▸ Paste (⌘V), as MailMate's: files copied in Finder are attached (not their names pasted),
+    /// and so is a copied picture (a screenshot, an image copied in Preview or a browser); text pastes as
+    /// text, also when the app it came from put a picture of it alongside (Word, Pages).
+    override func paste(_ sender: Any?) {
+        guard let pasted = Self.pasted(from: pasteboard) else { return super.paste(sender) }
+        onPaste(pasted)
+    }
+
+    /// Paste is on for files and pictures too: a plain-text view would grey it out (and ignore ⌘V) for a
+    /// clipboard without text, such as a picture copied in a messenger (TIFF alone).
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(paste(_:)), isEditable, Self.attaches(pasteboard) { return true }
+        return super.validateMenuItem(item)
+    }
+
+    /// Whether pasting from `board` attaches something (files, or a picture without text), by its types
+    /// alone: cheap enough for every menu validation.
+    static func attaches(_ board: NSPasteboard) -> Bool {
+        if !files(on: board).isEmpty { return true }
+        guard !hasText(board) else { return false }
+        return board.availableType(from: [.init(UTType.jpeg.identifier), .png]) != nil || NSImage.canInit(with: board)
+    }
+
+    private static func files(on board: NSPasteboard) -> [URL] {
+        ((board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? [])
+            .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+    }
+
+    /// Text to paste as text: any but a lone web address (a browser's Copy Image gives the picture's).
+    private static func hasText(_ board: NSPasteboard) -> Bool {
+        guard let text = board.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+        else { return false }
+        return text.range(of: #"^https?://\S+$"#, options: .regularExpression) == nil
+    }
+
+    static func pasted(from board: NSPasteboard) -> Pasted? {
+        let files = files(on: board)
+        if !files.isEmpty { return .files(files) }
+        guard !hasText(board) else { return nil }
+        if let jpeg = board.data(forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier)) {
+            return .image(jpeg, name: "PastedImage.jpg")
+        }
+        if let png = board.data(forType: .png) { return .image(png, name: "PastedImage.png") }
+        // Anything else that's a picture (TIFF from Preview or Safari, PDF): as PNG, as MailMate attaches it.
+        guard NSImage.canInit(with: board), let image = NSImage(pasteboard: board),
+            let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+        else { return nil }
+        return .image(png, name: "PastedImage.png")
+    }
 
     private static let signatureBand = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
