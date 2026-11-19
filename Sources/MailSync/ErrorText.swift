@@ -20,6 +20,11 @@ public enum ErrorText {
 
     public static func technical(_ error: Error) -> String { String(describing: error) }
 
+    /// A file's size as the Finder gives it ("2.1 MB").
+    public static func fileSize(_ octets: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(octets), countStyle: .file)
+    }
+
     /// Whether the server couldn't be reached at all (offline, connection lost, timed out, server
     /// temporarily unavailable), so the same request may work later, as opposed to being refused.
     public static func isUnreachable(_ error: Error) -> Bool {
@@ -71,6 +76,8 @@ public enum ErrorText {
         switch error {
         case .unauthorized:
             return "The server rejected the sign-in. Check the username and password, or the API token."
+        case .http(413, _, _):
+            return "The server refused the request: it’s larger than the server accepts (HTTP 413)."
         case .http(404, _, _):
             return "No JMAP service was found at that address. Try the full session URL, e.g. https://mail.example.com/jmap/session."
         case .http(let status, _, _) where status >= 500:
@@ -84,6 +91,8 @@ public enum ErrorText {
             return "The server’s reply wasn’t valid JMAP. Check that the address points to a JMAP server."
         case .missingCapability:
             return "This server supports JMAP but not JMAP Mail."
+        case .tooLarge(let limit):
+            return "It’s larger than the server accepts\(limit.map { " (up to \(fileSize($0)))" } ?? "")."
         }
     }
 }

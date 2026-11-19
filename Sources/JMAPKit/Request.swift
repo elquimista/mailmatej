@@ -162,6 +162,8 @@ public enum JMAPError: Error, Sendable, CustomStringConvertible {
     case http(status: Int, body: String, url: URL? = nil)
     case invalidResponse(String)
     case missingCapability(String)
+    /// A file larger than the server takes (`limit`, in octets, if it says).
+    case tooLarge(limit: Int?)
 
     public var description: String {
         switch self {
@@ -170,6 +172,7 @@ public enum JMAPError: Error, Sendable, CustomStringConvertible {
             "HTTP \(status) from \(url?.absoluteString ?? "server"): \(body.prefix(500))"
         case .invalidResponse(let why): "Invalid JMAP response: \(why)"
         case .missingCapability(let cap): "Server does not support \(cap)"
+        case .tooLarge(let limit): "Upload too large\(limit.map { " (limit \($0) octets)" } ?? "")"
         }
     }
 }

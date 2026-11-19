@@ -77,17 +77,30 @@ public actor JMAPClient {
         return try await perform(authorized(URLRequest(url: url))).0
     }
 
-    /// Uploads a file (RFC 8620 §6.1) and returns its blob id.
+    /// Uploads a file (RFC 8620 §6.1) and returns its blob id. Larger than the server takes (by the limit
+    /// its session gives, or refused with 413, as a proxy in front of it may): `JMAPError.tooLarge`.
     public func upload(accountId: String, data: Data, type: String) async throws -> String {
         let session = try await currentSession()
         guard let url = session.uploadURL(accountId: accountId) else {
             throw JMAPError.invalidResponse("bad uploadUrl template")
         }
+        if let limit = session.maxSizeUpload, data.count > limit { throw JMAPError.tooLarge(limit: limit) }
         var request = authorized(URLRequest(url: url))
         request.httpMethod = "POST"
         request.setValue(type, forHTTPHeaderField: "Content-Type")
-        let (body, _) = try await urlSession.upload(for: request, from: data, delegate: RedirectAuthDelegate.shared)
-        let json = try JSONDecoder().decode(JSONValue.self, from: body)
+        let (body, response) = try await urlSession.upload(for: request, from: data, delegate: RedirectAuthDelegate.shared)
+        do {
+            try check(response, body: body)
+        } catch JMAPError.http(413, _, _) {
+            // Under the session's limit, so refused by something with a lower one (a proxy): unknown.
+            throw JMAPError.tooLarge(limit: nil)
+        }
+        let json: JSONValue
+        do {
+            json = try JSONDecoder().decode(JSONValue.self, from: body)
+        } catch {
+            throw JMAPError.invalidResponse("upload answered with \(String(decoding: body.prefix(200), as: UTF8.self))")
+        }
         guard let blobId = json["blobId"]?.stringValue else { throw JMAPError.invalidResponse("upload returned no blobId") }
         return blobId
     }

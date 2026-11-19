@@ -51,29 +51,45 @@ final class StubJMAP: URLProtocol, @unchecked Sendable {
         /// Messages whose changes are refused for good (forbidden, without a conflict).
         private let refused: Set<String>
         private var recorded: [[String]] = []
+        /// Uploads larger than this are refused with 413 and an HTML page, as a proxy in front of the server does.
+        let uploadLimit: Int?
+        /// The upload limit the session gives (its maxSizeUpload).
+        let announcedLimit: Int?
+        private var uploadCount = 0
 
-        init(conflicts: [String: Int], refused: Set<String> = []) {
+        init(conflicts: [String: Int], refused: Set<String> = [], uploadLimit: Int? = nil, announcedLimit: Int? = nil) {
             self.conflicts = conflicts
             self.refused = refused
+            self.uploadLimit = uploadLimit
+            self.announcedLimit = announcedLimit
             StubJMAP.register(self)
         }
+
+        /// How many uploads reached the server.
+        var uploads: Int { lock.withLock { uploadCount } }
+        func uploaded() -> Int { lock.withLock { uploadCount += 1; return uploadCount } }
 
         /// The ids of each Email/set made, sorted.
         var calls: [[String]] { lock.withLock { recorded } }
 
-        func engine() throws -> JMAPAccountSync {
+        var account: AccountRecord {
+            AccountRecord(id: "a", name: "A", sessionURL: "https://\(host)/session", username: "a", authKind: .basic, remoteAccountId: "A")
+        }
+
+        func engine(store: MailStore? = nil) throws -> JMAPAccountSync {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            let account = AccountRecord(
-                id: "a", name: "A", sessionURL: "https://\(host)/session", username: "a", authKind: .basic, remoteAccountId: "A")
             let config = URLSessionConfiguration.ephemeral
             config.protocolClasses = [StubJMAP.self]
             return try JMAPAccountSync(
-                account: account, credentials: .basic(username: "a", password: "p"), store: try MailStore(directory: directory),
+                account: account, credentials: .basic(username: "a", password: "p"), store: try store ?? MailStore(directory: directory),
                 urlSession: URLSession(configuration: config))
         }
 
         func answer(_ name: String, _ arguments: [String: Any]) -> [String: Any] {
             guard name == "Email/set" else { return ["accountId": "A", "state": "1", "list": [], "notFound": []] }
+            if let create = arguments["create"] as? [String: Any] {
+                return ["accountId": "A", "newState": "2", "created": create.mapValues { _ in ["id": "M\(UUID().uuidString.prefix(8))"] }]
+            }
             let ids = ((arguments["update"] as? [String: Any]).map { Array($0.keys) } ?? arguments["destroy"] as? [String] ?? []).sorted()
             let deleting = arguments["destroy"] != nil
             return lock.withLock {
@@ -111,9 +127,18 @@ final class StubJMAP: URLProtocol, @unchecked Sendable {
             return client!.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
         }
         let body: Any
-        if url.path == "/session" {
+        if url.path.hasPrefix("/upload/") {
+            let size = Self.read(request).count
+            let number = server.uploaded()
+            if let limit = server.uploadLimit, size > limit {
+                return reply(url, 413, Data("<html><body><h1>413 Request Entity Too Large</h1></body></html>".utf8), type: "text/html")
+            }
+            body = ["accountId": "A", "blobId": "B\(number)", "type": "image/png", "size": size]
+        } else if url.path == "/session" {
+            var core: [String: Any] = ["maxObjectsInGet": 500, "maxObjectsInSet": 500]
+            if let limit = server.announcedLimit { core["maxSizeUpload"] = limit }
             body = [
-                "capabilities": ["urn:ietf:params:jmap:core": ["maxObjectsInGet": 500, "maxObjectsInSet": 500], "urn:ietf:params:jmap:mail": [:]],
+                "capabilities": ["urn:ietf:params:jmap:core": core, "urn:ietf:params:jmap:mail": [:], "urn:ietf:params:jmap:submission": [:]],
                 "accounts": ["A": ["name": "a", "isPersonal": true, "isReadOnly": false, "accountCapabilities": ["urn:ietf:params:jmap:mail": [:]]]],
                 "primaryAccounts": ["urn:ietf:params:jmap:mail": "A"], "username": "a", "apiUrl": "https://\(server.host)/api",
                 "downloadUrl": "https://\(server.host)/download/{accountId}/{blobId}/{name}?type={type}",
@@ -130,9 +155,12 @@ final class StubJMAP: URLProtocol, @unchecked Sendable {
                 },
             ]
         }
-        let data = try! JSONSerialization.data(withJSONObject: body)
+        reply(url, 200, try! JSONSerialization.data(withJSONObject: body), type: "application/json")
+    }
+
+    private func reply(_ url: URL, _ status: Int, _ data: Data, type: String) {
         client!.urlProtocol(
-            self, didReceive: HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+            self, didReceive: HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": type])!,
             cacheStoragePolicy: .notAllowed)
         client!.urlProtocol(self, didLoad: data)
         client!.urlProtocolDidFinishLoading(self)

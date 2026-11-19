@@ -798,6 +798,7 @@ public actor JMAPAccountSync {
     /// it to Sent and clears `$draft`. Bcc recipients are only in the envelope, never in the message.
     /// `replacingDrafts`: the drafts it was written in, removed once it's sent.
     public func send(_ message: OutgoingMessage, replacingDrafts: [String] = []) async throws {
+        tooLarge = [:]  // sending tries a refused file again: the server's limit may have been raised since
         let session = try await client.currentSession()
         guard session.supports(Capability.submission) else { throw JMAPError.missingCapability(Capability.submission) }
         let accountId = try remoteAccountId(session)
@@ -925,10 +926,21 @@ public actor JMAPAccountSync {
     /// upload its files again.
     private var uploads: [String: String] = [:]
 
+    /// Files the server refused as too large, by their contents' hash, so each autosave of the draft
+    /// doesn't upload them again only to be refused again (Send does).
+    private var tooLarge: [String: Int?] = [:]
+
     private func upload(_ file: OutgoingFile, accountId: String) async throws -> String {
         let key = SHA256.hash(data: file.data).map { String(format: "%02x", $0) }.joined()
         if let blobId = uploads[key] { return blobId }
-        let blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
+        if let limit = tooLarge[key] { throw SendError.tooLarge(name: file.name, size: file.data.count, limit: limit) }
+        let blobId: String
+        do {
+            blobId = try await client.upload(accountId: accountId, data: file.data, type: file.type)
+        } catch JMAPError.tooLarge(let limit) {
+            tooLarge[key] = limit
+            throw SendError.tooLarge(name: file.name, size: file.data.count, limit: limit)
+        }
         uploads[key] = blobId
         return blobId
     }
@@ -1115,11 +1127,16 @@ public actor JMAPAccountSync {
     public enum SendError: Error, LocalizedError {
         case noMailbox(role: String)
         case rejected(String)
+        /// An attached file larger than the server takes (`limit`, if it says).
+        case tooLarge(name: String, size: Int, limit: Int?)
 
         public var errorDescription: String? {
             switch self {
             case .noMailbox(let role): "This account has no \(role == "drafts" ? "Drafts" : role) mailbox."
             case .rejected(let why): "The server didn’t send the message (\(why))."
+            case .tooLarge(let name, let size, let limit):
+                "“\(name)” (\(ErrorText.fileSize(size))) is larger than the server accepts"
+                    + (limit.map { " (up to \(ErrorText.fileSize($0)))" } ?? "") + ". Remove it, or attach a smaller file."
             }
         }
     }

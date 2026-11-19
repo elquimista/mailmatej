@@ -62,6 +62,8 @@ public struct Session: Decodable, Sendable {
     public var maxObjectsInGet: Int { capabilities[Capability.core]?["maxObjectsInGet"]?.intValue ?? 500 }
     public var maxCallsInRequest: Int { capabilities[Capability.core]?["maxCallsInRequest"]?.intValue ?? 16 }
     public var maxConcurrentRequests: Int { capabilities[Capability.core]?["maxConcurrentRequests"]?.intValue ?? 4 }
+    /// The largest file the server takes in one upload, in octets, if it says.
+    public var maxSizeUpload: Int? { capabilities[Capability.core]?["maxSizeUpload"]?.intValue }
 
     public var primaryMailAccountId: String? { primaryAccounts[Capability.mail] }
 
