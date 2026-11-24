@@ -494,6 +494,10 @@ actor IMAPConnection {
         task = URLSession.shared.streamTask(withHostName: host, port: port)
     }
 
+    /// Dropped while still connecting (its greeting timed out), the task must be cancelled: CFNetwork
+    /// otherwise uses it after it's freed once the connection fails, and the app crashes (tested).
+    deinit { task.cancel() }
+
     func open() async throws {
         task.startSecureConnection()
         task.resume()
@@ -505,7 +509,7 @@ actor IMAPConnection {
     }
 
     func send(_ data: Data) async throws {
-        try await task.write(data, timeout: 60)
+        try await task.writeOnce(data, timeout: 60)
     }
 
     /// One response, parsed.
@@ -541,7 +545,7 @@ actor IMAPConnection {
     }
 
     private func fill(timeout: Double = 120) async throws {
-        let (data, atEnd) = try await task.readData(ofMinLength: 1, maxLength: 1 << 20, timeout: timeout)
+        let (data, atEnd) = try await task.readOnce(minLength: 1, maxLength: 1 << 20, timeout: timeout)
         if let data, !data.isEmpty {
             if bufferStart > 0, bufferStart > buffer.count / 2 {
                 buffer.removeFirst(bufferStart)

@@ -109,10 +109,15 @@ final class SMTPConnection: @unchecked Sendable {
 
     private let task: URLSessionStreamTask
     private var buffer: [UInt8] = []
+    private let timeout: Double
 
-    init(host: String, port: Int) {
+    init(host: String, port: Int, timeout: Double = 120) {
         task = URLSession.shared.streamTask(withHostName: host, port: port)
+        self.timeout = timeout
     }
+
+    /// Cancelled when dropped: CFNetwork uses a task it is still connecting after it's freed (a crash).
+    deinit { task.cancel() }
 
     func open() {
         task.startSecureConnection()
@@ -130,7 +135,7 @@ final class SMTPConnection: @unchecked Sendable {
 
     func write(_ data: Data) async throws {
         do {
-            try await task.write(data, timeout: 120)
+            try await task.writeOnce(data, timeout: timeout)
         } catch {
             throw GmailSMTP.SMTPError.closed
         }
@@ -164,7 +169,7 @@ final class SMTPConnection: @unchecked Sendable {
             }
             let data: Data?, atEnd: Bool
             do {
-                (data, atEnd) = try await task.readData(ofMinLength: 1, maxLength: 65536, timeout: 120)
+                (data, atEnd) = try await task.readOnce(minLength: 1, maxLength: 65536, timeout: timeout)
             } catch {
                 throw GmailSMTP.SMTPError.closed
             }
