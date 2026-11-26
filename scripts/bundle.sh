@@ -23,6 +23,13 @@ APP="build/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/MailMateJ" "$APP/Contents/MacOS/MailMateJ"
+if [ "$CONFIG" = "release" ]; then
+  # Drops the debug map (the paths of the object files in .build; the debug info itself stays there),
+  # 2.4 MB of it; function names stay, so crash reports still name them. The linker's signature goes
+  # first, as stripping breaks it (the app is signed below).
+  codesign --remove-signature "$APP/Contents/MacOS/MailMateJ"
+  strip -S "$APP/Contents/MacOS/MailMateJ"
+fi
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy \
   -c "Set :CFBundleName $NAME" -c "Set :CFBundleDisplayName $NAME" -c "Set :CFBundleIdentifier $BUNDLE_ID" \
