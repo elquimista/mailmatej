@@ -821,6 +821,23 @@ import Testing
         #expect(MailStore.thread(rows, expanded: [keys[1]!]).map(\.replyCount) == [3, 1, 0, 1])
     }
 
+    /// a, answered by b, answered by c (unread); d answers a. Opening the thread shows b folded: it
+    /// stands for c, so it carries the unread mark, as the thread's first row does while closed.
+    @Test func threadsMarkAnUnreadReplyOnTheMessagesAboveIt() {
+        typealias T = MailStore.ThreadInput
+        let rows = [
+            T(id: 1, at: 10, seen: true, messageId: "a"), T(id: 2, at: 20, seen: true, messageId: "b", inReplyTo: "a"),
+            T(id: 3, at: 30, seen: false, messageId: "c", inReplyTo: "b"), T(id: 4, at: 40, seen: true, messageId: "d", inReplyTo: "a"),
+        ]
+        let key = MailStore.threadKeys(rows)[1]!
+        let unread = { (rows: [MailStore.ThreadedRow]) in rows.filter(\.anyUnread).map(\.id) }
+        #expect(unread(MailStore.thread(rows, expanded: [])) == [1])
+        #expect(unread(MailStore.thread(rows, expanded: [key])) == [1, 2])  // not d, with nothing under it
+        #expect(unread(MailStore.thread(rows, expanded: [key], opened: [2])) == [1, 2, 3])  // c itself
+        let read = rows.map { var row = $0; row.seen = true; return row }
+        #expect(unread(MailStore.thread(read, expanded: [key])).isEmpty)
+    }
+
     @Test func threadsSortedByDateGoWhereTheirNewestMessageIs() {
         typealias T = MailStore.ThreadInput
         // Oldest first: a (answered today by a3), b, c, a3. The new reply brings thread a to the bottom,

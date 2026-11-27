@@ -2748,6 +2748,38 @@ extension MainWindowController {
             return list.ids.count
         }
 
+        /// Marks `leaf` unread, then shows `root`'s thread closed, open, and with the branch over `leaf` open
+        /// (as the chevrons would), logging the read rows that stand for unread replies at each step and
+        /// where Next Unread Message goes from the first row; then marks `leaf` read again.
+        func debugNestedUnread(root: Int64, leaf: Int64, capture: (String) -> Void) async {
+            perform(.markUnread, on: [leaf])
+            try? await Task.sleep(for: .seconds(1))
+            guard let thread = list.threadRows[root]?.thread else { return NSLog("MMJ nested: \(root) isn't listed") }
+            func step(_ name: String) async {
+                try? await Task.sleep(for: .seconds(1))
+                let rows = list.ids.compactMap { list.threadRows[$0] }.filter { $0.thread == thread }
+                if let last = rows.last.flatMap({ list.ids.firstIndex(of: $0.id) }) { list.tableView.scrollRowToVisible(last) }
+                NSLog("MMJ nested \(name): rows \(rows.map { "\($0.id)@\($0.depth)" }) unread-under \(list.debugUnreadThreads())")
+                capture(name)
+            }
+            setThread(thread, collapsed: true)
+            await step("closed")
+            setThread(thread, collapsed: false)
+            await step("open")
+            if let first = list.ids.firstIndex(of: root) {
+                list.tableView.selectRowIndexes([first], byExtendingSelection: false)
+                nextUnreadMessage(nil)
+                NSLog("MMJ nested: Next Unread Message from \(root) selects \(list.selectedIDs)")
+            }
+            if let branch = list.ids.compactMap({ list.threadRows[$0] }).first(where: { $0.thread == thread && $0.depth > 0 && $0.hasReplies }) {
+                toggle(branch, collapse: false)
+            }
+            await step("branch")
+            perform(.markRead, on: [leaf])
+            setThread(thread, collapsed: true)
+            try? await Task.sleep(for: .seconds(1))
+        }
+
         /// Stacks these messages in the pane, as a selection of them would; then each card as drawn.
         func debugShowStack(_ ids: [Int64]) async -> String {
             messageView.show(messageID: nil, selection: ids)
@@ -2853,7 +2885,8 @@ extension MainWindowController {
                 guard (row?.depth ?? 0) == 0 else { return false }
                 return unread.contains(id) || row?.anyUnread == true
             }
-            return unread.contains(id) || (row.map { $0.depth == 0 && $0.size > 1 && $0.anyUnread } ?? false)
+            // A folded row stands for the unread reply hidden under it.
+            return unread.contains(id) || (row.map(rows.hidesUnread) ?? false)
         }
         guard let match else { return NSSound.beep() }
         selectRow(match)

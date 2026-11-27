@@ -774,6 +774,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_STACK_FIND"], let controller = windowController {
                     await debugStackFind(controller, rows: spec)
                 }
+                // MMJ_DEBUG_NESTED_UNREAD="<root id>,<leaf id>": a reply two levels down, unread (see debugNestedUnread).
+                if let spec = ProcessInfo.processInfo.environment["MMJ_DEBUG_NESTED_UNREAD"], let controller = windowController {
+                    let ids = spec.split(separator: ",").compactMap { Int64($0) }
+                    if ids.count == 2 {
+                        // Drawn into an image (the window may be behind others, not redrawn on screen).
+                        await controller.debugNestedUnread(root: ids[0], leaf: ids[1]) { suffix in
+                            writeSnapshot(of: controller.window, to: path.replacingOccurrences(of: ".png", with: "-\(suffix).png"))
+                        }
+                    }
+                }
                 if ProcessInfo.processInfo.environment["MMJ_DEBUG_WINDOW_NEXT"] != nil, let controller = windowController {
                     await debugWindowNext(controller)
                 }

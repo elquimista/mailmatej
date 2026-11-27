@@ -1372,7 +1372,8 @@ public final class MailStore: Sendable {
         public var depth: Int
         /// How many messages the thread has in this list (on its first row; 1 elsewhere).
         public var size: Int
-        /// Whether any message of the thread is unread (on its first row).
+        /// Whether this message or a reply under it, at any depth, is unread: a folded row shows bold for
+        /// it, as MailMate does (on the first row, any message of the thread).
         public var anyUnread: Bool
         /// Whether a reply under this message, at any depth, is flagged: a folded row shows a hollow flag
         /// for it, as MailMate does.
@@ -1683,26 +1684,27 @@ public final class MailStore: Sendable {
                 newestAt: messages.last!.at))
             guard expanded.contains(thread) else { continue }
             var placed: Set<Int64> = [topID]
-            // The replies anywhere under `id`: how many, and whether one is flagged.
-            func replies(under id: Int64) -> (count: Int, flagged: Bool) {
+            // The replies anywhere under `id`: how many, and whether one is flagged or unread.
+            func replies(under id: Int64) -> (count: Int, flagged: Bool, unread: Bool) {
                 var seen: Set<Int64> = [id]
                 var queue = [id]
-                var flagged = false
+                var flagged = false, unread = false
                 while let next = queue.popLast() {
                     for child in children[next] ?? [] where seen.insert(child.id).inserted {
                         flagged = flagged || child.flagged
+                        unread = unread || !child.seen
                         queue.append(child.id)
                     }
                 }
-                return (seen.count - 1, flagged)
+                return (seen.count - 1, flagged, unread)
             }
             func walk(_ id: Int64, depth: Int) {
                 for child in children[id] ?? [] where placed.insert(child.id).inserted {
                     let hasReplies = (children[child.id] ?? []).contains { !placed.contains($0.id) }
-                    let under = hasReplies ? replies(under: child.id) : (count: 0, flagged: false)
+                    let under = hasReplies ? replies(under: child.id) : (count: 0, flagged: false, unread: false)
                     result.append(ThreadedRow(
-                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: false, flaggedReply: under.flagged,
-                        replyCount: under.count, hasReplies: hasReplies, newestAt: child.at))
+                        id: child.id, thread: thread, depth: depth, size: 1, anyUnread: !child.seen || under.unread,
+                        flaggedReply: under.flagged, replyCount: under.count, hasReplies: hasReplies, newestAt: child.at))
                     if opened.contains(child.id) { walk(child.id, depth: depth + 1) }
                 }
             }

@@ -78,7 +78,8 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     /// Fold or open a row's replies (its chevron, or ← and → on it): the whole thread on its first row.
     var onToggleThread: ((MailStore.ThreadedRow, Bool) -> Void)?
 
-    private func isFolded(_ row: MailStore.ThreadedRow) -> Bool {
+    /// Whether a row's replies are hidden: a thread's first row by the thread, any other by its own.
+    func isFolded(_ row: MailStore.ThreadedRow) -> Bool {
         row.depth == 0 ? !expandedThreads.contains(row.thread) : !openedMessages.contains(row.id)
     }
 
@@ -663,26 +664,32 @@ final class MessageListViewController: NSViewController, NSTableViewDataSource, 
     // MARK: NSTableViewDataSource / Delegate
 
     #if DEBUG
-        /// Closed threads whose first message is read but which have unread replies, with their text weight.
+        /// Read rows with unread replies (at any depth), with their depth and text weight.
         func debugUnreadThreads() -> [String] {
             ids.indices.compactMap { index in
-                guard let row = row(at: index), row.isSeen, let thread = threadRows[row.id], thread.size > 1, thread.anyUnread
+                guard let row = row(at: index), row.isSeen, let thread = threadRows[row.id], thread.hasReplies, thread.anyUnread
                 else { return nil }
                 let cell = tableView(tableView, viewFor: tableView.tableColumns.first { $0.identifier.rawValue == Column.subject.rawValue }, row: index) as? NSTableCellView
                 let weight = cell?.textField?.font.map { NSFontManager.shared.weight(of: $0) } ?? -1
-                return "\(row.id) open=\(expandedThreads.contains(thread.thread)) dot=\(showsUnread(row)) weight=\(weight)"
+                return "\(row.id) depth=\(thread.depth) open=\(!isFolded(thread)) dot=\(showsUnread(row)) weight=\(weight)"
             }
         }
     #endif
 
     func numberOfRows(in tableView: NSTableView) -> Int { ids.count }
 
-    /// Unread dot and bold text, as MailMate shows them: a closed thread is unread if any of its messages
-    /// is; any other row goes by its own message (which `showSeen` changes at once).
+    /// Unread dot and bold text, as MailMate shows them: a folded row (a closed thread, or a message
+    /// inside one whose replies are hidden) is unread if a message it stands for is; any other row goes
+    /// by its own message (which `showSeen` changes at once).
     private func showsUnread(_ row: MessageRow) -> Bool {
         if !row.isSeen { return true }
         guard let thread = threadRows[row.id] else { return false }
-        return thread.size > 1 && thread.anyUnread && !expandedThreads.contains(thread.thread)
+        return hidesUnread(thread)
+    }
+
+    /// A folded row with an unread reply under it (the replies hidden).
+    func hidesUnread(_ row: MailStore.ThreadedRow) -> Bool {
+        row.hasReplies && row.anyUnread && isFolded(row)
     }
 
     /// A folded row with a flagged reply under it (the replies hidden).
